@@ -1083,6 +1083,7 @@ mod desk {
 
     fn window(id: u64, focused: bool) -> WindowInfo {
         WindowInfo {
+            client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {

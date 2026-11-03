@@ -632,6 +632,12 @@ pub(crate) struct Decoration {
     /// what tells a frame of the style in charge from one a switch has left
     /// behind (#226). Written by `Decorations`, which is what builds frames.
     built: Built,
+    /// Whether it frames a window whose application draws its own titlebar
+    /// (#462): built from [`Style::drawn_by_client`], so it reserves the
+    /// style's `clientSideInsets` and its layers were told `clientSide`. A
+    /// frame of the other kind is built again rather than told, since the
+    /// insets it reserves are fixed when it is built.
+    client_side: bool,
 }
 
 /// Where a pane reads its own client radii from (#454): a `PaneStyle` told
@@ -775,6 +781,7 @@ impl Decoration {
             buffer_size: (0, 0),
             shown: Shown::default(),
             built: Built::default(),
+            client_side: false,
         })
     }
 
@@ -806,16 +813,18 @@ impl Decoration {
     fn of_layers(style: &Style, layers: Vec<LayerScene>) -> Result<Self> {
         let corners_from = match style.layers.iter().position(|spec| spec.source.is_none()) {
             Some(inline) => CornersFrom::Layer(inline),
-            None => CornersFrom::Own(
-                qml::Scene::for_frame(&style.dir.join("Pane.qml"), 1, 1, None).with_context(
-                    || {
-                        format!(
-                            "building the manifest of {} for its radii",
-                            style.dir.display()
-                        )
-                    },
-                )?,
-            ),
+            None => {
+                let mut manifest = qml::Scene::for_frame(&style.dir.join("Pane.qml"), 1, 1, None)
+                    .with_context(|| {
+                    format!(
+                        "building the manifest of {} for its radii",
+                        style.dir.display()
+                    )
+                })?;
+                // Its radii may follow which kind of window it frames.
+                manifest.set_bool("clientSide", style.client_side);
+                CornersFrom::Own(manifest)
+            }
         };
         Ok(Self {
             layers,
@@ -839,7 +848,13 @@ impl Decoration {
             buffer_size: (0, 0),
             shown: Shown::default(),
             built: Built::default(),
+            client_side: style.client_side,
         })
+    }
+
+    /// Whether it frames a window whose application draws its own titlebar.
+    pub(crate) const fn client_side(&self) -> bool {
+        self.client_side
     }
 
     /// The style this frame was built from, as a script named it: `None` for
@@ -1784,6 +1799,11 @@ impl LayerScene {
         // the window declares neither and is handed a property it ignores.
         scene.set_int("bleedLeft", spec.bleed.left);
         scene.set_int("bleedTop", spec.bleed.top);
+        // Which window it frames (#462): one whose application draws its own
+        // titlebar is framed with `clientSideInsets`, and the layer draws
+        // around it what it can. Written once, as the insets are: a frame of
+        // the other kind is built again.
+        scene.set_bool("clientSide", style.client_side);
         // And what the style reserved, for the same reason and on the same
         // terms: written once, because a declared inset never changes either.
         //
@@ -2540,11 +2560,17 @@ impl Decorations {
                 continue;
             }
             if pane.spare().is_none_or(|spare| spare.built != target) {
-                to_build.push((pane.id(), decoration.client_size()));
+                to_build.push((
+                    pane.id(),
+                    decoration.client_size(),
+                    decoration.client_side(),
+                ));
             }
         }
-        for (pane, (width, height)) in to_build {
-            let work = self.plan(width, height);
+        // A window whose application draws its own titlebar is framed so in
+        // the new style too.
+        for (pane, (width, height), client_side) in to_build {
+            let work = self.plan(width, height, client_side);
             self.building.push(Building { pane, work });
         }
         if self.building.iter().all(Building::finished) {
@@ -2556,6 +2582,24 @@ impl Decorations {
 
     /// Build this pane's frame, unless it has one or the style says not to.
     pub(crate) fn insert(&mut self, panes: &mut Panes, id: PaneId, width: i32, height: i32) {
+        self.insert_drawn(panes, id, width, height, false);
+    }
+
+    /// Build this pane's frame for a window whose application draws its own
+    /// titlebar (`client_side`, #462) or one that does not, unless it has
+    /// that frame already or the style says not to. A frame of the other kind
+    /// is built again: the insets a frame reserves are fixed when it is built.
+    /// A single-file decoration has no `clientSideInsets` to draw by, so a
+    /// window drawing its own titlebar is left bare under one.
+    /// `state::tests::real_client::reflow_on_close::framing::a_client_drawn_window_is_framed_with_the_styles_client_side_insets`.
+    pub(crate) fn insert_drawn(
+        &mut self,
+        panes: &mut Panes,
+        id: PaneId,
+        width: i32,
+        height: i32,
+        client_side: bool,
+    ) {
         let Some(pane) = panes.get_mut(id) else {
             // No pane to give it to. Unreachable from every call site, all of
             // which hold a live pane -- and the reason a `Decoration` is not
@@ -2563,10 +2607,18 @@ impl Decorations {
             // gone is a Qt scene nothing will ever free.
             return;
         };
-        if matches!(pane.frame(), Frame::Styled(_)) {
-            return;
+        match pane.decoration().map(Decoration::client_side) {
+            Some(built) if built == client_side => return,
+            Some(_) => {
+                pane.set_frame(Frame::Pending);
+                pane.set_spare(None);
+            }
+            None => {}
         }
-        if bare(self.style.as_deref()) {
+        if bare(self.style.as_deref())
+            || (client_side
+                && bundle(Some(self.style.as_deref().unwrap_or(DEFAULT_STYLE))).is_none())
+        {
             pane.set_frame(Frame::None);
             return;
         }
@@ -2576,7 +2628,7 @@ impl Decorations {
         // written here first, where `self.bare.remove(&id)` had stood, and the
         // failure arm wrote nothing, so that `Pending` was where a pane whose
         // frame would not build was left.
-        match self.build(width, height) {
+        match self.build(width, height, client_side) {
             Ok(decoration) => pane.set_frame(Frame::Styled(Box::new(decoration))),
             Err(err) => {
                 // An undecorated window is worse than a decorated one and much
@@ -2677,7 +2729,7 @@ impl Decorations {
     /// rather than left to `qml_path`, which used to answer this with
     /// `shipped_decoration("top")`: that file is a folder now, so the default
     /// has to be a *name* looked up where bundles are.
-    fn plan(&mut self, width: i32, height: i32) -> Work {
+    fn plan(&mut self, width: i32, height: i32, client_side: bool) -> Work {
         let style = Some(self.style.as_deref().unwrap_or(DEFAULT_STYLE));
         let Some(dir) = bundle(style) else {
             // Not a bundle, so a single QML file -- and if it is not one of
@@ -2707,7 +2759,11 @@ impl Decorations {
         }
         Work::Layers {
             layers: Vec::with_capacity(declared.layers.len()),
-            style: declared,
+            style: if client_side {
+                declared.drawn_by_client()
+            } else {
+                declared
+            },
             dir,
             size: (width, height),
         }
@@ -2725,8 +2781,8 @@ impl Decorations {
     }
 
     /// A frame of the style in charge, built now.
-    fn build(&mut self, width: i32, height: i32) -> Result<Decoration> {
-        let mut decoration = self.plan(width, height).run()?;
+    fn build(&mut self, width: i32, height: i32, client_side: bool) -> Result<Decoration> {
+        let mut decoration = self.plan(width, height, client_side).run()?;
         decoration.built = self.target();
         Ok(decoration)
     }
@@ -5766,7 +5822,7 @@ mod tests {
             style: style.map(ToOwned::to_owned),
             ..Decorations::default()
         };
-        decorations.build(width, height)
+        decorations.build(width, height, false)
     }
 
     /// Whether this session has already decided which decoration to use.

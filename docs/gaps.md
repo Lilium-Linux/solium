@@ -68,7 +68,7 @@ several are missing:
 | Live effect tuning | Effect files and shipped effects exist; schema-driven live tuning and presets remain planned. | [#259](https://github.com/Lilium-Linux/solium/issues/259) |
 | Fast-resize glass | Backdrop quality during very fast resize still needs work. | [#262](https://github.com/Lilium-Linux/solium/issues/262) |
 | Minimizing and morphs | Minimize and its way back exist (#30), with the genie into a fixed strip; an effects-driven minimize, live icon anchors and cross-scene flights/morphs do not. | [#202](https://github.com/Lilium-Linux/solium/issues/202), [#204](https://github.com/Lilium-Linux/solium/issues/204), [#205](https://github.com/Lilium-Linux/solium/issues/205), [#206](https://github.com/Lilium-Linux/solium/issues/206), [#207](https://github.com/Lilium-Linux/solium/issues/207) |
-| Other client protocols | KDE server-decoration, security-context and alpha-modifier remain missing. | [#61](https://github.com/Lilium-Linux/solium/issues/61), [#68](https://github.com/Lilium-Linux/solium/issues/68), [#75](https://github.com/Lilium-Linux/solium/issues/75) |
+| Other client protocols | Security-context and alpha-modifier remain missing. | [#68](https://github.com/Lilium-Linux/solium/issues/68), [#75](https://github.com/Lilium-Linux/solium/issues/75) |
 
 ## Session and reliability
 

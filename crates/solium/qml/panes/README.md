@@ -62,6 +62,7 @@ PaneStyle {
 | on `PaneStyle` | |
 |---|---|
 | `insets.top`, `.right`, `.bottom`, `.left` | what the style reserves from the client, **once, for the whole style** |
+| `clientSideInsets.top`, `.right`, `.bottom`, `.left` | what it reserves instead around a window whose application draws its own titlebar (#462): a GTK4 or libadwaita headerbar, Firefox's tabs, any client `frames` in `config.lua` leaves its own titlebar. None unless declared, so the style draws its border, shadow, corners and focus around such a window and leaves the bar to the application. A style with no bar, such as `border/`, declares the same as `insets`. Every layer of such a frame is told `clientSide` and these four as its `inset…` |
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today: the software scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to paint on it, so a style using either says so. A style whose terms this session cannot meet, or that names one this build has never heard of, is refused rather than drawn wrong: its windows are left bare, and the log names the term. A nested session renders in software under the default `qml.renderer = "auto"` |
 | `client.radius` | rounds the client's own surfaces, in logical pixels. The compositor cuts the corners as it draws the client, at no extra cost: no pass and no copy of the window (see "What it costs"). `0` is no effect at all, and so is leaving the key out — which is what nine of the twelve bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `glass/`, `rounded/` and `flush/` are the three that round |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` and `glass/` are the shipped examples |
@@ -154,6 +155,12 @@ Every frame:
 | `pointerInside` | whether the pointer is anywhere over the window |
 | `contentWidth`, `contentHeight` | the client's size, inside the insets |
 | `paneWidth`, `paneHeight` | the window's own outer size |
+
+Once, when the frame is built:
+
+| property | |
+|---|---|
+| `clientSide` | whether the window's application draws its own titlebar (#462). A bar layer hides itself (`visible: !clientSide`) and a border keeps drawing; `client.radius…` may follow it, as `glass/` rounds its bottom corners only then. A window that changes which it is gets a frame built again, so this never changes on a frame. Declared on `PaneStyle`; a delegated layer declares `property bool clientSide: false` |
 
 When they change, in place, and to a frame built later as well:
 

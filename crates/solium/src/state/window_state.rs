@@ -151,8 +151,8 @@ fn answer_unchanged(window: &Window) {
     }
 }
 
-/// Whether a window's client draws its own frame, so leaving fullscreen
-/// builds none over it.
+/// Whether a window's client draws its own titlebar, so leaving fullscreen
+/// frames it client-side (#462).
 ///
 /// An xdg client says so through `xdg_decoration`, and is asked again rather
 /// than assumed, since `is_bare` cannot tell a frame that was dropped for the
@@ -355,16 +355,21 @@ impl Solium {
         // its frame comes back and it is moved.
         let start = self.drawn_before(id);
 
-        // The frame comes back unless the client draws its own.
-        if !draws_its_own_frame(window) {
-            self.decorations.unset_bare(&mut self.panes, id);
-            let size = self
-                .real_geometry(window)
-                .map_or((TITLEBAR_HEIGHT * 20, TITLEBAR_HEIGHT * 15), |real| {
-                    (real.size.w, real.size.h)
-                });
-            self.decorations.insert(&mut self.panes, id, size.0, size.1);
-        }
+        // The frame comes back, client-side for a client that draws its own
+        // titlebar (#462).
+        self.decorations.unset_bare(&mut self.panes, id);
+        let size = self
+            .real_geometry(window)
+            .map_or((TITLEBAR_HEIGHT * 20, TITLEBAR_HEIGHT * 15), |real| {
+                (real.size.w, real.size.h)
+            });
+        self.decorations.insert_drawn(
+            &mut self.panes,
+            id,
+            size.0,
+            size.1,
+            draws_its_own_frame(window),
+        );
 
         // Where it goes, decided after the frame is back -- a maximised
         // window's share of the work area depends on it -- and before the

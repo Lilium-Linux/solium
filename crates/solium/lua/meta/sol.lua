@@ -79,7 +79,8 @@
 ---@field shown boolean Whether its application has shown its first frame yet.
 ---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
 ---@field maximized boolean Whether the compositor last told it to be maximised: `sol.toggle_maximize`, `super+shift+m`, the frame's button, or its client's own request, xdg or X11. A layout taking over lets such a window out of it first (`modes.lua`), so it goes into its tile; a client's own maximise never lifts a window out of a tile, and a tile given to a window its client maximised takes it out of the maximise.
----@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, drawing its own decorations, or under the style `"none"`.
+---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, or under the style `"none"`.
+---@field client_side boolean Whether its application draws its own titlebar and its frame is the style's client-side one (`frames` in config.lua, #462): what a rule's `client_side` matches.
 ---@field insets {top: integer, right: integer, bottom: integer, left: integer} What its frame takes of `x`, `y`, `w` and `h` on each side right now, a titlebar the frame has grown (`growTop`) included: the client is that rectangle less these. All 0 for a window drawn bare.
 ---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
 ---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. Not what decides whether a window reaches this list at all (#221) -- an ICCCM 'Globally Active' application can set this `false` and still be an ordinary, shown window -- so a row here can read `false`; it exists for a window rule to act on.
@@ -144,7 +145,7 @@
 ---no caret.
 ---@class sol.TextField
 ---@field window integer The window's id, as `sol.windows()` gives it.
----@field framed boolean Whether the window is drawn in a frame of the compositor's, or will be once its frame is built, so its pane style's layers are drawn with it. False for a window drawn bare: fullscreen, one drawing its own decorations, every window under the pane style `"none"`.
+---@field framed boolean Whether the window is drawn in a frame of the compositor's, or will be once its frame is built, so its pane style's layers are drawn with it. False for a window drawn bare: fullscreen, or every window under the pane style `"none"`.
 ---@field x? number The caret's rectangle, where it is drawn: its window's place and scale on screen are in it, presentation transforms included.
 ---@field y? number
 ---@field w? number
@@ -423,6 +424,21 @@
 ---X11 windows refused a tile, decoration or bar entry outright (#221). A key
 ---left out, or the whole table left out, keeps the default rather than
 ---emptying it.
+---Who draws a Wayland window's frame (#462).
+---@alias sol.FramePolicy
+---| "prefer" # Solium's frame for an application that leaves it to Solium or asks for it; none for one that asks to draw its own or never says. The default.
+---| "force" # Solium's frame on every window; an application asking to draw its own is told Solium draws it.
+---| "allow" # The application's own frame unless it asks for Solium's.
+
+---One application's policy, or several's: `app_id` exact, `*`, or a prefix ending in `*`.
+---@class sol.FrameRule
+---@field match { app_id: string }
+---@field policy sol.FramePolicy
+
+---@class sol.FramesOptions
+---@field policy? sol.FramePolicy Every window's policy but those a rule names. Default `"prefer"`.
+---@field rules? sol.FrameRule[] The last rule matching a window's `app_id` wins over `policy`.
+
 ---Shells that are their own programs, through wlr-layer-shell (#461).
 ---@class sol.LayerShellOptions
 ---@field input_below? boolean|string[] Which client layer surfaces on the bottom and background layers take the pointer and touch: `true` every one (the default), `false` none, so a press passes through to what is under them, or a list of namespaces, each exact, `*`, or a prefix ending in `*`. Surfaces above the windows always take input.
@@ -1098,6 +1114,14 @@ function sol.lock_peek(progress) end
 ---@param options? sol.X11Options
 ---@return nil
 function sol.x11(options) end
+
+---Who draws a Wayland window's frame, Solium or the application:
+---`config.frames`, which the shipped `init.lua` hands over. A change reframes
+---the windows already open. A broken table is refused whole, the default kept
+---and the reason logged. See #462.
+---@param options? sol.FramesOptions
+---@return nil
+function sol.frames(options) end
 
 ---Which client layer surfaces below the windows take the pointer and touch:
 ---`config.layer_shell`, which the shipped `init.lua` hands over. See #461.

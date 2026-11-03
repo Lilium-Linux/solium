@@ -104,6 +104,9 @@ pub(crate) struct Match {
     pub(crate) maximized: Option<bool>,
     pub(crate) monitor: Option<Glob>,
     pub(crate) style: Option<Glob>,
+    /// Whether the window's application draws its own titlebar, and its frame
+    /// is the style's client-side one (#462).
+    pub(crate) client_side: Option<bool>,
     pub(crate) surface: Option<Glob>,
     pub(crate) layer_shell: Option<Glob>,
     /// `values = { key = value }`: what the configuration handed the window
@@ -268,7 +271,7 @@ const KEYS: [&str; 9] = [
 ];
 const FADE_KEYS: [&str; 2] = ["duration", "easing"];
 const CUTS: [&str; 2] = ["below", "background"];
-const WINDOW_KEYS: [&str; 8] = [
+const WINDOW_KEYS: [&str; 9] = [
     "app_id",
     "title",
     "focused",
@@ -276,9 +279,10 @@ const WINDOW_KEYS: [&str; 8] = [
     "maximized",
     "monitor",
     "style",
+    "client_side",
     "values",
 ];
-const MATCH_KEYS: [&str; 10] = [
+const MATCH_KEYS: [&str; 11] = [
     "app_id",
     "title",
     "focused",
@@ -286,6 +290,7 @@ const MATCH_KEYS: [&str; 10] = [
     "maximized",
     "monitor",
     "style",
+    "client_side",
     "values",
     "surface",
     "layer_shell",
@@ -664,13 +669,14 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
                 family_keys.join(", ")
             ));
         }
-        if let "focused" | "fullscreen" | "maximized" = key.as_str() {
+        if let "focused" | "fullscreen" | "maximized" | "client_side" = key.as_str() {
             let Tree::Bool(yes) = value else {
                 return Err(format!("`{key}` is true or false"));
             };
             match key.as_str() {
                 "focused" => read.focused = Some(*yes),
                 "fullscreen" => read.fullscreen = Some(*yes),
+                "client_side" => read.client_side = Some(*yes),
                 _ => read.maximized = Some(*yes),
             }
             continue;
@@ -898,6 +904,7 @@ pub(crate) struct Facts<'a> {
     pub(crate) maximized: bool,
     pub(crate) monitor: &'a str,
     pub(crate) style: &'a str,
+    pub(crate) client_side: bool,
     pub(crate) surface: &'a str,
     pub(crate) layer_shell: &'a str,
     /// The window's own values, `sol.frame(id, { ... })`; none for a part
@@ -959,6 +966,7 @@ impl Match {
             && flag(self.maximized, facts.maximized)
             && word(self.monitor.as_ref(), facts.monitor)
             && word(self.style.as_ref(), facts.style)
+            && flag(self.client_side, facts.client_side)
             && word(self.surface.as_ref(), facts.surface)
             && word(self.layer_shell.as_ref(), facts.layer_shell)
             && self.values.iter().all(|(key, wanted)| {

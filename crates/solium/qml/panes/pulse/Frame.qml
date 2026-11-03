@@ -6,6 +6,12 @@ import Solium
 Item {
     id: frame
 
+    // Set by the compositor, once (#462): true for a window whose application
+    // draws its own titlebar, and then this bar is the application's to draw
+    // and is left out of the frame.
+    property bool clientSide: false
+    visible: !clientSide
+
     // What this layer paints, set by the compositor from the `insets` that
     // `Pane.qml` declares. A style reserves space once for the whole pane, so
     // the number lives in the manifest and every layer is told it — the space

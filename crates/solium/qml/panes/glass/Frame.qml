@@ -28,6 +28,12 @@ import Solium
 Item {
     id: frame
 
+    // Set by the compositor, once (#462): true for a window whose application
+    // draws its own titlebar, and then this bar is the application's to draw
+    // and is left out of the frame.
+    property bool clientSide: false
+    visible: !clientSide
+
     // Set by the compositor, once: the bar's height, `Pane.qml`'s
     // `insets.bottom`. Zero is what it reads when the file is built outside a
     // pane, by `--check-qml`, and drawing nothing is right there.

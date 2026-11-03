@@ -59,6 +59,24 @@ Item {
     // number travels is the only thing that changed.
     property Insets insets: Insets {}
 
+    // What the frame reserves instead around a window whose application
+    // draws its own titlebar (#462): a GTK4 or libadwaita headerbar,
+    // Firefox's tabs, any client that asks to draw its own or never says
+    // (`frames` in config.lua decides which). None unless the style says, so
+    // the frame around such a window is its border, its shadow, its corners
+    // and its focus, and the bar is the application's. Read once, as
+    // `insets` is, and handed to every layer as the four `inset…` of a frame
+    // built for such a window, so a layer that paints from them draws nothing
+    // where the application's bar is.
+    property Insets clientSideInsets: Insets {}
+
+    // Whether this frame is around a window whose application draws its own
+    // titlebar, written once when the frame is built (#462): a frame of the
+    // other kind is built again. A layer reads it to leave out the bar and
+    // keep the rest, and `client.radius…` may follow it, so the window's
+    // corners are cut round where the style's bar would have met it.
+    property bool clientSide: false
+
     // What the style needs from the machine it is loaded on, and is refused
     // for wanting if it cannot have it.
     //

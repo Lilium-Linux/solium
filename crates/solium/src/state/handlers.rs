@@ -274,6 +274,13 @@ impl XdgShellHandler for Solium {
         // layout has said where the window goes: see `offer_keyboard`.
     }
 
+    /// A rule in `frames` can name the application, and a client names
+    /// itself after its first configure -- GTK does -- so the frame is
+    /// decided again when it does (#462).
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.decide_frame(&surface);
+    }
+
     /// Which configure a toplevel has acknowledged, remembered for the commit
     /// that follows it: a round holds back the commit that answers its own.
     /// See `state::round`.
@@ -871,26 +878,169 @@ impl WlrLayerShellHandler for Solium {
     }
 }
 
+/// KDE's server-decoration protocol, which is how GTK3 asks for a frame
+/// (#61): what it asks is remembered as `xdg-decoration`'s is, and `frames`
+/// decides what it gets (`Solium::decide_frame`), which it is told through
+/// the object it made. A GTK3 client takes the compositor's frame when the
+/// default offered is server-side and asks to draw its own when it means to,
+/// as Firefox does for its tabs.
+impl smithay::wayland::shell::kde::decoration::KdeDecorationHandler for Solium {
+    fn kde_decoration_state(
+        &self,
+    ) -> &smithay::wayland::shell::kde::decoration::KdeDecorationState {
+        &self.kde_decoration_state
+    }
+
+    fn new_decoration(
+        &mut self,
+        surface: &WlSurface,
+        decoration: &smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::OrgKdeKwinServerDecoration,
+    ) {
+        crate::framing::note_kde(surface, Some(decoration.clone()));
+    }
+
+    fn request_mode(
+        &mut self,
+        surface: &WlSurface,
+        _decoration: &smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::OrgKdeKwinServerDecoration,
+        mode: smithay::reexports::wayland_server::WEnum<
+            smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::Mode,
+        >,
+    ) {
+        let smithay::reexports::wayland_server::WEnum::Value(mode) = mode else {
+            return;
+        };
+        crate::framing::note(surface, crate::framing::asked_through_kde(mode));
+        if let Some(toplevel) = self
+            .window_for(surface)
+            .and_then(|window| window.toplevel().cloned())
+        {
+            self.decide_frame(&toplevel);
+        } else {
+            // Asked before its toplevel: told what it asked, and decided at
+            // its first frame.
+            crate::framing::tell_kde(surface, mode == smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::Mode::Server);
+        }
+    }
+
+    fn release(
+        &mut self,
+        _decoration: &smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::OrgKdeKwinServerDecoration,
+        surface: &WlSurface,
+    ) {
+        crate::framing::note_kde(surface, None);
+    }
+}
+
+smithay::delegate_kde_decoration!(Solium);
+
+/// What a client asks through `xdg-decoration` is remembered, and `frames`
+/// decides what it gets: `Solium::decide_frame` (#462).
 impl XdgDecorationHandler for Solium {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // Server-side is offered without being asked: the frame is part of the
-        // desktop's look, and a client drawing its own would be a second
-        // titlebar with different rules.
-        self.decorate(&toplevel, Mode::ServerSide);
+        crate::framing::note(toplevel.wl_surface(), crate::framing::Asked::Unset);
+        self.decide_frame(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: Mode) {
-        // A client that insists on drawing its own frame gets to: overriding it
-        // means two frames or none, depending on who gives way.
-        self.decorate(&toplevel, mode);
+        let asked = if mode == Mode::ClientSide {
+            crate::framing::Asked::Client
+        } else {
+            crate::framing::Asked::Server
+        };
+        crate::framing::note(toplevel.wl_surface(), asked);
+        self.decide_frame(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        self.decorate(&toplevel, Mode::ServerSide);
+        crate::framing::note(toplevel.wl_surface(), crate::framing::Asked::Unset);
+        self.decide_frame(&toplevel);
     }
 }
 
 impl Solium {
+    /// Whether Solium draws a Wayland window's frame: `frames` asked of what
+    /// its client said (`framing::asked`) and its `app_id` (#462).
+    pub(crate) fn frames_window(&self, toplevel: &ToplevelSurface) -> bool {
+        let surface = toplevel.wl_surface();
+        let app_id = with_states(surface, |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok())
+                .and_then(|attributes| attributes.app_id.clone())
+        })
+        .unwrap_or_default();
+        self.frames
+            .policy_for(&app_id)
+            .server_side(crate::framing::asked(surface))
+    }
+
+    /// Frame a Wayland window or leave it bare, as [`Self::frames_window`]
+    /// says, and tell its client: the one place that decision is acted on
+    /// (#462), for the client asking, its `app_id` changing, and the policy
+    /// changing. A window that never asked and has not been shown yet is
+    /// left to its first frame, which is where `introduce` decides it: told
+    /// nothing before then, it is still `Frame::Pending`.
+    pub(crate) fn decide_frame(&mut self, toplevel: &ToplevelSurface) {
+        let framed = self.frames_window(toplevel);
+        let undecided = crate::framing::asked(toplevel.wl_surface())
+            == crate::framing::Asked::Nothing
+            && self
+                .window_for(toplevel.wl_surface())
+                .and_then(|window| self.panes.id_of(&window))
+                .and_then(|id| self.panes.get(id))
+                .is_none_or(|pane| matches!(pane.frame(), crate::pane::Frame::Pending));
+        if undecided {
+            return;
+        }
+        let mode = if framed {
+            Mode::ServerSide
+        } else {
+            Mode::ClientSide
+        };
+        // Told again only when it changes: a frame rebuilt for the same answer
+        // is a scene built for nothing.
+        let now = toplevel.with_pending_state(|state| state.decoration_mode);
+        let shown = self
+            .window_for(toplevel.wl_surface())
+            .and_then(|window| self.panes.id_of(&window))
+            .and_then(|id| self.panes.get(id))
+            .is_some_and(|pane| !matches!(pane.frame(), crate::pane::Frame::Pending));
+        // A GTK3 client hears it through KDE's protocol (#61).
+        crate::framing::tell_kde(toplevel.wl_surface(), framed);
+        if now == Some(mode) && shown {
+            return;
+        }
+        // A fullscreen window has no frame whatever it agreed, and leaving
+        // fullscreen builds one from the agreed mode (`window_state`'s
+        // `draws_its_own_frame`): so only the mode changes now, and the frame
+        // follows it when the window comes back.
+        let fullscreen = toplevel
+            .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen));
+        if fullscreen && shown {
+            toplevel.with_pending_state(|state| state.decoration_mode = Some(mode));
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+            return;
+        }
+        self.decorate(toplevel, mode);
+    }
+
+    /// [`Self::decide_frame`] for every Wayland window: `frames` changed.
+    pub(crate) fn decide_frames(&mut self) {
+        let toplevels: Vec<ToplevelSurface> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.managed())
+            .filter_map(|pane| pane.client().and_then(Window::toplevel).cloned())
+            .collect();
+        for toplevel in toplevels {
+            self.decide_frame(&toplevel);
+        }
+    }
+
     /// Agree a decoration mode with a client and act on it.
     pub(super) fn decorate(&mut self, toplevel: &ToplevelSurface, mode: Mode) {
         let server_side = mode != Mode::ClientSide;
@@ -932,20 +1082,17 @@ impl Solium {
             .filter(|held| held.arriving())
             .map(|held| self.pane_outer(held));
 
-        if server_side {
-            let real = window
-                .as_ref()
-                .and_then(|window| self.real_geometry(window));
-            let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
-            let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
-            self.decorations.insert(&mut self.panes, id, width, height);
-        } else {
-            // Bare on purpose, not merely undecorated: the difference is
-            // whether `insets_of` still reserves room for a frame that is
-            // coming. For a client drawing its own, none is.
-            self.decorations.remove(&mut self.panes, id);
-            self.decorations.set_bare(&mut self.panes, id);
-        }
+        // Framed either way (#102, #462): a client drawing its own titlebar
+        // is framed client-side, with the style's `clientSideInsets`, and the
+        // style draws around it what it can. Only `pane = "none"` leaves it
+        // bare, as it does every window.
+        let real = window
+            .as_ref()
+            .and_then(|window| self.real_geometry(window));
+        let width = real.map_or(TITLEBAR_HEIGHT * 20, |real| real.size.w);
+        let height = real.map_or(TITLEBAR_HEIGHT * 15, |real| real.size.h);
+        self.decorations
+            .insert_drawn(&mut self.panes, id, width, height, !server_side);
         // A maximised window fills the work area with the frame it has now.
         if let Some(window) = window.as_ref() {
             self.refit_maximised(window);

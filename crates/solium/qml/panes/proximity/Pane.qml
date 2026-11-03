@@ -19,6 +19,12 @@ PaneStyle {
     insets.right: 4
     insets.bottom: 4
     insets.left: 4
+    // The same around a window whose application draws its own titlebar
+    // (#462): this style has no bar to leave out.
+    clientSideInsets.top: 4
+    clientSideInsets.right: 4
+    clientSideInsets.bottom: 4
+    clientSideInsets.left: 4
 
     requires: []
 

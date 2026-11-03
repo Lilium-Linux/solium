@@ -51,8 +51,11 @@ PaneStyle {
     // is spelled as internally, precisely so that a real `0` can be told from
     // an absent key. See `Solium/ClientTreatment.qml`.
     client.radius: 12
-    client.radiusTopLeft: 0
-    client.radiusTopRight: 0
+    // Square under the bar; round, as the bottom two are, for a window whose
+    // application draws its own titlebar and has no bar of this style's over
+    // it (#462).
+    client.radiusTopLeft: clientSide ? 12 : 0
+    client.radiusTopRight: clientSide ? 12 : 0
 
     // `frame`, and that is the difference from `panes/rounded`, which puts its
     // one layer at `behind`.

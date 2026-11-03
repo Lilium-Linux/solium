@@ -158,6 +158,21 @@ pub(crate) struct LayerSpec {
     pub(crate) index: usize,
 }
 
+impl Style {
+    /// This style for a window whose application draws its own titlebar
+    /// (#462): the same layers, reserving `clientSideInsets` and telling each
+    /// layer `clientSide`, so the style draws around the window what it can
+    /// and leaves the bar to the application.
+    /// `state::tests::real_client::reflow_on_close::framing::a_client_drawn_window_is_framed_with_the_styles_client_side_insets`.
+    pub(crate) fn drawn_by_client(&self) -> Self {
+        Self {
+            insets: self.client_side_insets,
+            client_side: true,
+            ..self.clone()
+        }
+    }
+}
+
 /// A whole style, as declared.
 #[derive(Clone, Debug)]
 pub(crate) struct Style {
@@ -167,6 +182,16 @@ pub(crate) struct Style {
     /// layer sees the same client rect, so three layers each declaring insets
     /// would be three answers to one question.
     pub(crate) insets: Insets,
+    /// Reserved instead around a window whose application draws its own
+    /// titlebar (#462): `clientSideInsets`, none unless the style declares
+    /// some. The frame around such a window is still the style's -- its
+    /// border, its shadow, its corners and its focus -- and only the bar the
+    /// application already draws is left out.
+    pub(crate) client_side_insets: Insets,
+    /// Whether this copy of the style frames a window whose application draws
+    /// its own titlebar: [`Style::drawn_by_client`]. Every layer is told it as
+    /// `clientSide`.
+    pub(crate) client_side: bool,
     pub(crate) layers: Vec<LayerSpec>,
     /// The effects this style runs on the client.
     ///
@@ -728,6 +753,14 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
             bottom: scene.get_int("insets.bottom").max(0),
             left: scene.get_int("insets.left").max(0),
         },
+        // A grouped property too, read the same way: `clientSideInsets.top`.
+        client_side_insets: Insets {
+            top: scene.get_int("clientSideInsets.top").max(0),
+            right: scene.get_int("clientSideInsets.right").max(0),
+            bottom: scene.get_int("clientSideInsets.bottom").max(0),
+            left: scene.get_int("clientSideInsets.left").max(0),
+        },
+        client_side: false,
         layers,
         effects,
         client_radii: radii,

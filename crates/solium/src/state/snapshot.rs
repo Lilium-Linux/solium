@@ -484,6 +484,7 @@ impl Solium {
                     fullscreen: facts.fullscreen,
                     maximized: facts.maximized,
                     style: facts.style,
+                    client_side: facts.client_side,
                     // `None` for a Wayland window -- there is no
                     // `_NET_WM_WINDOW_TYPE` to have read -- never `"normal"`
                     // standing in for "not X11", which is what would let a
