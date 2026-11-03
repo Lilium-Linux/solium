@@ -198,6 +198,11 @@ pub(crate) struct WindowInfo {
     /// `sol.keep_above`. Cleared when it closes; kept across a reload.
     /// `real_client::reflow_on_close::above::a_kept_above_window_stays_over_a_window_focused_after_it_and_takes_its_click`.
     pub(crate) above: bool,
+    /// Where a dock shows this window, as a client of
+    /// `wlr-foreign-toplevel-management` said with `set_rectangle` (#50): what
+    /// a minimize can fly to. `None` until one says, and again once it takes
+    /// it back. See `crate::toplevels`.
+    pub(crate) icon: Option<Rect>,
     /// Which application this is, by the name it gives itself: its xdg
     /// `app_id`, or an X11 window's `WM_CLASS` class. Empty for a window
     /// whose application has not arrived, or said nothing. See
@@ -897,6 +902,10 @@ pub(crate) enum Command {
     /// outright: `sol.x11`, from `config.x11` (#221). See
     /// `crate::xwayland::Settings`.
     X11(crate::xwayland::Settings),
+    /// Which of the window protocols a shell that is its own program is
+    /// offered: `sol.toplevels`, from `config.toplevels` (#50). See
+    /// `crate::toplevels::Settings`.
+    Toplevels(crate::toplevels::Settings),
     /// Who draws a Wayland window's frame, Solium or the application:
     /// `sol.frames`, from `config.frames` (#462). See `crate::framing`.
     Frames(crate::framing::Settings),
@@ -1046,6 +1055,7 @@ impl Command {
             | Self::Tray(_)
             | Self::Media(_)
             | Self::X11(_)
+            | Self::Toplevels(_)
             | Self::Frames(_)
             | Self::LayerShell(_)
             | Self::FocusMode { .. }
@@ -4105,6 +4115,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("leaving", window.leaving)?;
                 entry.set("minimized", window.minimized)?;
                 entry.set("above", window.above)?;
+                if let Some(icon) = window.icon {
+                    let rect = lua.create_table()?;
+                    rect.set("x", icon.x)?;
+                    rect.set("y", icon.y)?;
+                    rect.set("w", icon.w)?;
+                    rect.set("h", icon.h)?;
+                    entry.set("icon", rect)?;
+                }
                 entry.set("app_id", window.app_id.clone())?;
                 entry.set("min", size_table(lua, window.min)?)?;
                 entry.set("max", size_table(lua, window.max)?)?;
@@ -5334,6 +5352,37 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Frames(settings));
+            })
+        })?,
+    )?;
+
+    // Which window protocols a shell that is its own program is offered
+    // (#50): `config.toplevels`, handed over by `init.lua`. `list` and
+    // `manage` are each true or false; one left out, or not a boolean, keeps
+    // its default, true, and a wrong type says so.
+    // `tests::sol_toplevels_reads_each_protocol_as_a_flag`.
+    sol.set(
+        "toplevels",
+        lua.create_function(|lua, options: Option<mlua::Table>| {
+            let mut settings = crate::toplevels::Settings::default();
+            if let Some(options) = options {
+                for (key, slot) in [
+                    ("list", &mut settings.list),
+                    ("manage", &mut settings.manage),
+                ] {
+                    match options.get::<Value>(key) {
+                        Ok(Value::Boolean(on)) => *slot = on,
+                        Ok(Value::Nil) | Err(_) => {}
+                        Ok(other) => tracing::warn!(
+                            key,
+                            value = describe(&other),
+                            "toplevels: true or false; keeping it offered"
+                        ),
+                    }
+                }
+            }
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Toplevels(settings));
             })
         })?,
     )?;
@@ -8807,6 +8856,7 @@ mod tests {
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
             windows: vec![WindowInfo {
+                icon: None,
                 client_side: false,
                 insets: crate::decoration::Insets::default(),
                 id: 7,
@@ -11426,6 +11476,74 @@ mod tests {
     /// holds for `lock`: a future edit to one without the other must fail a
     /// test rather than ship a mismatch.
     #[test]
+    fn sol_toplevels_reads_each_protocol_as_a_flag() {
+        use crate::toplevels::Settings;
+        let directory = std::env::temp_dir().join("solium-script-test-toplevels");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let configured = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::Toplevels(settings) => Some(settings),
+                    _ => None,
+                })
+                .expect("one Command::Toplevels")
+        };
+        assert_eq!(
+            configured("sol.toplevels({ list = false, manage = true })"),
+            Settings {
+                list: false,
+                manage: true
+            }
+        );
+        assert_eq!(
+            configured("sol.toplevels({ manage = false })"),
+            Settings {
+                list: true,
+                manage: false
+            },
+            "one left out keeps its default"
+        );
+        assert_eq!(
+            configured(r#"sol.toplevels({ list = "no", manage = 0 })"#),
+            Settings::default(),
+            "a word or a number is no flag"
+        );
+        assert_eq!(configured("sol.toplevels()"), Settings::default());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_shipped_configuration_s_toplevels_table_matches_the_rust_default() {
+        let Some((directory, mut scripts)) =
+            shipped_init_with_user("solium-script-test-toplevels-default", "return {}")
+        else {
+            return;
+        };
+        let toplevels: Vec<crate::toplevels::Settings> = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Toplevels(settings) => Some(settings),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(
+            toplevels,
+            [crate::toplevels::Settings::default()],
+            "the shipped init.lua did not hand config.toplevels over as it says"
+        );
+    }
+
+    #[test]
     fn sol_frames_reads_the_policy_and_its_rules() {
         use crate::effect::rules::Glob;
         use crate::framing::{Policy, Rule, Settings};
@@ -12009,6 +12127,7 @@ mod tests {
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let mut snapshot = empty_snapshot();
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
+            icon: None,
             client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
@@ -12722,6 +12841,7 @@ mod tests {
             windows: windows
                 .iter()
                 .map(|id| WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     id: *id,
@@ -17057,6 +17177,7 @@ mod dialogs {
     /// chose, in the corner a Wayland toplevel is mapped at.
     fn window(id: u64, w: f64, h: f64) -> WindowInfo {
         WindowInfo {
+            icon: None,
             client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
@@ -17111,6 +17232,7 @@ mod dialogs {
 
     fn modal(id: u64, w: f64, h: f64, parent: Parentage) -> WindowInfo {
         WindowInfo {
+            icon: None,
             client_side: false,
             insets: crate::decoration::Insets::default(),
             modal: true,
@@ -17181,6 +17303,7 @@ mod dialogs {
         .expect("writing the test script");
         let mut scripts = Scripts::load(&config).expect("loading the test script");
         let framed = WindowInfo {
+            icon: None,
             client_side: false,
             insets: crate::decoration::Insets {
                 top: 32,
@@ -17732,6 +17855,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            icon: None,
                             client_side: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
@@ -18208,6 +18332,7 @@ mod dialogs {
                 .iter()
                 .cloned()
                 .map(|window| WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: ids.contains(&window.id),
@@ -18346,6 +18471,7 @@ mod dialogs {
                         vec![second_monitor()],
                         (1..=3)
                             .map(|id| WindowInfo {
+                                icon: None,
                                 client_side: false,
                                 insets: crate::decoration::Insets::default(),
                                 leaving: leaving && id == 3,
@@ -18468,6 +18594,7 @@ mod dialogs {
                     .map(|&id| {
                         let rect = placed.get(&id).copied().unwrap_or_default();
                         WindowInfo {
+                            icon: None,
                             client_side: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
@@ -19153,6 +19280,7 @@ mod dialogs {
                 scripts.evaluate("return tostring(require(\"workspaces\").vacant(\"DP-1\"))")
             };
             let closing = |id| WindowInfo {
+                icon: None,
                 client_side: false,
                 insets: crate::decoration::Insets::default(),
                 leaving: true,
@@ -19392,6 +19520,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go under `min`.
         fn at_least(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                icon: None,
                 client_side: false,
                 insets: crate::decoration::Insets::default(),
                 min: size(w, h),
@@ -19402,6 +19531,7 @@ mod dialogs {
         /// Window `id`, whose application says it cannot go over `max`.
         fn at_most(id: u64, w: i32, h: i32) -> WindowInfo {
             WindowInfo {
+                icon: None,
                 client_side: false,
                 insets: crate::decoration::Insets::default(),
                 max: size(w, h),
@@ -19411,6 +19541,7 @@ mod dialogs {
 
         fn with_app(app_id: &str, window: WindowInfo) -> WindowInfo {
             WindowInfo {
+                icon: None,
                 client_side: false,
                 insets: crate::decoration::Insets::default(),
                 app_id: app_id.to_owned(),
@@ -19486,6 +19617,7 @@ mod dialogs {
             );
             let windows = vec![
                 WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     max: size(1200, 0),
@@ -19775,6 +19907,7 @@ mod dialogs {
                 switched_on(&mut scripts, "super+t");
                 let _ = scripts.opened(1, desk(vec![plain(1)], (2000.0, 700.0)));
                 let launched = WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     shown: false,
@@ -19787,6 +19920,7 @@ mod dialogs {
                 assert_eq!(workspace(&scripts), "1", "the premise");
 
                 let arrived = WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     shown,
@@ -19829,6 +19963,7 @@ mod dialogs {
                         "the launched window stayed in a tile that cannot hold it"
                     );
                     let again = WindowInfo {
+                        icon: None,
                         client_side: false,
                         insets: crate::decoration::Insets::default(),
                         shown: false,
@@ -20011,6 +20146,7 @@ mod dialogs {
         fn at_rest(rects: &HashMap<u64, Rect>, id: u64) -> WindowInfo {
             match rects.get(&id) {
                 Some(rect) => WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     rect: *rect,
@@ -20471,6 +20607,7 @@ mod dialogs {
                                 on(&second_monitor(), each)
                             } else if id >= 3 {
                                 WindowInfo {
+                                    icon: None,
                                     client_side: false,
                                     insets: crate::decoration::Insets::default(),
                                     monitor: "DP-2".to_owned(),
@@ -20708,6 +20845,7 @@ mod directions {
 
     fn window(id: u64, monitor: &str, rect: Rect) -> WindowInfo {
         WindowInfo {
+            icon: None,
             client_side: false,
             insets: crate::decoration::Insets::default(),
             id,
@@ -22444,6 +22582,8 @@ mod directions {
             windows: vec![
                 window(4, "DP-1", WIDE),
                 WindowInfo {
+                    icon: None,
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
@@ -22513,12 +22653,14 @@ mod directions {
         let desk = |focused: bool| Snapshot {
             windows: vec![
                 WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(1, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     minimized: true,
@@ -22526,6 +22668,7 @@ mod directions {
                     ..window(2, "DP-1", WIDE)
                 },
                 WindowInfo {
+                    icon: None,
                     client_side: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: true,

@@ -444,6 +444,10 @@ pub(crate) struct Solium {
     /// recording and screen sharing. See `screencopy.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) screencopy_state: crate::screencopy::ScreencopyState,
+    /// The windows for a shell that is its own program: the
+    /// `ext-foreign-toplevel-list` and `wlr-foreign-toplevel-management`
+    /// globals, and what each client was told (#50). See `toplevels.rs`.
+    pub(crate) toplevels: crate::toplevels::Toplevels,
     /// Registers `ext_output_image_capture_source_manager_v1` and
     /// `ext_image_copy_capture_manager_v1`, the successor to the one above,
     /// which screen sharing through the portal asks for first. See
@@ -1524,6 +1528,7 @@ impl Solium {
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
+            toplevels: crate::toplevels::Toplevels::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
             space: Space::default(),

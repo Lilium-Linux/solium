@@ -67,6 +67,9 @@ sol.lock(config.lock)
 -- WM_CLASS names refused a tile, decoration or bar entry outright (#221).
 -- See `config.lua`.
 sol.x11(config.x11)
+-- Which window protocols a shell that is its own program is offered (#50).
+-- See `config.lua`.
+sol.toplevels(config.toplevels)
 -- Who draws a window's frame, Solium or the application (#462). See
 -- `config.lua`.
 sol.frames(config.frames)

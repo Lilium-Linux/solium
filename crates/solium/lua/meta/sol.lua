@@ -72,6 +72,7 @@
 ---@field leaving boolean Whether it is closing: between `closing` and `close` or `refused`.
 ---@field minimized boolean Whether it is minimized (`sol.minimize`, or its application's own button): still mapped and alive, but drawn only while a present on it plays out or `sol.show_minimized` shows it, under no pointer or finger, and never holding the keyboard. Between `minimize` and `unminimize`.
 ---@field above boolean Whether it is kept above every window that is not (`sol.keep_above`). Kept across a reload; gone with the window.
+---@field icon? { x: number, y: number, w: number, h: number } Where a dock that is its own program shows this window, in the compositor's space, as it said through `wlr-foreign-toplevel-management`'s `set_rectangle` (#50): what a minimize can fly to. Absent until one says.
 ---@field app_id string The application's own name: a Wayland `app_id`, an X11 `WM_CLASS` class. Empty until the application arrives.
 ---@field min? sol.Size The smallest the application says it can be, frame included; absent when it set no limit.
 ---@field max? sol.Size The largest the application says it can be, frame included; absent when it set no limit.
@@ -424,6 +425,11 @@
 ---X11 windows refused a tile, decoration or bar entry outright (#221). A key
 ---left out, or the whole table left out, keeps the default rather than
 ---emptying it.
+---Which window protocols a shell that is its own program is offered (#50).
+---@class sol.ToplevelsOptions
+---@field list? boolean `ext-foreign-toplevel-list-v1`: the windows' titles and applications. Default `true`.
+---@field manage? boolean `wlr-foreign-toplevel-management-v1`: the same with monitors and states, and requests that reach Lua as `windows.*` actions of the surface `"foreign-toplevel"`. Default `true`.
+
 ---Who draws a Wayland window's frame (#462).
 ---@alias sol.FramePolicy
 ---| "prefer" # Solium's frame for an application that leaves it to Solium or asks for it; none for one that asks to draw its own or never says. The default.
@@ -1114,6 +1120,14 @@ function sol.lock_peek(progress) end
 ---@param options? sol.X11Options
 ---@return nil
 function sol.x11(options) end
+
+---Which window protocols a shell that is its own program is offered:
+---`config.toplevels`, which the shipped `init.lua` hands over. A protocol
+---taken away is hidden from clients and closes every handle it gave out. See
+---#50.
+---@param options? sol.ToplevelsOptions
+---@return nil
+function sol.toplevels(options) end
 
 ---Who draws a Wayland window's frame, Solium or the application:
 ---`config.frames`, which the shipped `init.lua` hands over. A change reframes

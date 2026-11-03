@@ -82,6 +82,7 @@ mod successor;
 mod surface;
 mod synth;
 mod text_input;
+mod toplevels;
 mod tty;
 mod warm;
 mod warp;

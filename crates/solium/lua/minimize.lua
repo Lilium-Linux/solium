@@ -12,7 +12,8 @@
 -- window out of their arrangement and take it back where it was.
 --
 -- `config.minimize` sets how long the genie plays, how much of the window
--- trails behind it, and the size of the slot it goes into.
+-- trails behind it, the size of the slot it goes into, and whether a window
+-- a dock has placed goes into its icon there instead (`to_icon`).
 
 local config = require("config")
 
@@ -30,6 +31,20 @@ function minimize.slot(area)
     }
 end
 
+-- The icon a dock that is its own program shows window `id` as (#50), when
+-- `config.minimize.to_icon` says to go there and a dock said where; nil
+-- otherwise.
+function minimize.icon(id)
+    if config.minimize.to_icon then
+        for _, window in ipairs(sol.windows()) do
+            if window.id == id and window.icon then
+                return window.icon
+            end
+        end
+    end
+    return nil
+end
+
 -- Pull window `id` into its slot with the genie, over `config.minimize.motion`.
 -- What the `minimize` event plays, the overview puts a minimized window back
 -- with, and the Developer Tweaks panel's genie shows.
@@ -39,15 +54,20 @@ end
 -- so a dock down the side of the screen is `"left"`, and `"auto"` picks the
 -- side the slot lies on when the window starts to move.
 function minimize.into(id)
+    local deform = {
+        effect = "genie",
+        axis = "down",
+        spread = config.minimize.spread,
+        to = minimize.slot(sol.monitor(id)),
+    }
+    -- Into the dock's icon instead, leading with the side it lies on.
+    local icon = minimize.icon(id)
+    if icon then
+        deform.to = icon
+        deform.axis = "auto"
+    end
     sol.animate(config.minimize.motion)
-    sol.present(id, {
-        deform = {
-            effect = "genie",
-            axis = "down",
-            spread = config.minimize.spread,
-            to = minimize.slot(sol.monitor(id)),
-        },
-    })
+    sol.present(id, { deform = deform })
 end
 
 -- A window was minimized: it goes into its slot, and is drawn until it is

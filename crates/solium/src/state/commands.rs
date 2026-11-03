@@ -745,6 +745,14 @@ impl Solium {
                         self.x11 = settings;
                     }
                 }
+                Command::Toplevels(settings) => {
+                    if self.toplevels.settings != settings {
+                        tracing::debug!(?settings, "which window protocols are offered set");
+                        self.toplevels.configure(settings);
+                        // Listed again at once, if the list is back.
+                        self.publish_toplevels();
+                    }
+                }
                 Command::Frames(settings) => {
                     if self.frames != settings {
                         tracing::debug!(?settings, "who draws the windows' frames set");
