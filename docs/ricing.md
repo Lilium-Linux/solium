@@ -1993,6 +1993,17 @@ wants and the compositor honours it, so a bar on every screen is one surface
 per screen, each reserving from *that* monitor's work area. One that names no
 output gets the primary monitor.
 
+A client's surface below the windows, on the bottom or background layer -- a
+desktop of icons, widgets, a dock -- takes the pointer and touch wherever no
+window is over it, and the keyboard on a click if it asks for it on demand.
+`layer_shell.input_below` says which do: `true` (every one, the default),
+`false` (none: a press passes through to what is under it), or a list of the
+namespaces that do:
+
+```lua
+return { layer_shell = { input_below = { "my-desktop", "dock*" } } }
+```
+
 A fullscreen window in front of the workspace its monitor is showing covers
 the top layer -- a client's bar, and one declared with `sol.surface` -- and
 takes the clicks where the bar was, while the overlay layer (notifications, an

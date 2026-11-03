@@ -873,7 +873,55 @@ impl Solium {
             }
         }
 
+        // Then below the windows, in the same order walked on down (#461): a
+        // client's layer surface there -- a desktop of icons, a widget layer,
+        // a dock on the bottom layer -- is what the pointer reaches where no
+        // window is, and a script's surface over it that takes a press keeps
+        // it from every client, as it does above the windows (Ruling 8).
+        // `layer_shell.input_below` says which client surfaces take input
+        // here at all.
+        // `a_client_surface_below_the_windows_takes_input_as_layer_shell_input_below_says`.
+        let output = monitor::at(&self.space, location)?;
+        let geometry = self.space.output_geometry(&output)?;
+        let local = location - geometry.loc.to_f64();
+        for band in crate::stack::below() {
+            match band {
+                Band::Layer(layer, Owner::Client) => {
+                    if let Some((surface, origin)) = self.layer_below_at(&output, layer, local) {
+                        return Some((surface, origin + geometry.loc.to_f64()));
+                    }
+                }
+                Band::Layer(layer, Owner::Script) => {
+                    if self
+                        .script_at(&output, geometry, layer, location, Asking::Press)
+                        .is_some()
+                    {
+                        return None;
+                    }
+                }
+                // Neither is below the windows: `stack::below` never yields
+                // them (`above_and_below_split_the_order_at_the_windows`).
+                Band::Fullscreen | Band::Windows => {}
+            }
+        }
+
         None
+    }
+
+    /// A client's layer surface below the windows at `local`, in its output's
+    /// coordinates, among those `layer_shell.input_below` says take input:
+    /// what [`Self::surface_under`] gives the pointer there, and what keeps a
+    /// script's surface under it from the press. One question for both, so
+    /// the two cannot disagree about which surface is in the way (#461).
+    pub(super) fn layer_below_at(
+        &self,
+        output: &Output,
+        layer: crate::scripted::Layer,
+        local: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        layer::surface_taking(output, layer, local, |surface| {
+            self.layer_shell.input_below.takes(surface.namespace())
+        })
     }
 
     /// The surface a touch at `location` lands on: the pointer's answer, but

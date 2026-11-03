@@ -35912,11 +35912,11 @@ end)
                     "under the window: the client's bottom surface, the script's, the \
                      client's background, the script's"
                 );
-                // A client's surfaces below the windows are offered no
-                // pointer, and never were -- but the client's bottom surface
-                // is drawn over the script's dock, so the dock does not have
-                // the press there either. Beside it, over only the client's
-                // background, it does.
+                // The client's bottom surface is drawn over the script's dock,
+                // so it has the pointer there and the dock does not have the
+                // press (#461). Beside it, the dock is drawn over the
+                // client's background, so the dock has the press and no
+                // client has the pointer.
                 assert_eq!(
                     (
                         delivered(&desk, 100.0, 15.0),
@@ -35924,9 +35924,136 @@ end)
                         delivered(&desk, 1000.0, 15.0),
                         claimed_below(&desk, 1000.0, 15.0),
                     ),
-                    (None, None, None, Some(script_bottom)),
+                    (Some(id(&bottom)), None, None, Some(script_bottom)),
                     "(on the client's bottom surface: the surface the pointer reaches, the \
                      script's surface offered the press; the same beside it)"
+                );
+            }
+
+            /// **A client's surfaces below the windows take input as
+            /// `layer_shell.input_below` says** (#461). By default each one
+            /// has the pointer wherever no window and no script's surface
+            /// over it does, on the bottom layer and on the background, and
+            /// a window over one keeps its own. `false` passes every one
+            /// through, so the script's wallpaper under them has the press;
+            /// a list takes only the namespaces it names.
+            #[test]
+            fn a_client_surface_below_the_windows_takes_input_as_layer_shell_input_below_says() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+                desk.pump();
+                let window = window_of(&desk, opened.pane);
+                desk.state.space.map_element(window, (600, 0), false);
+                desk.state.space.refresh();
+                landed(&mut desk);
+                let wallpaper = scripted(&mut desk, "wallpaper", Scripted::Background, screen());
+                let (bottom, _bottom) = layer_surface(&mut desk, Client::Bottom, Some(200), 200, 0);
+                let (background, _background) =
+                    layer_surface(&mut desk, Client::Background, None, 200, 0);
+                let on_the_window = desk
+                    .state
+                    .surface_under((700.0, 100.0).into())
+                    .map(|(surface, _)| surface.id().protocol_id());
+                assert_eq!(
+                    on_the_window,
+                    Some(id(&opened.surface)),
+                    "the premise: the window is over both, and has the pointer over them"
+                );
+                let seen = |desk: &Desk| {
+                    (
+                        delivered(desk, 100.0, 100.0),
+                        delivered(desk, 1500.0, 100.0),
+                        delivered(desk, 700.0, 100.0),
+                        claimed_below(desk, 1500.0, 100.0),
+                    )
+                };
+                assert_eq!(
+                    seen(&desk),
+                    (
+                        Some(id(&bottom)),
+                        Some(id(&background)),
+                        on_the_window,
+                        None
+                    ),
+                    "by default: (the bottom surface, the background beside it, the window \
+                     over both, the wallpaper under the background)"
+                );
+
+                desk.state.layer_shell.input_below = crate::layer::InputBelow::Nothing;
+                assert_eq!(
+                    seen(&desk),
+                    (None, None, on_the_window, Some(wallpaper)),
+                    "with `false`, every client surface below the windows is passed through"
+                );
+
+                desk.state.layer_shell.input_below =
+                    crate::layer::InputBelow::Named(vec![crate::effect::rules::Glob::parse(
+                        "stacking-*",
+                    )]);
+                assert_eq!(
+                    seen(&desk).0,
+                    Some(id(&bottom)),
+                    "a prefix naming the namespace takes it"
+                );
+                desk.state.layer_shell.input_below =
+                    crate::layer::InputBelow::Named(vec![crate::effect::rules::Glob::parse(
+                        "someone-else",
+                    )]);
+                assert_eq!(
+                    seen(&desk),
+                    (None, None, on_the_window, Some(wallpaper)),
+                    "a list that does not name the namespace passes it through"
+                );
+            }
+
+            /// **A press on a client's background surface reaches it**
+            /// (#461), through the real input path: the client is told the
+            /// pointer entered it and the button went down and up there.
+            #[test]
+            fn a_press_on_a_clients_background_surface_reaches_it() {
+                let mut desk = Desk::new();
+                let _pointer = desk.client.seat_pointer(&desk.qh);
+                desk.pump();
+                let (background, _background) =
+                    layer_surface(&mut desk, Client::Background, None, 30, 0);
+                move_pointer(&mut desk.state, (960.0, 15.0), 10);
+                click(&mut desk, 11);
+                desk.pump();
+                assert_eq!(
+                    (desk.client.buttons.clone(), desk.client.clicked_on.clone()),
+                    (
+                        vec![(0x110, true), (0x110, false)],
+                        vec![Some(id(&background)); 2]
+                    ),
+                    "(the buttons the client was told, the surface each arrived on)"
+                );
+            }
+
+            /// **A touch on a client's bottom surface reaches it** (#461):
+            /// touch walks the same layers the pointer does.
+            #[test]
+            fn a_touch_on_a_clients_bottom_surface_reaches_it() {
+                let mut desk = Desk::new();
+                let _touch = desk.client.seat_touch(&desk.qh);
+                desk.pump();
+                let (bottom, _bottom) = layer_surface(&mut desk, Client::Bottom, Some(200), 30, 0);
+                assert_eq!(
+                    desk.state
+                        .touch_under((100.0, 15.0).into())
+                        .map(|(surface, _)| surface.id().protocol_id()),
+                    Some(id(&bottom))
+                );
+                let region = crate::monitor::union(&desk.state.space).expect("a monitor");
+                crate::synth::touch_down(&mut desk.state, region, 0, (100.0, 15.0), 10_000);
+                desk.pump();
+                assert!(
+                    desk.client.touches.iter().any(|event| matches!(
+                        event,
+                        wl_touch::Event::Down { surface, .. } if id(surface) == id(&bottom)
+                    )),
+                    "the bottom surface was not told of the touch: {:?}",
+                    desk.client.touches
                 );
             }
 

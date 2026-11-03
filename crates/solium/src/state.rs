@@ -629,6 +629,10 @@ pub(crate) struct Solium {
     /// `map_window_request` refuses a tile, decoration or bar entry to
     /// outright (#221). See `xwayland::Settings`.
     pub(crate) x11: crate::xwayland::Settings,
+    /// `config.layer_shell`, handed over by `sol.layer_shell`: which of a
+    /// client's layer surfaces below the windows take the pointer and touch
+    /// (#461). See `layer::Settings`.
+    pub(crate) layer_shell: crate::layer::Settings,
     /// What systemd and D-Bus activation have been told about this session,
     /// and the stop and unset it owes them on exit. See `session.rs`.
     pub(crate) session: crate::session::Session,
@@ -1425,6 +1429,7 @@ impl Solium {
             xwm: None,
             x11_display: None,
             x11: crate::xwayland::Settings::default(),
+            layer_shell: crate::layer::Settings::default(),
             session: crate::session::Session::off(),
             logind: crate::logind::Logind::off(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
@@ -2882,9 +2887,10 @@ impl Solium {
 
         // Below them, the same order walked on down, and the same rule: only
         // where nothing above the windows has the point, no window has it,
-        // and no client's surface at a layer over the script's has it. A
-        // client's surfaces there are not offered the pointer, and never were,
-        // but one drawn over a script's surface is still over it.
+        // and no client's surface at a layer over the script's has it -- the
+        // walk `Self::surface_under` takes there too, which gives that
+        // client's surface the pointer (#461). One `layer_shell.input_below`
+        // passes through is looked through, here as there.
         // `a_background_mapped_after_a_bottom_surface_stays_under_it` and
         // `a_window_over_a_scripted_dock_keeps_the_press`.
         if above.is_some() || self.windows_have(location) {
@@ -2904,7 +2910,7 @@ impl Solium {
                 crate::stack::Band::Layer(layer, crate::stack::Owner::Client) => {
                     // A layer map's geometry is in its own output's coordinates.
                     let local = location - geometry.loc.to_f64();
-                    if layer::surface_under(&output, layer, local).is_some() {
+                    if self.layer_below_at(&output, layer, local).is_some() {
                         return None;
                     }
                 }

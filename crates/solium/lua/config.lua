@@ -956,6 +956,26 @@ local defaults = {
         hidden = { "xwaylandvideobridge" },
     },
 
+    -- Shells that are their own programs, through wlr-layer-shell: bars,
+    -- docks, desktops and wallpapers drawn by a client rather than by a
+    -- scene of Solium's (#461).
+    layer_shell = {
+        -- Which of their surfaces below the windows, on the bottom and
+        -- background layers, take the pointer and touch. `true` is every
+        -- one: a desktop of icons, a widget layer or a dock there is
+        -- clicked like any other surface. `false` is none: each is passed
+        -- through, so a press reaches what is under it -- a scene of yours
+        -- on a lower layer, or the desktop. A list takes only the surfaces
+        -- whose namespace it names, each exact, `*`, or a prefix ending in
+        -- `*`; `WAYLAND_DEBUG=1` on the client shows the namespace it asks
+        -- for in `get_layer_surface`.
+        --
+        --     input_below = { "lunaria-desktop", "dock*" },
+        --
+        -- Surfaces above the windows always take input.
+        input_below = true,
+    },
+
     -- Who takes the keyboard on a click or a hover, and when nobody does
     -- (#219). `lua/modes.lua` hands this over on every mode change, so a
     -- mode's own entry below answers immediately, without waiting for a
