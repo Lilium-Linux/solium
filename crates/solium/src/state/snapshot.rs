@@ -463,6 +463,7 @@ impl Solium {
                     leaving: pane.leaving(),
                     minimized: pane.minimized(),
                     above: pane.above(),
+                    icon: self.toplevels.icon(pane.id().get()).map(to_rect),
                     app_id: pane
                         .client()
                         .map(|window| self.script_app_id(window))

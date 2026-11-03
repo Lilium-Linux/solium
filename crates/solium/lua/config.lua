@@ -956,6 +956,26 @@ local defaults = {
         hidden = { "xwaylandvideobridge" },
     },
 
+    -- The windows, for a shell that is its own program (#50): a dock, a task
+    -- switcher or a panel's window list over wlr-layer-shell. Every window a
+    -- script is told of is listed, with its title, application, monitor and
+    -- state, and nothing else (no menus, no window still loading).
+    --
+    --   list     ext-foreign-toplevel-list-v1: each window's title and
+    --            application, and when it goes. Read-only.
+    --   manage   wlr-foreign-toplevel-management-v1: the same with the
+    --            monitor and the states, and requests to focus, close,
+    --            minimize, maximize and fullscreen a window. Each request
+    --            reaches Lua as an action of the `windows` vocabulary from
+    --            the surface "foreign-toplevel" -- what the shipped taskbar
+    --            sends -- so `actions.lua` and its overrides answer it. Where
+    --            a dock shows a window is that window's `icon` in
+    --            `sol.windows()`.
+    --
+    -- Every client is offered both: `false` takes one away from them all,
+    -- closing what it handed out. Neither is needed by Solium's own shell.
+    toplevels = { list = true, manage = true },
+
     -- Who takes the keyboard on a click or a hover, and when nobody does
     -- (#219). `lua/modes.lua` hands this over on every mode change, so a
     -- mode's own entry below answers immediately, without waiting for a
@@ -2127,11 +2147,15 @@ local defaults = {
     -- the strip it goes into, centred on the bottom edge of the monitor's
     -- work area. The Developer Tweaks panel's genie (`--debug-mode`) plays
     -- the same. A layout leaves a minimized window out and takes it back
-    -- where it was; focusing it shows it again.
+    -- where it was; focusing it shows it again. `to_icon` sends a window a
+    -- dock that is its own program has placed (its `icon` in `sol.windows()`,
+    -- #50) into that icon instead of the slot; `false` keeps the slot for
+    -- every window.
     minimize = {
         motion = { duration = 520, easing = "inOutCubic" },
         spread = 1.4,
         slot = { w = 120, h = 24 },
+        to_icon = true,
     },
 }
 

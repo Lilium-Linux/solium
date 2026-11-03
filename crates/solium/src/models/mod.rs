@@ -96,6 +96,9 @@ impl crate::state::Solium {
     /// `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
     /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
     pub(crate) fn publish_models(&mut self) {
+        // The windows a dock that is its own program sees, from the same list
+        // the models below are built from (#50).
+        self.publish_toplevels();
         // The caret each decoration is told this frame:
         // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
         self.settle_caret();

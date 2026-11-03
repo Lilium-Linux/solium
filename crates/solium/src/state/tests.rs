@@ -2911,6 +2911,9 @@ mod real_client {
         wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
     };
     use wayland_client::{Connection, Dispatch, QueueHandle};
+    use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+        ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+    };
     use wayland_protocols::ext::idle_notify::v1::client::{
         ext_idle_notification_v1, ext_idle_notifier_v1,
     };
@@ -2945,6 +2948,9 @@ mod real_client {
     };
     use wayland_protocols::xdg::shell::client::{
         xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+    };
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+        zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
     };
     use wayland_protocols_wlr::layer_shell::v1::client::{
         zwlr_layer_shell_v1, zwlr_layer_surface_v1,
@@ -2998,6 +3004,26 @@ mod real_client {
         dmabuf: Option<explicit_sync::ZwpLinuxDmabufV1>,
         compositor: Option<wl_compositor::WlCompositor>,
         wm_base: Option<xdg_wm_base::XdgWmBase>,
+        /// The window protocols' globals, by interface, as the registry
+        /// announced them: bound only by a test that asks, with
+        /// [`Self::bind_toplevels`], so no other test hears of every window
+        /// it opens twice over (#50).
+        toplevel_globals: Vec<(String, u32)>,
+        registry: Option<wl_registry::WlRegistry>,
+        toplevel_manager: Option<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
+        /// Whether the manager was told `finished`.
+        toplevel_manager_finished: bool,
+        /// Each wlr handle this client was given, in the order given, and
+        /// what it was told.
+        wlr_told: Vec<(
+            zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+            Told,
+        )>,
+        /// The same for the ext list's handles.
+        ext_told: Vec<(
+            ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            Told,
+        )>,
         shm: Option<wl_shm::WlShm>,
         /// For #126: a window whose picture is more than its root surface.
         subcompositor: Option<wl_subcompositor::WlSubcompositor>,
@@ -3217,7 +3243,36 @@ mod real_client {
         touches: Vec<wl_touch::Event>,
     }
 
+    /// What one foreign-toplevel handle was told (#50).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Told {
+        title: String,
+        app_id: String,
+        /// The wlr states, as numbers.
+        states: Vec<u32>,
+        /// `output_enter` less `output_leave`.
+        outputs: i32,
+        done: u32,
+        closed: bool,
+    }
+
     impl Client {
+        /// Bind both window protocols, as a dock does.
+        fn bind_toplevels(&mut self, qh: &QueueHandle<Self>) {
+            let registry = self.registry.clone().expect("the registry");
+            for (interface, name) in self.toplevel_globals.clone() {
+                match interface.as_str() {
+                    "zwlr_foreign_toplevel_manager_v1" => {
+                        self.toplevel_manager = Some(registry.bind(name, 3, qh, ()));
+                    }
+                    _ => {
+                        let _list: ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 =
+                            registry.bind(name, 1, qh, ());
+                    }
+                }
+            }
+        }
+
         fn seat_touch(&self, qh: &QueueHandle<Self>) -> wl_touch::WlTouch {
             self.seat.as_ref().expect("wl_seat bound").get_touch(qh, ())
         }
@@ -3388,7 +3443,11 @@ mod real_client {
                 }
                 _ => return,
             };
+            state.registry = Some(registry.clone());
             match interface.as_str() {
+                "zwlr_foreign_toplevel_manager_v1" | "ext_foreign_toplevel_list_v1" => {
+                    state.toplevel_globals.push((interface.clone(), name));
+                }
                 "wp_linux_drm_syncobj_manager_v1" => {
                     state.syncobj = Some(registry.bind(name, 1, qh, ()))
                 }
@@ -3603,6 +3662,106 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
     wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
     wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+
+    impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _manager: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+            event: zwlr_foreign_toplevel_manager_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            match event {
+                zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
+                    state.wlr_told.push((toplevel, Told::default()));
+                }
+                zwlr_foreign_toplevel_manager_v1::Event::Finished => {
+                    state.toplevel_manager_finished = true;
+                }
+                _ => {}
+            }
+        }
+
+        wayland_client::event_created_child!(Client, zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, [
+            zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()),
+        ]);
+    }
+
+    impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            handle: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+            event: zwlr_foreign_toplevel_handle_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            use zwlr_foreign_toplevel_handle_v1::Event;
+            let Some((_, told)) = state.wlr_told.iter_mut().find(|(each, _)| each == handle) else {
+                return;
+            };
+            match event {
+                Event::Title { title } => told.title = title,
+                Event::AppId { app_id } => told.app_id = app_id,
+                Event::OutputEnter { .. } => told.outputs += 1,
+                Event::OutputLeave { .. } => told.outputs -= 1,
+                Event::State { state: bytes } => {
+                    told.states = bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|four| u32::from_ne_bytes(*four))
+                        .collect();
+                }
+                Event::Done => told.done += 1,
+                Event::Closed => told.closed = true,
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _list: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+            event: ext_foreign_toplevel_list_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+                state.ext_told.push((toplevel, Told::default()));
+            }
+        }
+
+        wayland_client::event_created_child!(Client, ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, [
+            ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()),
+        ]);
+    }
+
+    impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            handle: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            event: ext_foreign_toplevel_handle_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            use ext_foreign_toplevel_handle_v1::Event;
+            let Some((_, told)) = state.ext_told.iter_mut().find(|(each, _)| each == handle) else {
+                return;
+            };
+            match event {
+                Event::Title { title } => told.title = title,
+                Event::AppId { app_id } => told.app_id = app_id,
+                Event::Done => told.done += 1,
+                Event::Closed => told.closed = true,
+                _ => {}
+            }
+        }
+    }
     wayland_client::delegate_noop!(Client: ignore wl_subcompositor::WlSubcompositor);
     wayland_client::delegate_noop!(Client: ignore wl_subsurface::WlSubsurface);
 
@@ -35449,6 +35608,356 @@ end)
         /// everything `render::elements` draws below the drag icon, in its
         /// order -- `elements` needs a GPU and only turns each entry into
         /// elements. The pointer is asked of the hit tests themselves.
+        /// The windows for a shell that is its own program (#50): both
+        /// window protocols against a real client binding them as a dock
+        /// does.
+        mod toplevels {
+            use super::*;
+            use zwlr_foreign_toplevel_handle_v1::State;
+
+            /// Let the client's requests in, tell both protocols what
+            /// changed, and let the client read it.
+            fn publish(desk: &mut Desk) {
+                desk.pump();
+                desk.state.publish_toplevels();
+                desk.pump();
+            }
+
+            /// The client binds both, as a dock does, and hears what there is.
+            fn dock(desk: &mut Desk) {
+                desk.client.bind_toplevels(&desk.qh);
+                publish(desk);
+            }
+
+            /// The desk's monitor as a `wl_output` global, which the client
+            /// binds: a monitor the fixture maps has none, and a client can
+            /// only be told it entered an output it holds.
+            fn advertise_monitor(
+                desk: &mut Desk,
+            ) -> smithay::reexports::wayland_server::backend::GlobalId {
+                let output = desk
+                    .state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("the desk's monitor");
+                let global = output.create_global::<Solium>(&desk.display.handle());
+                desk.pump();
+                global
+            }
+
+            fn wlr(desk: &Desk) -> Vec<Told> {
+                desk.client
+                    .wlr_told
+                    .iter()
+                    .map(|(_, told)| told.clone())
+                    .collect()
+            }
+
+            fn ext(desk: &Desk) -> Vec<Told> {
+                desk.client
+                    .ext_told
+                    .iter()
+                    .map(|(_, told)| told.clone())
+                    .collect()
+            }
+
+            /// **A dock is told every window on both lists, and each change
+            /// once**: a window open before it bound, one opened after, a
+            /// title changed, nothing changed, and a window that went.
+            #[test]
+            fn a_dock_is_told_every_window_on_both_lists_and_each_change_once() {
+                let mut desk = Desk::new();
+                let _monitor = advertise_monitor(&mut desk);
+                let first = desk.open_surface();
+                first.toplevel.set_title("one".to_owned());
+                first.toplevel.set_app_id("org.example.one".to_owned());
+                publish(&mut desk);
+                dock(&mut desk);
+                let (wlr_told, ext_told) = (wlr(&desk), ext(&desk));
+                assert_eq!(
+                    (wlr_told.len(), ext_told.len()),
+                    (1, 1),
+                    "the window open before"
+                );
+                assert_eq!(
+                    (
+                        wlr_told[0].title.as_str(),
+                        wlr_told[0].app_id.as_str(),
+                        wlr_told[0].outputs,
+                        wlr_told[0].done,
+                        wlr_told[0].closed,
+                    ),
+                    ("one", "org.example.one", 1, 1, false),
+                    "(the wlr handle's title, app id, monitors, dones, closed)"
+                );
+                assert_eq!(
+                    (
+                        ext_told[0].title.as_str(),
+                        ext_told[0].app_id.as_str(),
+                        ext_told[0].done
+                    ),
+                    ("one", "org.example.one", 1)
+                );
+
+                let second = desk.open_surface();
+                publish(&mut desk);
+                assert_eq!(
+                    (wlr(&desk).len(), ext(&desk).len()),
+                    (2, 2),
+                    "the window opened after"
+                );
+
+                // Counted from here: the second window took the keyboard, and
+                // the first was told it is no longer activated.
+                let before = (wlr(&desk)[0].done, ext(&desk)[0].done);
+                first.toplevel.set_title("two".to_owned());
+                publish(&mut desk);
+                let (wlr_told, ext_told) = (wlr(&desk), ext(&desk));
+                assert_eq!(
+                    (
+                        wlr_told[0].title.as_str(),
+                        wlr_told[0].done,
+                        ext_told[0].title.as_str(),
+                        ext_told[0].done
+                    ),
+                    ("two", before.0 + 1, "two", before.1 + 1),
+                    "a new title, each told once with its done"
+                );
+                publish(&mut desk);
+                assert_eq!(
+                    (wlr(&desk)[0].done, ext(&desk)[0].done),
+                    (before.0 + 1, before.1 + 1),
+                    "nothing changed, and nothing was told"
+                );
+
+                second.toplevel.destroy();
+                second.xdg.destroy();
+                second.surface.destroy();
+                desk.pump();
+                desk.state.sync_panes();
+                publish(&mut desk);
+                assert_eq!(
+                    (
+                        wlr(&desk)[1].closed,
+                        ext(&desk)[1].closed,
+                        wlr(&desk)[0].closed
+                    ),
+                    (true, true, false),
+                    "(the window that went closed on both, the other not)"
+                );
+            }
+
+            /// **The wlr states follow the window**: focused is `activated`,
+            /// and a minimize is `minimized`.
+            #[test]
+            fn the_states_follow_the_window() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                dock(&mut desk);
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("its client");
+                desk.state.focus_window(
+                    &window,
+                    SERIAL_COUNTER.next_serial(),
+                    crate::script::FocusSource::Script,
+                );
+                publish(&mut desk);
+                assert!(
+                    wlr(&desk)[0].states.contains(&u32::from(State::Activated)),
+                    "{:?}",
+                    wlr(&desk)[0].states
+                );
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::Minimize {
+                        id: opened.pane.get(),
+                    }],
+                    ..crate::script::Outcome::default()
+                });
+                publish(&mut desk);
+                assert!(
+                    wlr(&desk)[0].states.contains(&u32::from(State::Minimized)),
+                    "{:?}",
+                    wlr(&desk)[0].states
+                );
+            }
+
+            /// **A dock's requests reach Lua as the `windows` actions of the
+            /// surface "foreign-toplevel"**, each with the window's id, and a
+            /// request that would change nothing is not sent.
+            #[test]
+            fn a_docks_requests_are_the_windows_actions_of_the_foreign_toplevel_surface() {
+                let mut desk = Desk::new();
+                desk.install(
+                    r#"heard = ""
+sol.on("surface", function(surface, action, data)
+    heard = heard .. surface .. " " .. action .. " " .. tostring(data.id) .. ";"
+end)"#,
+                );
+                let opened = desk.open_surface();
+                dock(&mut desk);
+                let id = opened.pane.get();
+                let handle = desk.client.wlr_told[0].0.clone();
+                let seat = desk.client.seat.clone().expect("wl_seat bound");
+                handle.unset_maximized();
+                handle.unset_fullscreen();
+                handle.unset_minimized();
+                handle.set_maximized();
+                handle.set_fullscreen(None);
+                handle.set_minimized();
+                handle.activate(&seat);
+                handle.close();
+                desk.pump();
+                let heard = desk
+                    .state
+                    .scripts
+                    .as_ref()
+                    .map(|scripts| scripts.evaluate("return heard"))
+                    .unwrap_or_default();
+                let one = |action: &str| format!("foreign-toplevel {action} {id};");
+                assert_eq!(
+                    heard,
+                    [
+                        "windows.maximize",
+                        "windows.fullscreen",
+                        "windows.minimize",
+                        "windows.focus",
+                        "windows.close",
+                    ]
+                    .map(one)
+                    .concat(),
+                    "the unsets of what was not set were sent as nothing"
+                );
+            }
+
+            /// **Through the shipped `actions.lua`, a dock's request does
+            /// what the taskbar's does**: minimize puts the window away and
+            /// close closes it.
+            #[test]
+            fn through_actions_lua_a_docks_minimize_and_close_act_on_the_window() {
+                let mut desk = Desk::new();
+                desk.install(r#"require("actions")"#);
+                let opened = desk.open_surface();
+                dock(&mut desk);
+                let handle = desk.client.wlr_told[0].0.clone();
+                handle.set_minimized();
+                desk.pump();
+                let row = |desk: &Desk| {
+                    desk.state
+                        .snapshot()
+                        .windows
+                        .into_iter()
+                        .find(|window| window.id == opened.pane.get())
+                };
+                assert_eq!(row(&desk).map(|window| window.minimized), Some(true));
+                handle.close();
+                desk.pump();
+                desk.ask();
+                assert!(
+                    desk.client
+                        .closes
+                        .contains(&wayland_client::Proxy::id(&opened.toplevel)),
+                    "the client was not asked to close"
+                );
+            }
+
+            /// **`set_rectangle` is the window's `icon`**, in the
+            /// compositor's space, and a rectangle of nothing takes it away.
+            #[test]
+            fn set_rectangle_gives_the_window_its_icon() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                dock(&mut desk);
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("its client");
+                let at = desk.state.space.element_location(&window).expect("mapped");
+                let handle = desk.client.wlr_told[0].0.clone();
+                handle.set_rectangle(&opened.surface, 10, 20, 30, 40);
+                desk.pump();
+                let icon = |desk: &Desk| {
+                    desk.state
+                        .snapshot()
+                        .windows
+                        .into_iter()
+                        .find(|each| each.id == opened.pane.get())
+                        .and_then(|each| each.icon)
+                };
+                assert_eq!(
+                    icon(&desk),
+                    Some(crate::script::Rect {
+                        x: f64::from(at.x + 10),
+                        y: f64::from(at.y + 20),
+                        w: 30.0,
+                        h: 40.0,
+                    })
+                );
+                handle.set_rectangle(&opened.surface, 0, 0, 0, 0);
+                desk.pump();
+                assert_eq!(icon(&desk), None);
+            }
+
+            /// **`toplevels = { list = false, manage = false }` takes both
+            /// away**: every handle given out is closed, the manager is told
+            /// it is finished, a client connecting afterwards is offered
+            /// neither, and offered again both are back.
+            #[test]
+            fn taking_the_protocols_away_closes_their_handles_and_hides_them() {
+                let mut desk = Desk::new();
+                let _opened = desk.open_surface();
+                dock(&mut desk);
+                let offer = |desk: &mut Desk, list: bool, manage: bool| {
+                    desk.state.apply(crate::script::Outcome {
+                        commands: vec![crate::script::Command::Toplevels(
+                            crate::toplevels::Settings { list, manage },
+                        )],
+                        ..crate::script::Outcome::default()
+                    });
+                    publish(desk);
+                };
+                offer(&mut desk, false, false);
+                assert_eq!(
+                    (
+                        wlr(&desk)[0].closed,
+                        ext(&desk)[0].closed,
+                        desk.client.toplevel_manager_finished
+                    ),
+                    (true, true, true)
+                );
+                let (_conn, _queue, late) = connect(&mut desk.display, &mut desk.state);
+                assert!(
+                    late.toplevel_globals.is_empty(),
+                    "offered {:?}",
+                    late.toplevel_globals
+                );
+                offer(&mut desk, true, true);
+                let (_conn, _queue, later) = connect(&mut desk.display, &mut desk.state);
+                let mut offered: Vec<String> = later
+                    .toplevel_globals
+                    .iter()
+                    .map(|(interface, _)| interface.clone())
+                    .collect();
+                offered.sort();
+                assert_eq!(
+                    offered,
+                    [
+                        "ext_foreign_toplevel_list_v1",
+                        "zwlr_foreign_toplevel_manager_v1"
+                    ]
+                );
+            }
+        }
+
         mod stacking {
             use super::*;
             use crate::render::{Stacked, Walked};
