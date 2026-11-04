@@ -972,9 +972,23 @@ local defaults = {
     --            a dock shows a window is that window's `icon` in
     --            `sol.windows()`.
     --
-    -- Every client is offered both: `false` takes one away from them all,
-    -- closing what it handed out. Neither is needed by Solium's own shell.
-    toplevels = { list = true, manage = true },
+    --   capture  what a screen share of one window is a picture of, through
+    --            ext-image-copy-capture-v1, naming the window by its handle
+    --            on `list` (so it needs `list`):
+    --              "client"  the window as its application drew it, its
+    --                        menus over it, the same whatever frame it has
+    --              "pane"    the window as it is on screen: its frame, its
+    --                        shadow's room and the effects drawn on it
+    --              false     no window can be captured; monitors still can
+    --            Either way it is the window alone, at its monitor's scale,
+    --            whatever covers it and wherever it is: a minimised window
+    --            or one on another workspace is captured too, and is told to
+    --            keep drawing while it is.
+    --
+    -- Every client is offered both lists: `false` takes one away from them
+    -- all, closing what it handed out. Neither is needed by Solium's own
+    -- shell.
+    toplevels = { list = true, manage = true, capture = "client" },
 
     -- Shells that are their own programs, through wlr-layer-shell: bars,
     -- docks, desktops and wallpapers drawn by a client rather than by a

@@ -2,10 +2,11 @@
 //! newer way.
 //!
 //! The successor to `wlr-screencopy` (`screencopy.rs`), offered beside it.
-//! A client names what it wants as an `ext_image_capture_source_v1` -- here a
-//! monitor, through `ext_output_image_capture_source_manager_v1` -- opens a
-//! session on it, is told once what buffer to allocate, and then asks for
-//! frames into that buffer one after another until it is done.
+//! A client names what it wants as an `ext_image_capture_source_v1` -- a
+//! monitor, through `ext_output_image_capture_source_manager_v1`, or one
+//! window, through `ext_foreign_toplevel_image_capture_source_manager_v1`
+//! -- opens a session on it, is told what buffer to allocate, and then asks
+//! for frames into that buffer one after another until it is done.
 //!
 //! ## Why it is offered
 //!
@@ -23,21 +24,34 @@
 //! `Solium::pending_captures`, and is filled by the same `screencopy::settle`
 //! from the same render pass. This file only asks and answers.
 //!
-//! Two parts of the protocol are not offered. A window as a source
-//! (`ext_foreign_toplevel_image_capture_source_manager_v1`) needs
-//! `ext-foreign-toplevel-list-v1` first, and is #47. A pointer cursor session
-//! is accepted, and the capture session it hands out says `stopped` at once:
-//! the cursor is in the picture when a client asks for `paint_cursors`, and a
-//! separate stream of it is something nothing here draws.
+//! ## One window
+//!
+//! A window is named by its handle on `ext-foreign-toplevel-list-v1`
+//! (`toplevels.rs`), and its picture is the window alone, drawn at its
+//! monitor's scale whatever covers it or wherever it is (#47):
+//! `toplevels.capture` in `config.lua` says whether that is the client as it
+//! drew itself (`"client"`, the default) or the pane as it is on screen
+//! (`"pane"`), and `false` stops offering windows at all. A session is told
+//! the window's size again whenever it changes, every pass
+//! ([`Solium::follow_window_captures`]), and stops when the window goes or
+//! the setting takes windows away.
+//!
+//! A pointer cursor session is accepted, and the capture session it hands
+//! out says `stopped` at once: the cursor is in the picture when a client
+//! asks for `paint_cursors`, and a separate stream of it is something
+//! nothing here draws.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use smithay::{
     output::Output,
     reexports::{
         wayland_protocols::ext::{
             image_capture_source::v1::server::{
+                ext_foreign_toplevel_image_capture_source_manager_v1::{
+                    self, ExtForeignToplevelImageCaptureSourceManagerV1,
+                },
                 ext_image_capture_source_v1::{self, ExtImageCaptureSourceV1},
                 ext_output_image_capture_source_manager_v1::{
                     self, ExtOutputImageCaptureSourceManagerV1,
@@ -63,8 +77,15 @@ use smithay::{
 
 use crate::screencopy::{Answer, BYTES, Capture, FORMAT, OutputState};
 use crate::state::Solium;
+use crate::toplevels::WindowCapture;
 
-/// The two globals, held for the session.
+/// Whether windows are offered as capture sources: read by the window source
+/// manager's `can_view`.
+#[derive(Debug, Clone)]
+pub(crate) struct WindowsOffered(Arc<AtomicBool>);
+
+/// The globals, held for the session, and the sessions on a window, which
+/// are told when it changes.
 #[derive(Debug)]
 pub(crate) struct ImageCopyState {
     #[expect(
@@ -74,38 +95,71 @@ pub(crate) struct ImageCopyState {
     sources: GlobalId,
     #[expect(
         dead_code,
+        reason = "registers ext_foreign_toplevel_image_capture_source_manager_v1; dropping it would remove the global"
+    )]
+    window_sources: GlobalId,
+    #[expect(
+        dead_code,
         reason = "registers ext_image_copy_capture_manager_v1; dropping it would remove the global"
     )]
     manager: GlobalId,
+    windows_offered: WindowsOffered,
+    window_sessions: Vec<ExtImageCopyCaptureSessionV1>,
 }
 
 impl ImageCopyState {
     pub(crate) fn new<D>(display: &DisplayHandle) -> Self
     where
         D: GlobalDispatch<ExtOutputImageCaptureSourceManagerV1, ()>
+            + GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, WindowsOffered>
             + GlobalDispatch<ExtImageCopyCaptureManagerV1, ()>
             + 'static,
     {
+        let windows_offered = WindowsOffered(Arc::new(AtomicBool::new(true)));
         Self {
             sources: display.create_global::<D, ExtOutputImageCaptureSourceManagerV1, _>(1, ()),
+            window_sources: display
+                .create_global::<D, ExtForeignToplevelImageCaptureSourceManagerV1, _>(
+                    1,
+                    windows_offered.clone(),
+                ),
             manager: display.create_global::<D, ExtImageCopyCaptureManagerV1, _>(1, ()),
+            windows_offered,
+            window_sessions: Vec::new(),
         }
+    }
+
+    /// Offer windows as capture sources, or hide the manager from clients
+    /// that have not bound it. Sessions already open on a window stop at the
+    /// next pass ([`Solium::follow_window_captures`]).
+    pub(crate) fn offer_windows(&self, on: bool) {
+        self.windows_offered.0.store(on, Ordering::Relaxed);
     }
 }
 
-/// What an `ext_image_capture_source_v1` names: a monitor, or nothing when
-/// the `wl_output` it was made from had already gone.
+/// What an `ext_image_capture_source_v1` or a session names.
+#[derive(Debug, Clone)]
+enum Subject {
+    /// A monitor.
+    Output(Output),
+    /// A window, by the id scripts hold it by.
+    Window(u64),
+    /// Nothing: a `wl_output` or a window handle already gone when the
+    /// source was made, or a cursor session's. Its sessions stop at once.
+    Nothing,
+}
+
+/// What an `ext_image_capture_source_v1` names.
 #[derive(Debug)]
 pub(crate) struct Source {
-    output: Option<Output>,
+    subject: Subject,
 }
 
 /// A capture session, kept in its protocol object's own data.
 #[derive(Debug)]
 pub(crate) struct Session {
-    /// The monitor. `None` for a session that never had one, which is
-    /// stopped from the start.
-    output: Option<Output>,
+    /// What it captures.
+    subject: Subject,
     /// Whether the pointer is drawn into its frames (`paint_cursors`).
     cursor: bool,
     inner: Mutex<SessionState>,
@@ -122,12 +176,96 @@ struct SessionState {
     stopped: bool,
 }
 
-/// One announcement of buffer constraints, and the monitor it was made for.
-#[derive(Debug, Clone, Copy)]
-struct Announced {
-    output_state: OutputState,
+/// One announcement of buffer constraints, and what it was made for: the
+/// monitor, as it was, the region of it or the window's own rectangle, the
+/// buffer, and for a window, which one and what of it is drawn.
+#[derive(Debug, Clone)]
+pub(crate) struct Announced {
+    output: Output,
+    pub(crate) output_state: OutputState,
     region: Rectangle<i32, Logical>,
-    size: Size<i32, BufferCoords>,
+    pub(crate) size: Size<i32, BufferCoords>,
+    pub(crate) window: Option<(u64, WindowCapture)>,
+}
+
+impl Announced {
+    /// Whether a buffer allocated for `self` is still the one to allocate
+    /// for `now`. A window's monitor may change under it as it moves; only
+    /// its size and what is drawn of it matter.
+    fn holds(&self, now: &Self) -> bool {
+        self.size == now.size
+            && self.window == now.window
+            && (self.window.is_some() || self.output_state == now.output_state)
+    }
+}
+
+/// What a session on `subject` would be told to allocate now, or `None` for
+/// a subject there is no picture of any more.
+fn extent(state: &Solium, subject: &Subject) -> Option<Announced> {
+    match subject {
+        Subject::Output(output) => output_extent(state, output),
+        Subject::Window(id) => window_extent(state, *id),
+        Subject::Nothing => None,
+    }
+}
+
+/// A whole monitor, in its own logical coordinates, and the buffer in device
+/// pixels -- the same sums `wlr-screencopy`'s `capture_output` makes. `None`
+/// for a monitor gone or with no mode.
+fn output_extent(state: &Solium, output: &Output) -> Option<Announced> {
+    state.space.output_geometry(output)?;
+    let output_state = OutputState::of(output)?;
+    let region = Rectangle::from_size(state.output_logical_size(output));
+    let size = crate::screencopy::capture_rect(
+        region,
+        output_state.scale,
+        output_state.mode,
+        output_state.transform,
+    )
+    .size;
+    (size.w > 0 && size.h > 0).then(|| Announced {
+        output: output.clone(),
+        output_state,
+        region,
+        size,
+        window: None,
+    })
+}
+
+/// Window `id` as `toplevels.capture` draws it: its client's window geometry
+/// or its pane's outer rectangle, at the scale of the monitor it is on (the
+/// first monitor for one on none). `None` for a window gone, or while
+/// windows are not offered.
+/// `state::tests::real_client::reflow_on_close::window_capture`.
+pub(crate) fn window_extent(state: &Solium, id: u64) -> Option<Announced> {
+    let settings = state.toplevels.settings;
+    if !settings.list {
+        return None;
+    }
+    let look = settings.capture;
+    let pane = state.panes.by_script_id(id)?;
+    let window = pane.client()?;
+    let logical = match look {
+        WindowCapture::Off => return None,
+        WindowCapture::Client => window.geometry().size,
+        WindowCapture::Pane => crate::render::flat(state, window)?.outer,
+    };
+    let output = state
+        .pane_outer_of(pane.id())
+        .and_then(|outer| state.output_of(outer))
+        .or_else(|| state.space.outputs().next().cloned())?;
+    let output_state = OutputState::of(&output)?;
+    let physical = logical
+        .to_f64()
+        .to_physical(output_state.scale)
+        .to_i32_round();
+    (physical.w > 0 && physical.h > 0).then(|| Announced {
+        output,
+        output_state,
+        region: Rectangle::from_size(logical),
+        size: (physical.w, physical.h).into(),
+        window: Some((id, look)),
+    })
 }
 
 /// A frame, kept in its protocol object's own data.
@@ -151,10 +289,11 @@ pub(crate) struct CursorSession {
     taken: AtomicBool,
 }
 
-/// Tell a session what buffer to allocate, as the monitor is now.
+/// Tell a session what buffer to allocate, as its monitor or window is now.
 ///
-/// A session whose monitor has gone, or has no mode, is stopped instead: the
-/// protocol's word for a source that is no longer there.
+/// A session whose monitor has gone, or has no mode, or whose window has
+/// gone, is stopped instead: the protocol's word for a source that is no
+/// longer there.
 fn announce(state: &Solium, session: &ExtImageCopyCaptureSessionV1, data: &Session) {
     let Ok(mut held) = data.inner.lock() else {
         return;
@@ -162,42 +301,20 @@ fn announce(state: &Solium, session: &ExtImageCopyCaptureSessionV1, data: &Sessi
     if held.stopped {
         return;
     }
-    let announced = data
-        .output
-        .as_ref()
-        .filter(|output| state.space.output_geometry(output).is_some())
-        .and_then(|output| {
-            let output_state = OutputState::of(output)?;
-            // The whole monitor, in its own logical coordinates, and the
-            // buffer in device pixels -- the same sums `wlr-screencopy`'s
-            // `capture_output` makes.
-            let region = Rectangle::from_size(state.output_logical_size(output));
-            let size = crate::screencopy::capture_rect(
-                region,
-                output_state.scale,
-                output_state.mode,
-                output_state.transform,
-            )
-            .size;
-            (size.w > 0 && size.h > 0).then_some(Announced {
-                output_state,
-                region,
-                size,
-            })
-        });
-    let Some(announced) = announced else {
+    let Some(announced) = extent(state, &data.subject) else {
         held.announced = None;
         held.stopped = true;
         session.stopped();
         return;
     };
+    let size = announced.size;
     held.announced = Some(announced);
     drop(held);
     #[expect(
         clippy::cast_sign_loss,
         reason = "a buffer size is positive by construction"
     )]
-    session.buffer_size(announced.size.w as u32, announced.size.h as u32);
+    session.buffer_size(size.w as u32, size.h as u32);
     session.shm_format(FORMAT);
     session.done();
 }
@@ -220,8 +337,13 @@ fn stop(session: &ExtImageCopyCaptureSessionV1) {
 pub(crate) fn ready(frame: &ExtImageCopyCaptureFrameV1, capture: &Capture) {
     // The rows are stored in the monitor's buffer orientation, as the
     // `wlr-screencopy` path stores them; this says which that is, so the
-    // client can turn the picture upright.
-    frame.transform(capture.output_state.transform.into());
+    // client can turn the picture upright. A window's is drawn upright.
+    let transform = if capture.window.is_some() {
+        smithay::utils::Transform::Normal
+    } else {
+        capture.output_state.transform
+    };
+    frame.transform(transform.into());
     // The whole frame, every time. The protocol only requires it of the
     // first; claiming more than changed costs an encoder a frame it could
     // have skipped, and claiming less would lose real motion.
@@ -249,19 +371,68 @@ pub(crate) fn failed(state: &Solium, capture: &Capture) {
     let Answer::Ext { frame, session } = &capture.frame else {
         return;
     };
-    let mapped = state.space.output_geometry(&capture.output).is_some();
-    match OutputState::of(&capture.output).filter(|_| mapped) {
+    let Some(data) = session.data::<Session>() else {
+        frame.failed(ext_image_copy_capture_frame_v1::FailureReason::Unknown);
+        return;
+    };
+    let asked = Announced {
+        output: capture.output.clone(),
+        output_state: capture.output_state,
+        region: capture.region,
+        size: capture.size,
+        window: capture.window,
+    };
+    match extent(state, &data.subject) {
         None => {
             stop(session);
             frame.failed(ext_image_copy_capture_frame_v1::FailureReason::Stopped);
         }
-        Some(now) if now != capture.output_state => {
-            if let Some(data) = session.data::<Session>() {
-                announce(state, session, data);
-            }
+        Some(now) if !asked.holds(&now) => {
+            announce(state, session, data);
             frame.failed(ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints);
         }
         Some(_) => frame.failed(ext_image_copy_capture_frame_v1::FailureReason::Unknown),
+    }
+}
+
+impl Solium {
+    /// Tell each session on a window what changed since it was last told:
+    /// a new size, a new `toplevels.capture`, announced again; a window gone,
+    /// or windows no longer offered, stopped. Every pass, beside the window
+    /// lists, and as cheap with no session on a window: nothing at all.
+    /// `state::tests::real_client::reflow_on_close::window_capture`.
+    pub(crate) fn follow_window_captures(&mut self) {
+        self.image_copy_state
+            .window_sessions
+            .retain(|session| session.is_alive());
+        let sessions = self.image_copy_state.window_sessions.clone();
+        for session in &sessions {
+            let Some(data) = session.data::<Session>() else {
+                continue;
+            };
+            let held = data
+                .inner
+                .lock()
+                .ok()
+                .and_then(|held| (!held.stopped).then(|| held.announced.clone()));
+            let Some(announced) = held else {
+                continue;
+            };
+            match extent(self, &data.subject) {
+                None => stop(session),
+                Some(now) => {
+                    if !announced.is_some_and(|announced| announced.holds(&now)) {
+                        announce(self, session, data);
+                    }
+                }
+            }
+        }
+        self.image_copy_state.window_sessions.retain(|session| {
+            session
+                .data::<Session>()
+                .and_then(|data| data.inner.lock().ok().map(|held| !held.stopped))
+                .unwrap_or(false)
+        });
     }
 }
 
@@ -310,7 +481,53 @@ impl Dispatch<ExtOutputImageCaptureSourceManagerV1, ()> for Solium {
             data_init.init(
                 source,
                 Source {
-                    output: Output::from_resource(&output),
+                    subject: Output::from_resource(&output)
+                        .map_or(Subject::Nothing, Subject::Output),
+                },
+            );
+        }
+    }
+}
+
+impl GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, WindowsOffered> for Solium {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ExtForeignToplevelImageCaptureSourceManagerV1>,
+        _offered: &WindowsOffered,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+
+    fn can_view(_client: Client, offered: &WindowsOffered) -> bool {
+        offered.0.load(Ordering::Relaxed)
+    }
+}
+
+impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ()> for Solium {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _manager: &ExtForeignToplevelImageCaptureSourceManagerV1,
+        request: ext_foreign_toplevel_image_capture_source_manager_v1::Request,
+        (): &(),
+        _handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let ext_foreign_toplevel_image_capture_source_manager_v1::Request::CreateSource {
+            source,
+            toplevel_handle,
+        } = request
+        {
+            // A window that went between its handle's last event and this
+            // makes a source of nothing, as a monitor unplugged does.
+            data_init.init(
+                source,
+                Source {
+                    subject: crate::toplevels::listed_id(&toplevel_handle)
+                        .map_or(Subject::Nothing, Subject::Window),
                 },
             );
         }
@@ -327,8 +544,8 @@ impl Dispatch<ExtImageCaptureSourceV1, Source> for Solium {
         _handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        // `destroy` only, and sessions made from it carry on: they hold the
-        // monitor themselves.
+        // `destroy` only, and sessions made from it carry on: they hold what
+        // they capture themselves.
     }
 }
 
@@ -361,9 +578,10 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Solium {
                 source,
                 options,
             } => {
-                let output = source
+                let subject = source
                     .data::<Source>()
-                    .and_then(|source| source.output.clone());
+                    .map_or(Subject::Nothing, |source| source.subject.clone());
+                let on_window = matches!(subject, Subject::Window(_));
                 let options = match options {
                     WEnum::Value(options) => Some(options),
                     WEnum::Unknown(_) => None,
@@ -371,7 +589,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Solium {
                 let session = data_init.init(
                     session,
                     Session {
-                        output,
+                        subject,
                         cursor: options.is_some_and(|options| {
                             options
                                 .contains(ext_image_copy_capture_manager_v1::Options::PaintCursors)
@@ -391,6 +609,9 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Solium {
                 // wait for one (`screencopy::waits`).
                 if let Some(data) = session.data::<Session>() {
                     announce(state, &session, data);
+                }
+                if on_window {
+                    state.image_copy_state.window_sessions.push(session);
                 }
             }
             ext_image_copy_capture_manager_v1::Request::CreatePointerCursorSession {
@@ -422,7 +643,7 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSession> for Solium {
             let session = data_init.init(
                 session,
                 Session {
-                    output: None,
+                    subject: Subject::Nothing,
                     cursor: false,
                     inner: Mutex::default(),
                 },
@@ -574,8 +795,8 @@ fn capture(
         .inner
         .lock()
         .ok()
-        .and_then(|held| (!held.stopped).then_some(held.announced).flatten());
-    let (Some(announced), Some(output)) = (announced, data.output.clone()) else {
+        .and_then(|held| (!held.stopped).then(|| held.announced.clone()).flatten());
+    let Some(announced) = announced else {
         frame.failed(ext_image_copy_capture_frame_v1::FailureReason::Stopped);
         return;
     };
@@ -594,13 +815,14 @@ fn capture(
             frame: frame.clone(),
             session: session.clone(),
         },
-        output,
+        output: announced.output,
         region: announced.region,
         size: announced.size,
         output_state: announced.output_state,
         cursor: data.cursor,
         buffer: Some(buffer),
         damage: true,
+        window: announced.window,
     });
     state.redraw = true;
 }

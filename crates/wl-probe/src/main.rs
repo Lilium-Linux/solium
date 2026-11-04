@@ -24,6 +24,7 @@ use std::time::Duration;
 mod crop;
 mod dmabuf;
 mod pixels;
+mod toplevels;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
@@ -264,6 +265,15 @@ xkb_symbols \"pc_ua_us_2_inet(evdev)\" {
 }
 
 fn main() {
+    // The windows on `ext-foreign-toplevel-list-v1`, by the identifier a
+    // capture of one names it by: `grim -T <identifier>` (#47).
+    if std::env::var_os("WL_PROBE_TOPLEVELS").is_some() {
+        if let Err(err) = toplevels::list() {
+            eprintln!("wl-probe: the window list: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::var_os("WL_PROBE_DMABUF").is_some() {
         if let Err(err) = dmabuf::check() {
             eprintln!("wl-probe: DMA-BUF feedback: {err}");
