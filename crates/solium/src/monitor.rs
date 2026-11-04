@@ -173,6 +173,10 @@ pub(crate) struct Layout {
     pub(crate) unresolved: Vec<String>,
 }
 
+/// One monitor as it is to be lit: its name, whether it is on, its mode, its
+/// rotation and its variable refresh. See [`Arrangement::lit_as`].
+pub(crate) type Lit = (String, bool, Wanted, Option<Transform>, Option<bool>);
+
 /// The arrangement a script asked for.
 ///
 /// Empty means "arrange them yourself", which is the default and is what a
@@ -183,22 +187,32 @@ pub(crate) struct Arrangement {
 }
 
 impl Arrangement {
-    /// Which monitors this arrangement enables, by name, in a form two
-    /// arrangements can be compared on.
+    /// What each monitor this arrangement names is to be lit with -- whether
+    /// it is on, its mode, its rotation and its variable refresh -- by name,
+    /// in a form two arrangements can be compared on.
     ///
-    /// Only the enablement, because that is the only part of a monitor
-    /// configuration that changes *which screens exist*. Moving one, or
-    /// changing its mode, is answered by `place_outputs` and a modeset; taking
-    /// one away is an unplug and has to go through the same path a real unplug
-    /// does.
-    pub(crate) fn enablement(&self) -> Vec<(String, bool)> {
-        let mut names: Vec<(String, bool)> = self
+    /// The part of an arrangement that a screen already lit can only take by
+    /// being lit again (#51): a backend asked to look again
+    /// (`Solium::rescan_outputs`) drops a screen whose entry here changed and
+    /// lights it again with the new one, the path a cable takes. Placement,
+    /// scale and `primary` are not in it: `place_outputs` answers those.
+    /// `tests::a_changed_mode_rotation_or_vrr_is_a_change_in_how_a_monitor_is_lit`.
+    pub(crate) fn lit_as(&self) -> Vec<Lit> {
+        let mut lit: Vec<_> = self
             .placements
             .iter()
-            .map(|place| (place.name.clone(), place.enabled))
+            .map(|place| {
+                (
+                    place.name.clone(),
+                    place.enabled,
+                    place.mode,
+                    place.transform,
+                    place.vrr,
+                )
+            })
             .collect();
-        names.sort();
-        names
+        lit.sort_by(|a, b| a.0.cmp(&b.0));
+        lit
     }
 
     pub(crate) fn new(placements: Vec<Placement>) -> Self {
@@ -501,6 +515,20 @@ pub(crate) fn transform(name: &str) -> Option<Transform> {
     }
 }
 
+/// A transform by the name a configuration writes: what [`transform`] reads.
+pub(crate) fn transform_name(transform: Transform) -> &'static str {
+    match transform {
+        Transform::Normal => "normal",
+        Transform::_90 => "90",
+        Transform::_180 => "180",
+        Transform::_270 => "270",
+        Transform::Flipped => "flipped",
+        Transform::Flipped90 => "flipped-90",
+        Transform::Flipped180 => "flipped-180",
+        Transform::Flipped270 => "flipped-270",
+    }
+}
+
 /// An alignment by the name a configuration writes.
 pub(crate) fn align(name: &str) -> Option<Align> {
     match name.trim().to_ascii_lowercase().as_str() {
@@ -589,22 +617,60 @@ mod tests {
             .collect()
     }
 
-    /// Only enablement, and order-independent. Two configurations that enable
-    /// the same monitors are the same set of screens however they are written,
-    /// and a reload that merely reordered the list must not tear every monitor
-    /// down and build it again.
+    /// Each of the three, on one monitor of two, is a change in how it is lit;
+    /// a move or a new scale is not, and neither is the order they are
+    /// written in.
     #[test]
-    fn enablement_ignores_everything_but_which_monitors_are_on() {
-        let off = |name: &str| Placement {
-            enabled: false,
-            ..named(name)
+    fn a_changed_mode_rotation_or_vrr_is_a_change_in_how_a_monitor_is_lit() {
+        let base = Arrangement::new(vec![named("DP-1"), named("DP-2")]);
+        let with = |change: fn(&mut Placement)| {
+            let mut second = named("DP-2");
+            change(&mut second);
+            Arrangement::new(vec![second, named("DP-1")])
         };
-        let one = Arrangement::new(vec![named("DP-1"), off("DP-2")]);
-        let reordered = Arrangement::new(vec![off("DP-2"), at("DP-1", 100, 0)]);
-        assert_eq!(one.enablement(), reordered.enablement());
+        assert_eq!(base.lit_as(), with(|_| {}).lit_as(), "the order");
+        assert_eq!(
+            base.lit_as(),
+            with(|place| {
+                place.at = Some((1920, 0).into());
+                place.scale = Scaling::Fixed(1.5);
+            })
+            .lit_as(),
+            "a move and a scale"
+        );
+        for (what, change) in [
+            (
+                "a mode",
+                (|place: &mut Placement| {
+                    place.mode = Wanted::Exact {
+                        width: 1280,
+                        height: 720,
+                        refresh: Some(60),
+                    };
+                }) as fn(&mut Placement),
+            ),
+            ("a rotation", |place| place.transform = Some(Transform::_90)),
+            ("vrr", |place| place.vrr = Some(true)),
+            ("off", |place| place.enabled = false),
+        ] {
+            assert_ne!(base.lit_as(), with(change).lit_as(), "{what}");
+        }
+    }
 
-        let both_on = Arrangement::new(vec![named("DP-1"), named("DP-2")]);
-        assert_ne!(one.enablement(), both_on.enablement());
+    #[test]
+    fn a_transform_name_reads_back_as_itself() {
+        for transform in [
+            Transform::Normal,
+            Transform::_90,
+            Transform::_180,
+            Transform::_270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ] {
+            assert_eq!(super::transform(transform_name(transform)), Some(transform));
+        }
     }
 
     fn at(name: &str, x: i32, y: i32) -> Placement {

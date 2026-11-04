@@ -586,11 +586,12 @@ local defaults = {
     --                                     outside it, such as 0 or 10, is
     --                                     worked out instead with no warning.
     --
-    -- `super+shift+r` applies a change to the placement keys, `scale`,
-    -- `primary` and `enabled` without ending the session. `mode`, `vrr` and
-    -- `transform` are read when a monitor is first lit, so on one already lit
-    -- they wait until it is next plugged in, or a reload with
-    -- `enabled = false` and another with it back.
+    -- `super+shift+r` applies a change to any of these without ending the
+    -- session. A new `mode`, `vrr` or `transform` on a monitor already lit
+    -- lights it again, as unplugging it and plugging it back in would, so it
+    -- goes dark for a moment; the placement keys, `scale` and `primary` move
+    -- nothing but what they say. A program can arrange them too: see
+    -- `output_management` below.
     --
     -- A monitor plugged in while the session runs is driven with its entry
     -- here, and one unplugged leaves its windows on the monitors that remain.
@@ -989,6 +990,20 @@ local defaults = {
     -- all, closing what it handed out. Neither is needed by Solium's own
     -- shell.
     toplevels = { list = true, manage = true, capture = "client" },
+
+    -- The monitors, for a program that arranges them (#51): kanshi's
+    -- profiles, wlr-randr, a settings panel, over wlr-output-management-v1.
+    -- Every connected monitor is listed with the modes it offers and how it is
+    -- driven now, one switched off by `monitors` below too, so a program can
+    -- turn it on. What a program proposes is read whole -- each mode one its
+    -- monitor offers, each scale between 0.5 and 8, at least one monitor on --
+    -- and then reaches Lua as the action `monitors.apply` from the surface
+    -- "output-management", which the shipped `output_management.lua` answers
+    -- with `sol.monitors`, keeping `primary` from `monitors`. A new mode,
+    -- rotation or vrr lights that monitor again, as plugging it in does. It
+    -- lasts until the configuration is read again, which starts from
+    -- `monitors`. `false` offers it to no program.
+    output_management = true,
 
     -- Shells that are their own programs, through wlr-layer-shell: bars,
     -- docks, desktops and wallpapers drawn by a client rather than by a

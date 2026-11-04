@@ -70,6 +70,10 @@ sol.x11(config.x11)
 -- Which window protocols a shell that is its own program is offered (#50).
 -- See `config.lua`.
 sol.toplevels(config.toplevels)
+-- The monitors for a program that arranges them, and the answer to what it
+-- proposes (#51). See `config.lua` and `output_management.lua`.
+sol.output_management(config.output_management ~= false)
+require("output_management")
 -- Who draws a window's frame, Solium or the application (#462). See
 -- `config.lua`.
 sol.frames(config.frames)

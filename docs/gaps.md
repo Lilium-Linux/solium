@@ -33,7 +33,6 @@ several are missing:
 | Limitation | Impact | Tracking |
 |---|---|---|
 | Window and workspace management | External taskbars and workspace switchers lack foreign-toplevel and workspace-management interfaces. | [#50](https://github.com/Lilium-Linux/solium/issues/50), [#60](https://github.com/Lilium-Linux/solium/issues/60) |
-| Display configuration clients | Tools such as kanshi cannot arrange outputs through output-management; use Lua monitor configuration instead. | [#51](https://github.com/Lilium-Linux/solium/issues/51) |
 | Clipboard managers | Data-control (wlr and ext) works, but every client is offered it, so any client can read every copy without focus. Limiting it to trusted clients needs security-context. | [#68](https://github.com/Lilium-Linux/solium/issues/68) |
 | Client-supplied window icons | Application icons resolve through desktop files; per-toplevel icons through xdg-toplevel-icon are unavailable. | [#73](https://github.com/Lilium-Linux/solium/issues/73) |
 | Portals | Screencopy and session portal configuration exist. Region screenshots keep hosted scenes and layers, recording clients get DMA-BUF feedback and upright buffers, and layer-shell choosers such as slurp get the keyboard; screen sharing through xdg-desktop-portal-wlr streams in a nested session (`dev/screencast-check.sh`) and through a browser. A run on hardware remains, a browser sharing a rotated output receives its frames upside down, and file-chooser grants and parenting are untested. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |

@@ -912,6 +912,10 @@ pub(crate) enum Command {
     /// offered: `sol.toplevels`, from `config.toplevels` (#50). See
     /// `crate::toplevels::Settings`.
     Toplevels(crate::toplevels::Settings),
+    /// Whether `zwlr-output-management-v1` is offered:
+    /// `sol.output_management`, from `config.output_management` (#51). See
+    /// `crate::output_management`.
+    OutputManagement(bool),
     /// Who draws a Wayland window's frame, Solium or the application:
     /// `sol.frames`, from `config.frames` (#462). See `crate::framing`.
     Frames(crate::framing::Settings),
@@ -1063,6 +1067,7 @@ impl Command {
             | Self::X11(_)
             | Self::WorkspacesOffered(_)
             | Self::Toplevels(_)
+            | Self::OutputManagement(_)
             | Self::Frames(_)
             | Self::LayerShell(_)
             | Self::FocusMode { .. }
@@ -7071,6 +7076,19 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // Whether a program that arranges the monitors -- kanshi, wlr-randr, a
+    // settings panel -- sees them, through `zwlr-output-management-v1`
+    // (#51): `config.output_management`, which the shipped `init.lua` hands
+    // over. `tests::sol_output_management_is_a_flag`.
+    sol.set(
+        "output_management",
+        lua.create_function(|lua, offered: bool| {
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::OutputManagement(offered));
+            })
+        })?,
+    )?;
+
     // Whether a shell that is its own program sees the workspaces, through
     // `ext-workspace-v1` (#60): `config.workspaces.offered`, which the shipped
     // `workspaces.lua` hands over. `tests::sol_workspaces_offered_is_a_flag`.
@@ -11516,6 +11534,126 @@ mod tests {
     /// `the_shipped_configuration_s_lock_table_matches_the_rust_default`
     /// holds for `lock`: a future edit to one without the other must fail a
     /// test rather than ship a mismatch.
+    #[test]
+    fn sol_output_management_is_a_flag() {
+        let directory = std::env::temp_dir().join("solium-script-test-output-management");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a temporary directory");
+        let config = directory.join("init.lua");
+        let offered = |source: &str| {
+            std::fs::write(&config, source).expect("writing the test script");
+            let mut scripts = Scripts::load(&config).expect("loading the test script");
+            scripts
+                .startup()
+                .commands
+                .into_iter()
+                .find_map(|command| match command {
+                    Command::OutputManagement(offered) => Some(offered),
+                    _ => None,
+                })
+        };
+        assert_eq!(offered("sol.output_management(false)"), Some(false));
+        assert_eq!(offered("sol.output_management(true)"), Some(true));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The shipped configuration answers `monitors.apply` with
+    /// `sol.monitors`** (#51): a program's rows become the arrangement, mode,
+    /// rotation, scale and place, with `primary` kept from
+    /// `config.monitors`, and the protocol is offered.
+    #[test]
+    fn the_shipped_configuration_answers_monitors_apply_with_sol_monitors() {
+        use crate::json::Json;
+        let Some((directory, mut scripts)) = shipped_init_with_user(
+            "solium-script-test-monitors-apply",
+            r#"return { monitors = { { name = "DP-1", primary = true } } }"#,
+        ) else {
+            return;
+        };
+        let startup = scripts.startup();
+        assert!(
+            startup
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::OutputManagement(true))),
+            "the shipped init.lua did not offer it"
+        );
+        let object = |pairs: Vec<(&str, Json)>| {
+            Json::Object(
+                pairs
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned(), value))
+                    .collect(),
+            )
+        };
+        let row = object(vec![
+            ("name", Json::Text("DP-1".to_owned())),
+            ("enabled", Json::Bool(true)),
+            ("x", Json::Number(1920.0)),
+            ("y", Json::Number(0.0)),
+            (
+                "mode",
+                object(vec![
+                    ("w", Json::Number(1280.0)),
+                    ("h", Json::Number(720.0)),
+                    ("refresh", Json::Number(60.0)),
+                ]),
+            ),
+            ("scale", Json::Number(1.5)),
+            ("transform", Json::Text("90".to_owned())),
+        ]);
+        let off = object(vec![
+            ("name", Json::Text("DP-2".to_owned())),
+            ("enabled", Json::Bool(false)),
+        ]);
+        let asked = object(vec![("monitors", Json::List(vec![row, off]))]);
+        let outcome = scripts.surface_action(
+            crate::output_management::SURFACE,
+            "monitors.apply",
+            &asked,
+            Snapshot::default(),
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        let arrangement = outcome
+            .commands
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Monitors(arrangement) => Some(arrangement),
+                _ => None,
+            })
+            .expect("monitors.apply was not answered with sol.monitors");
+        assert_eq!(
+            arrangement.lit_as(),
+            [
+                (
+                    "DP-1".to_owned(),
+                    true,
+                    crate::monitor::Wanted::Exact {
+                        width: 1280,
+                        height: 720,
+                        refresh: Some(60)
+                    },
+                    Some(smithay::utils::Transform::_90),
+                    None
+                ),
+                (
+                    "DP-2".to_owned(),
+                    false,
+                    crate::monitor::Wanted::Best,
+                    None,
+                    None
+                )
+            ]
+        );
+        assert_eq!(
+            arrangement.scale("DP-1"),
+            crate::monitor::Scaling::Fixed(1.5)
+        );
+        assert_eq!(arrangement.primary(), Some("DP-1"), "primary kept");
+        let placed = arrangement.place(&[("DP-1".to_owned(), (720, 1280).into())]);
+        assert_eq!(placed.at, [(1920, 0).into()]);
+    }
+
     #[test]
     fn sol_workspaces_offered_is_a_flag() {
         let directory = std::env::temp_dir().join("solium-script-test-workspaces-offered");

@@ -2996,6 +2996,10 @@ mod real_client {
     use wayland_protocols_wlr::layer_shell::v1::client::{
         zwlr_layer_shell_v1, zwlr_layer_surface_v1,
     };
+    use wayland_protocols_wlr::output_management::v1::client::{
+        zwlr_output_configuration_head_v1, zwlr_output_configuration_v1, zwlr_output_head_v1,
+        zwlr_output_manager_v1, zwlr_output_mode_v1,
+    };
     use wayland_protocols_wlr::output_power_management::v1::client::{
         zwlr_output_power_manager_v1, zwlr_output_power_v1,
     };
@@ -3065,6 +3069,16 @@ mod real_client {
         /// as the registry announced it: bound only by a test that captures
         /// a window (#47).
         window_source_global: Option<u32>,
+        /// `zwlr-output-management-v1` (#51): its global as the registry
+        /// announced it, bound only by a test that asks, and what it told.
+        output_manager_global: Option<u32>,
+        heads_told: Vec<(zwlr_output_head_v1::ZwlrOutputHeadV1, HeadTold)>,
+        modes_told: Vec<(zwlr_output_mode_v1::ZwlrOutputModeV1, ModeTold)>,
+        /// The serial of each `done`, in order.
+        output_dones: Vec<u32>,
+        output_manager_finished: bool,
+        /// Each configuration's answer, in order.
+        configuration_answers: Vec<&'static str>,
         toplevel_manager: Option<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
         /// Whether the manager was told `finished`.
         toplevel_manager_finished: bool,
@@ -3339,6 +3353,132 @@ mod real_client {
         removed: bool,
     }
 
+    /// What one output head was told (#51).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct HeadTold {
+        name: String,
+        enabled: bool,
+        position: (i32, i32),
+        scale: f64,
+        transform: Option<u32>,
+        current: Option<zwlr_output_mode_v1::ZwlrOutputModeV1>,
+        modes: Vec<zwlr_output_mode_v1::ZwlrOutputModeV1>,
+        finished: bool,
+    }
+
+    /// What one output mode was told (#51).
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct ModeTold {
+        size: (i32, i32),
+        refresh: i32,
+        preferred: bool,
+    }
+
+    impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _manager: &zwlr_output_manager_v1::ZwlrOutputManagerV1,
+            event: zwlr_output_manager_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            match event {
+                zwlr_output_manager_v1::Event::Head { head } => {
+                    state.heads_told.push((head, HeadTold::default()));
+                }
+                zwlr_output_manager_v1::Event::Done { serial } => state.output_dones.push(serial),
+                zwlr_output_manager_v1::Event::Finished => state.output_manager_finished = true,
+                _ => {}
+            }
+        }
+
+        wayland_client::event_created_child!(Client, zwlr_output_manager_v1::ZwlrOutputManagerV1, [
+            zwlr_output_manager_v1::EVT_HEAD_OPCODE => (zwlr_output_head_v1::ZwlrOutputHeadV1, ()),
+        ]);
+    }
+
+    impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            head: &zwlr_output_head_v1::ZwlrOutputHeadV1,
+            event: zwlr_output_head_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let zwlr_output_head_v1::Event::Mode { mode } = &event {
+                state.modes_told.push((mode.clone(), ModeTold::default()));
+            }
+            let Some((_, told)) = state.heads_told.iter_mut().find(|(each, _)| each == head) else {
+                return;
+            };
+            match event {
+                zwlr_output_head_v1::Event::Name { name } => told.name = name,
+                zwlr_output_head_v1::Event::Mode { mode } => told.modes.push(mode),
+                zwlr_output_head_v1::Event::Enabled { enabled } => told.enabled = enabled != 0,
+                zwlr_output_head_v1::Event::CurrentMode { mode } => told.current = Some(mode),
+                zwlr_output_head_v1::Event::Position { x, y } => told.position = (x, y),
+                zwlr_output_head_v1::Event::Scale { scale } => told.scale = scale,
+                zwlr_output_head_v1::Event::Transform { transform } => {
+                    told.transform = Some(match transform {
+                        wayland_client::WEnum::Value(value) => u32::from(value),
+                        wayland_client::WEnum::Unknown(value) => value,
+                    });
+                }
+                zwlr_output_head_v1::Event::Finished => told.finished = true,
+                _ => {}
+            }
+        }
+
+        wayland_client::event_created_child!(Client, zwlr_output_head_v1::ZwlrOutputHeadV1, [
+            zwlr_output_head_v1::EVT_MODE_OPCODE => (zwlr_output_mode_v1::ZwlrOutputModeV1, ()),
+        ]);
+    }
+
+    impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            mode: &zwlr_output_mode_v1::ZwlrOutputModeV1,
+            event: zwlr_output_mode_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            let Some((_, told)) = state.modes_told.iter_mut().find(|(each, _)| each == mode) else {
+                return;
+            };
+            match event {
+                zwlr_output_mode_v1::Event::Size { width, height } => told.size = (width, height),
+                zwlr_output_mode_v1::Event::Refresh { refresh } => told.refresh = refresh,
+                zwlr_output_mode_v1::Event::Preferred => told.preferred = true,
+                _ => {}
+            }
+        }
+    }
+
+    impl Dispatch<zwlr_output_configuration_v1::ZwlrOutputConfigurationV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _configuration: &zwlr_output_configuration_v1::ZwlrOutputConfigurationV1,
+            event: zwlr_output_configuration_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            state.configuration_answers.push(match event {
+                zwlr_output_configuration_v1::Event::Succeeded => "succeeded",
+                zwlr_output_configuration_v1::Event::Failed => "failed",
+                zwlr_output_configuration_v1::Event::Cancelled => "cancelled",
+                _ => "?",
+            });
+        }
+    }
+
+    wayland_client::delegate_noop!(
+        Client: ignore zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1
+    );
+
     /// What one foreign-toplevel handle was told (#50).
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Told {
@@ -3567,6 +3707,7 @@ mod real_client {
                 "ext_foreign_toplevel_image_capture_source_manager_v1" => {
                     state.window_source_global = Some(name);
                 }
+                "zwlr_output_manager_v1" => state.output_manager_global = Some(name),
                 "wp_linux_drm_syncobj_manager_v1" => {
                     state.syncobj = Some(registry.bind(name, 1, qh, ()))
                 }
@@ -36653,6 +36794,172 @@ end)"#,
                     late.image_sources.is_some(),
                     "monitors are still offered as sources"
                 );
+
+        /// A program that arranges the monitors (#51), against
+        /// `zwlr-output-management-v1` from a real client.
+        mod output_management {
+            use super::*;
+
+            /// The client binds the manager, as kanshi does, and hears the
+            /// heads.
+            fn arranger(desk: &mut Desk) -> zwlr_output_manager_v1::ZwlrOutputManagerV1 {
+                let registry = desk.client.registry.clone().expect("the registry");
+                let name = desk
+                    .client
+                    .output_manager_global
+                    .expect("zwlr_output_manager_v1 offered");
+                let manager = registry.bind(name, 4, &desk.qh, ());
+                desk.pump();
+                manager
+            }
+
+            fn serial(desk: &Desk) -> u32 {
+                *desk.client.output_dones.last().expect("a done")
+            }
+
+            fn head(desk: &Desk) -> zwlr_output_head_v1::ZwlrOutputHeadV1 {
+                desk.client.heads_told[0].0.clone()
+            }
+
+            /// A configuration of the one monitor at `serial`, on at `at` or
+            /// off.
+            fn propose(
+                desk: &mut Desk,
+                manager: &zwlr_output_manager_v1::ZwlrOutputManagerV1,
+                serial: u32,
+                at: Option<(i32, i32)>,
+            ) -> zwlr_output_configuration_v1::ZwlrOutputConfigurationV1 {
+                let configuration = manager.create_configuration(serial, &desk.qh, ());
+                let head = head(desk);
+                match at {
+                    Some((x, y)) => {
+                        let on = configuration.enable_head(&head, &desk.qh, ());
+                        on.set_position(x, y);
+                    }
+                    None => configuration.disable_head(&head),
+                }
+                configuration
+            }
+
+            /// **A program is told each monitor, the modes it offers and how
+            /// it is driven**, then `done`, and nothing more while nothing
+            /// changes.
+            #[test]
+            fn a_program_is_told_each_monitor_its_modes_and_how_it_is_driven() {
+                let mut desk = Desk::new();
+                let _manager = arranger(&mut desk);
+                let output = desk
+                    .state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("a monitor");
+                let told = &desk.client.heads_told;
+                assert_eq!(told.len(), 1, "one monitor, one head");
+                let head = &told[0].1;
+                assert_eq!(
+                    (head.name.clone(), head.enabled, head.position, head.scale),
+                    (output.name(), true, (0, 0), 1.0)
+                );
+                let mode = output.current_mode().expect("a mode");
+                let current = head.current.clone().expect("its mode named");
+                let current = desk
+                    .client
+                    .modes_told
+                    .iter()
+                    .find(|(each, _)| *each == current)
+                    .map(|(_, told)| *told)
+                    .expect("one of its modes");
+                assert_eq!(
+                    (current.size, current.refresh),
+                    ((mode.size.w, mode.size.h), mode.refresh)
+                );
+                assert_eq!(desk.client.output_dones.len(), 1, "one done");
+                desk.state.publish_output_heads();
+                desk.pump();
+                assert_eq!(desk.client.output_dones.len(), 1, "nothing changed");
+            }
+
+            /// **A test is answered at once**: a monitor moved passes, one
+            /// switched off with nothing else on fails, and either from an
+            /// older picture is cancelled. None of them moves anything.
+            #[test]
+            fn a_test_is_answered_and_a_stale_or_dark_one_is_not_taken() {
+                let mut desk = Desk::new();
+                let manager = arranger(&mut desk);
+                let now = serial(&desk);
+                propose(&mut desk, &manager, now, Some((100, 0))).test();
+                propose(&mut desk, &manager, now, None).test();
+                propose(&mut desk, &manager, now.wrapping_sub(1), Some((100, 0))).test();
+                desk.pump();
+                assert_eq!(
+                    desk.client.configuration_answers,
+                    ["succeeded", "failed", "cancelled"]
+                );
+                let output = desk
+                    .state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("a monitor");
+                assert_eq!(output.current_location(), (0, 0).into(), "a test moved it");
+            }
+
+            /// **An apply reaches Lua, and the shipped answer arranges the
+            /// monitors**: the monitor moves where the program put it, the
+            /// program is told it succeeded, and then where it is now.
+            /// Without an answer it is told it failed, and nothing moves.
+            #[test]
+            fn an_apply_is_answered_by_the_configuration_or_fails() {
+                let mut desk = Desk::new();
+                let manager = arranger(&mut desk);
+                let now = serial(&desk);
+                propose(&mut desk, &manager, now, Some((300, 50))).apply();
+                desk.pump();
+                assert_eq!(
+                    desk.client.configuration_answers,
+                    ["failed"],
+                    "with nothing to answer it"
+                );
+
+                desk.install(r#"require("output_management")"#);
+                let now = serial(&desk);
+                propose(&mut desk, &manager, now, Some((300, 50))).apply();
+                desk.pump();
+                assert_eq!(desk.client.configuration_answers[1..], ["succeeded"]);
+                let output = desk
+                    .state
+                    .space
+                    .outputs()
+                    .next()
+                    .cloned()
+                    .expect("a monitor");
+                assert_eq!(output.current_location(), (300, 50).into());
+                assert_eq!(
+                    desk.client.heads_told[0].1.position,
+                    (300, 50),
+                    "the program was not told where it is now"
+                );
+            }
+
+            /// **`output_management = false` takes it away**: the manager is
+            /// finished, its heads with it, and a client connecting
+            /// afterwards is not offered it.
+            #[test]
+            fn taken_away_the_manager_is_finished_and_hidden() {
+                let mut desk = Desk::new();
+                let _manager = arranger(&mut desk);
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::OutputManagement(false)],
+                    ..crate::script::Outcome::default()
+                });
+                desk.pump();
+                assert!(desk.client.output_manager_finished);
+                assert!(desk.client.heads_told[0].1.finished, "its head was left");
+                let (_conn, _queue, late) = connect(&mut desk.display, &mut desk.state);
+                assert_eq!(late.output_manager_global, None);
             }
         }
 

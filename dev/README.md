@@ -1381,6 +1381,15 @@ connected, how many modes it offers, the one it would choose, its size, dpi and
 the scale it would pick, and then every mode, in the form the configuration's
 `mode` takes.
 
+**A program arranging the monitors** (#51) is checked there too, since nested
+has one window and cannot turn it or change its mode: from a free TTY,
+`dev/output-management-tty.sh` starts Solium, then gives the first monitor a
+new scale, a quarter turn, another of its modes and variable refresh through
+`wlr-output-management`, as `wlr-randr` would, and puts each back, saying what
+to watch for. Nested, `wl-probe`'s `WL_PROBE_OUTPUTS=1` lists the heads and
+`WL_PROBE_ARRANGE="scale=1.5 transform=90 x=0 y=0 mode=WxH@R vrr=on"`
+proposes the first head so (`WL_PROBE_ARRANGE_TEST=1` tests it instead).
+
 **Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
 
 ```sh

@@ -53,6 +53,7 @@ mod mat4;
 mod models;
 mod monitor;
 mod offscreen;
+mod output_management;
 mod pacing;
 mod pane;
 mod pass;

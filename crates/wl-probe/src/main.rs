@@ -23,6 +23,7 @@ use std::time::Duration;
 
 mod crop;
 mod dmabuf;
+mod outputs;
 mod pixels;
 mod toplevels;
 
@@ -274,6 +275,17 @@ fn main() {
     if std::env::var_os("WL_PROBE_TOPLEVELS").is_some() {
         if let Err(err) = toplevels::list() {
             eprintln!("wl-probe: the window list: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // The monitors as a program arranging them sees them, and an arrangement
+    // proposed: `outputs.rs` (#51).
+    if std::env::var_os("WL_PROBE_OUTPUTS").is_some()
+        || std::env::var_os("WL_PROBE_ARRANGE").is_some()
+    {
+        if let Err(err) = outputs::run() {
+            eprintln!("wl-probe: output management: {err}");
             std::process::exit(1);
         }
         return;
