@@ -7424,6 +7424,65 @@ pub(crate) fn flat_window_elements(
     )
 }
 
+/// What a capture of one window draws (#47), its corner at the buffer's:
+/// with [`WindowCapture::Client`], the client's own surface tree at its
+/// window geometry's corner, as `xdg_surface.set_window_geometry` puts it
+/// (so a client's own shadow past its geometry is left out), and its popups
+/// over it; with [`WindowCapture::Pane`], the pane flat at its outer size,
+/// frame, layers and every slot ready this pass as
+/// [`flat_window_elements`] draws a warp's capture, and the popups over the
+/// client where the frame leaves it. Popups past the window are cut at its
+/// edge: the buffer is the window's size.
+///
+/// [`WindowCapture::Client`]: crate::toplevels::WindowCapture::Client
+/// [`WindowCapture::Pane`]: crate::toplevels::WindowCapture::Pane
+pub(crate) fn window_capture_elements(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    look: crate::toplevels::WindowCapture,
+    scale: f64,
+    slots: &Slots,
+) -> Vec<Element> {
+    use crate::toplevels::WindowCapture;
+    let at_scale = Scale::from(scale);
+    let corner: Point<i32, Physical> = match look {
+        WindowCapture::Off => return Vec::new(),
+        WindowCapture::Client => (0, 0).into(),
+        WindowCapture::Pane => match flat(state, window) {
+            Some(Flat { insets, .. }) => Point::<i32, Logical>::from((insets.left, insets.top))
+                .to_physical_precise_round(scale),
+            None => return Vec::new(),
+        },
+    };
+    let (popups, _) = popup_elements(renderer, window, corner, at_scale, 1.0);
+    let mut elements: Vec<Element> = popups.into_iter().map(Element::Window2).collect();
+    match look {
+        WindowCapture::Client => elements.extend(
+            client_piece(
+                renderer,
+                window,
+                window_surface_origin(corner, window, scale),
+                at_scale,
+                1.0,
+            )
+            .into_iter()
+            .map(Element::Window2),
+        ),
+        WindowCapture::Pane => elements.extend(flat_window_elements(
+            state,
+            renderer,
+            window,
+            scale,
+            (0, 0).into(),
+            slots,
+            1.0,
+        )),
+        WindowCapture::Off => {}
+    }
+    elements
+}
+
 /// [`flat_window_elements`] with the pane's corner at `at`, in the target's
 /// physical pixels ([`pane_drawing_at`]): a whole pane's self capture,
 /// padded by its chain's reach (`offscreen::part_job`), holding its inner

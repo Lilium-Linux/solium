@@ -5367,7 +5367,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // Which window protocols a shell that is its own program is offered
     // (#50): `config.toplevels`, handed over by `init.lua`. `list` and
     // `manage` are each true or false; one left out, or not a boolean, keeps
-    // its default, true, and a wrong type says so.
+    // its default, true, and a wrong type says so. `capture` (#47) is
+    // `"client"`, `"pane"` or `false`, and anything else keeps `"client"`.
     // `tests::sol_toplevels_reads_each_protocol_as_a_flag`.
     sol.set(
         "toplevels",
@@ -5387,6 +5388,25 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                             "toplevels: true or false; keeping it offered"
                         ),
                     }
+                }
+                match options.get::<Value>("capture") {
+                    Ok(Value::Boolean(false)) => {
+                        settings.capture = crate::toplevels::WindowCapture::Off;
+                    }
+                    Ok(Value::String(name)) => {
+                        match crate::toplevels::WindowCapture::named(&name.to_string_lossy()) {
+                            Some(capture) => settings.capture = capture,
+                            None => tracing::warn!(
+                                value = %name.to_string_lossy(),
+                                "toplevels.capture: \"client\", \"pane\" or false; keeping \"client\""
+                            ),
+                        }
+                    }
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(other) => tracing::warn!(
+                        value = describe(&other),
+                        "toplevels.capture: \"client\", \"pane\" or false; keeping \"client\""
+                    ),
                 }
             }
             with_pending(lua, |pending| {
@@ -11545,7 +11565,7 @@ mod tests {
 
     #[test]
     fn sol_toplevels_reads_each_protocol_as_a_flag() {
-        use crate::toplevels::Settings;
+        use crate::toplevels::{Settings, WindowCapture};
         let directory = std::env::temp_dir().join("solium-script-test-toplevels");
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a temporary directory");
@@ -11567,17 +11587,32 @@ mod tests {
             configured("sol.toplevels({ list = false, manage = true })"),
             Settings {
                 list: false,
-                manage: true
+                manage: true,
+                ..Settings::default()
             }
         );
         assert_eq!(
             configured("sol.toplevels({ manage = false })"),
             Settings {
                 list: true,
-                manage: false
+                manage: false,
+                ..Settings::default()
             },
             "one left out keeps its default"
         );
+        for (written, capture) in [
+            ("\"pane\"", WindowCapture::Pane),
+            ("\"client\"", WindowCapture::Client),
+            ("false", WindowCapture::Off),
+            ("\"frame\"", WindowCapture::Client),
+            ("true", WindowCapture::Client),
+        ] {
+            assert_eq!(
+                configured(&format!("sol.toplevels({{ capture = {written} }})")).capture,
+                capture,
+                "capture = {written}"
+            );
+        }
         assert_eq!(
             configured(r#"sol.toplevels({ list = "no", manage = 0 })"#),
             Settings::default(),

@@ -23,6 +23,11 @@
 //! window whose application has not arrived, one that is leaving. Both are
 //! offered to every client; `toplevels.list` and `toplevels.manage` in
 //! `config.lua` take either away.
+//!
+//! A window on the ext list is also what a screen share names to share one
+//! window rather than a monitor (#47): `image_copy.rs` reads the window back
+//! from its handle ([`listed_id`]), and `toplevels.capture` says what of it
+//! is in the picture.
 //! `state::tests::real_client::reflow_on_close::toplevels`.
 
 use std::collections::BTreeMap;
@@ -67,6 +72,9 @@ pub(crate) struct Settings {
     pub(crate) list: bool,
     /// Whether `zwlr_foreign_toplevel_manager_v1` is offered.
     pub(crate) manage: bool,
+    /// What a capture of one window holds, or whether a window can be
+    /// captured at all (#47).
+    pub(crate) capture: WindowCapture,
 }
 
 impl Default for Settings {
@@ -74,8 +82,50 @@ impl Default for Settings {
         Self {
             list: true,
             manage: true,
+            capture: WindowCapture::Client,
         }
     }
+}
+
+/// `toplevels.capture`: what a capture of one window is a picture of, through
+/// `ext_foreign_toplevel_image_capture_source_manager_v1`.
+/// `state::tests::real_client::reflow_on_close::window_capture`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowCapture {
+    /// No window is offered as a capture source; monitors still are.
+    Off,
+    /// The window as its application drew it, its popups over it: the same
+    /// picture whatever frame the desktop puts around it. `"client"`.
+    Client,
+    /// The window as it is on screen, the frame and the effects the
+    /// configuration draws on it included. `"pane"`.
+    Pane,
+}
+
+impl WindowCapture {
+    /// Read from its Lua spelling: `"client"`, `"pane"`, or `false`.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        match name {
+            "client" => Some(Self::Client),
+            "pane" => Some(Self::Pane),
+            _ => None,
+        }
+    }
+}
+
+/// The window an ext list handle was made for, kept in the handle's own
+/// data: what a capture source made from it names.
+#[derive(Debug)]
+struct ListedId(u64);
+
+/// The window `handle` was listed for, by the id scripts hold it by.
+pub(crate) fn listed_id(
+    handle: &smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+) -> Option<u64> {
+    ForeignToplevelHandle::from_resource(handle)?
+        .user_data()
+        .get::<ListedId>()
+        .map(|id| id.0)
 }
 
 /// What a client is told of one window, compared with what it was last told
@@ -256,6 +306,7 @@ impl Solium {
     /// pass, beside the models, and as cheap when nothing changed: one walk
     /// of the windows and a comparison each.
     pub(crate) fn publish_toplevels(&mut self) {
+        self.follow_window_captures();
         if !self.toplevels.settings.list && self.toplevels.managers.is_empty() {
             self.toplevels.listed.clear();
             return;
@@ -292,6 +343,10 @@ impl Solium {
                     .toplevels
                     .list
                     .new_toplevel::<Self>(&facts.title, &facts.app_id);
+                let listed = *id;
+                handle
+                    .user_data()
+                    .insert_if_missing_threadsafe(|| ListedId(listed));
                 handle.send_done();
                 if let Some(listed) = self.toplevels.listed.get_mut(id) {
                     listed.ext = Some(handle);

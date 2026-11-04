@@ -755,6 +755,12 @@ impl Solium {
                     if self.toplevels.settings != settings {
                         tracing::debug!(?settings, "which window protocols are offered set");
                         self.toplevels.configure(settings);
+                        // A window is named by its handle on the list, so
+                        // with no list there is none to capture.
+                        self.image_copy_state.offer_windows(
+                            settings.list
+                                && settings.capture != crate::toplevels::WindowCapture::Off,
+                        );
                         // Listed again at once, if the list is back.
                         self.publish_toplevels();
                     }

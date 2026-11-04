@@ -296,6 +296,17 @@ reads one that file does not list.
 On the hardware there is no `SOLIUM_CAPTURE`. A screenshot there is a
 `wlr-screencopy` client such as `grim`, or `wl-probe`'s `WL_PROBE_SHOT`.
 
+One window on its own, as a share of a window gets it (#47): `wl-probe`'s
+`WL_PROBE_TOPLEVELS=1` prints each window on `ext-foreign-toplevel-list` as
+`identifier<TAB>app_id<TAB>title`, and grim 1.5 captures one by its
+identifier, covered or not. `toplevels.capture` says whether that is the
+client alone or its whole pane.
+
+```sh
+WAYLAND_DISPLAY=wayland-1 WL_PROBE_TOPLEVELS=1 ./target/debug/wl-probe
+WAYLAND_DISPLAY=wayland-1 grim -T <identifier> /tmp/window.png
+```
+
 ## Capturing a frame
 
 ```sh

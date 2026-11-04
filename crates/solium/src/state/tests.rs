@@ -2949,7 +2949,8 @@ mod real_client {
         ext_idle_notification_v1, ext_idle_notifier_v1,
     };
     use wayland_protocols::ext::image_capture_source::v1::client::{
-        ext_image_capture_source_v1, ext_output_image_capture_source_manager_v1,
+        ext_foreign_toplevel_image_capture_source_manager_v1, ext_image_capture_source_v1,
+        ext_output_image_capture_source_manager_v1,
     };
     use wayland_protocols::ext::image_copy_capture::v1::client::{
         ext_image_copy_capture_frame_v1, ext_image_copy_capture_manager_v1,
@@ -3060,6 +3061,10 @@ mod real_client {
         /// [`Self::bind_toplevels`], so no other test hears of every window
         /// it opens twice over (#50).
         toplevel_globals: Vec<(String, u32)>,
+        /// `ext_foreign_toplevel_image_capture_source_manager_v1`'s global,
+        /// as the registry announced it: bound only by a test that captures
+        /// a window (#47).
+        window_source_global: Option<u32>,
         toplevel_manager: Option<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
         /// Whether the manager was told `finished`.
         toplevel_manager_finished: bool,
@@ -3558,6 +3563,9 @@ mod real_client {
                 "ext_workspace_manager_v1" => state.workspace_global = Some(name),
                 "zwlr_foreign_toplevel_manager_v1" | "ext_foreign_toplevel_list_v1" => {
                     state.toplevel_globals.push((interface.clone(), name));
+                }
+                "ext_foreign_toplevel_image_capture_source_manager_v1" => {
+                    state.window_source_global = Some(name);
                 }
                 "wp_linux_drm_syncobj_manager_v1" => {
                     state.syncobj = Some(registry.bind(name, 1, qh, ()))
@@ -4097,6 +4105,9 @@ mod real_client {
     );
     wayland_client::delegate_noop!(
         Client: ignore ext_image_capture_source_v1::ExtImageCaptureSourceV1
+    );
+    wayland_client::delegate_noop!(
+        Client: ignore ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1
     );
     wayland_client::delegate_noop!(
         Client: ignore ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
@@ -36407,7 +36418,11 @@ end)"#,
                 let offer = |desk: &mut Desk, list: bool, manage: bool| {
                     desk.state.apply(crate::script::Outcome {
                         commands: vec![crate::script::Command::Toplevels(
-                            crate::toplevels::Settings { list, manage },
+                            crate::toplevels::Settings {
+                                list,
+                                manage,
+                                ..crate::toplevels::Settings::default()
+                            },
                         )],
                         ..crate::script::Outcome::default()
                     });
@@ -36442,6 +36457,201 @@ end)"#,
                         "ext_foreign_toplevel_list_v1",
                         "zwlr_foreign_toplevel_manager_v1"
                     ]
+                );
+            }
+        }
+
+        /// One window as a capture source (#47): a share names a window by
+        /// its handle on the ext list, and is told the buffer
+        /// `toplevels.capture` draws it into.
+        mod window_capture {
+            use super::*;
+            use crate::toplevels::{Settings, WindowCapture};
+
+            fn publish(desk: &mut Desk) {
+                desk.pump();
+                desk.state.publish_toplevels();
+                desk.pump();
+            }
+
+            fn configure(desk: &mut Desk, capture: WindowCapture) {
+                desk.state.apply(crate::script::Outcome {
+                    commands: vec![crate::script::Command::Toplevels(Settings {
+                        capture,
+                        ..Settings::default()
+                    })],
+                    ..crate::script::Outcome::default()
+                });
+                publish(desk);
+            }
+
+            /// A session on the first window the ext list told of, opened as
+            /// a share opens one: the list bound, a source made from the
+            /// window's handle, a session on it.
+            fn share_first_window(
+                desk: &mut Desk,
+            ) -> ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1 {
+                desk.client.bind_toplevels(&desk.qh);
+                publish(desk);
+                let registry = desk.client.registry.clone().expect("the registry");
+                let name = desk
+                    .client
+                    .window_source_global
+                    .expect("ext_foreign_toplevel_image_capture_source_manager_v1 offered");
+                let sources: ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1 =
+                    registry.bind(name, 1, &desk.qh, ());
+                let manager = desk
+                    .client
+                    .image_copy
+                    .clone()
+                    .expect("ext_image_copy_capture_manager_v1 offered");
+                let (handle, _) = desk
+                    .client
+                    .ext_told
+                    .first()
+                    .cloned()
+                    .expect("a listed window");
+                let source = sources.create_source(&handle, &desk.qh, ());
+                let session = manager.create_session(
+                    &source,
+                    ext_image_copy_capture_manager_v1::Options::empty(),
+                    &desk.qh,
+                    (),
+                );
+                desk.pump();
+                session
+            }
+
+            fn announced(size: (i32, i32)) -> [CopyConstraint; 3] {
+                #[expect(clippy::cast_sign_loss, reason = "a window's size is positive")]
+                let (w, h) = (size.0 as u32, size.1 as u32);
+                [
+                    CopyConstraint::Size(w, h),
+                    CopyConstraint::Shm(u32::from(wl_shm::Format::Xrgb8888)),
+                    CopyConstraint::Done,
+                ]
+            }
+
+            /// **A window is announced at its own size, and again when it
+            /// changes**: the client's 64x64, then the 100x80 it commits,
+            /// then with `"pane"` the pane's outer rectangle, each told at the
+            /// next pass without the share asking, and nothing told when
+            /// nothing changed.
+            #[test]
+            fn a_window_is_announced_at_its_size_and_again_when_it_changes() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let _session = share_first_window(&mut desk);
+                assert_eq!(
+                    desk.client.copy_constraints,
+                    announced((64, 64)),
+                    "the client as it drew itself"
+                );
+                commit_buffer(&desk.client, &desk.qh, &opened.surface, 100, 80);
+                publish(&mut desk);
+                assert_eq!(
+                    desk.client.copy_constraints[3..],
+                    announced((100, 80)),
+                    "the size it committed"
+                );
+                configure(&mut desk, WindowCapture::Pane);
+                let window = desk
+                    .state
+                    .panes
+                    .get(opened.pane)
+                    .and_then(Pane::client)
+                    .cloned()
+                    .expect("its client");
+                let outer = crate::render::flat(&desk.state, &window)
+                    .expect("its pane")
+                    .outer;
+                assert_eq!(
+                    desk.client.copy_constraints[6..],
+                    announced((outer.w, outer.h)),
+                    "the pane"
+                );
+                publish(&mut desk);
+                assert_eq!(
+                    desk.client.copy_constraints.len(),
+                    9,
+                    "nothing changed, and nothing was announced"
+                );
+            }
+
+            /// **A frame of a window is queued as that window's**, at its
+            /// announced size, for the next pass to draw it alone.
+            #[test]
+            fn a_frame_of_a_window_is_queued_as_that_windows() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let session = share_first_window(&mut desk);
+                let shm = desk.client.shm.clone().expect("wl_shm bound");
+                let fd = anon_file(64 * 64 * 4);
+                let pool = shm.create_pool(fd.as_fd(), 64 * 64 * 4, &desk.qh, ());
+                let buffer =
+                    pool.create_buffer(0, 64, 64, 64 * 4, wl_shm::Format::Xrgb8888, &desk.qh, ());
+                let frame = session.create_frame(&desk.qh, ());
+                frame.attach_buffer(&buffer);
+                frame.capture();
+                desk.pump();
+                let queued: Vec<_> = desk
+                    .state
+                    .pending_captures
+                    .iter()
+                    .map(|capture| (capture.window, capture.size))
+                    .collect();
+                assert_eq!(
+                    queued,
+                    [(
+                        Some((opened.pane.get(), WindowCapture::Client)),
+                        (64, 64).into()
+                    )]
+                );
+                assert_eq!(desk.client.copy_answers, [], "answered before it was drawn");
+            }
+
+            /// **A share of a window stops when the window goes**, and when
+            /// `toplevels.capture = false` takes windows away, which also
+            /// hides the manager from a client that connects afterwards.
+            #[test]
+            fn a_share_of_a_window_stops_when_it_goes_or_windows_are_taken_away() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let _kept = desk.open_surface();
+                let _session = share_first_window(&mut desk);
+                assert_eq!(desk.client.copy_stopped, 0, "the premise: it is running");
+                opened.toplevel.destroy();
+                opened.xdg.destroy();
+                opened.surface.destroy();
+                desk.pump();
+                desk.state.sync_panes();
+                publish(&mut desk);
+                assert_eq!(desk.client.copy_stopped, 1, "the window went");
+
+                let (handle, _) = desk.client.ext_told[1].clone();
+                let registry = desk.client.registry.clone().expect("the registry");
+                let name = desk.client.window_source_global.expect("still offered");
+                let sources: ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1 =
+                    registry.bind(name, 1, &desk.qh, ());
+                let manager = desk.client.image_copy.clone().expect("the copy manager");
+                let source = sources.create_source(&handle, &desk.qh, ());
+                let _second = manager.create_session(
+                    &source,
+                    ext_image_copy_capture_manager_v1::Options::empty(),
+                    &desk.qh,
+                    (),
+                );
+                desk.pump();
+                configure(&mut desk, WindowCapture::Off);
+                assert_eq!(desk.client.copy_stopped, 2, "windows were taken away");
+                let (_conn, _queue, late) = connect(&mut desk.display, &mut desk.state);
+                assert_eq!(
+                    late.window_source_global, None,
+                    "offered with windows taken away"
+                );
+                assert!(
+                    late.image_sources.is_some(),
+                    "monitors are still offered as sources"
                 );
             }
         }

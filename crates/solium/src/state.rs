@@ -454,11 +454,11 @@ pub(crate) struct Solium {
     /// `ext-foreign-toplevel-list` and `wlr-foreign-toplevel-management`
     /// globals, and what each client was told (#50). See `toplevels.rs`.
     pub(crate) toplevels: crate::toplevels::Toplevels,
-    /// Registers `ext_output_image_capture_source_manager_v1` and
+    /// Registers `ext_output_image_capture_source_manager_v1`,
+    /// `ext_foreign_toplevel_image_capture_source_manager_v1` and
     /// `ext_image_copy_capture_manager_v1`, the successor to the one above,
-    /// which screen sharing through the portal asks for first. See
-    /// `image_copy.rs`.
-    #[expect(dead_code, reason = "holds the globals; dropping it would remove them")]
+    /// which screen sharing through the portal asks for first, and keeps
+    /// the sessions on a window (#47). See `image_copy.rs`.
     pub(crate) image_copy_state: crate::image_copy::ImageCopyState,
     /// Captures a client has asked for and not yet been given, by either
     /// protocol.

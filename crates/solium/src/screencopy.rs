@@ -167,6 +167,11 @@ pub(crate) struct Capture {
     pub(crate) buffer: Option<WlBuffer>,
     /// Whether the client wants damage reported before `ready`.
     pub(crate) damage: bool,
+    /// The window a capture of one window is of, by the id scripts hold it
+    /// by, and what of it is drawn (#47). `None` for a monitor's. `output`
+    /// is then the monitor the window is on, whose scale it is drawn at and
+    /// whose power it waits on; `region` is the window's own rectangle.
+    pub(crate) window: Option<(u64, crate::toplevels::WindowCapture)>,
 }
 
 /// A frame's state while it waits, kept in the protocol object's own data.
@@ -382,6 +387,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Solium {
         // renderer belongs to the backend's loop -- which is also the only
         // place where the frame being copied actually exists.
         state.pending_captures.push(Capture {
+            window: None,
             frame: Answer::Wlr(frame.clone()),
             output: pending.output,
             region: pending.region,
@@ -509,12 +515,12 @@ fn fill(
     capture: &Capture,
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
-    use smithay::backend::{
-        allocator::Fourcc,
-        renderer::{Bind, Color32F, ExportMem, Frame as _, Offscreen, Renderer},
-    };
+    use smithay::backend::renderer::Color32F;
     use smithay::utils::{Physical, Size};
 
+    if let Some((id, look)) = capture.window {
+        return fill_window(state, renderer, prepared, capture, id, look);
+    }
     anyhow::ensure!(
         OutputState::of(&capture.output) == Some(capture.output_state),
         "the output changed after the capture buffer was announced"
@@ -534,7 +540,6 @@ fn fill(
     let transform = capture.output_state.transform;
     let size: Size<i32, Physical> = capture.output_state.mode;
     let buffer_size: Size<i32, BufferCoords> = (size.w, size.h).into();
-    let upright = transform.transform_size(size);
     let readback = capture_rect(capture.region, scale, size, transform);
     anyhow::ensure!(
         readback.size == capture.size && Rectangle::from_size(buffer_size).contains_rect(readback),
@@ -552,6 +557,105 @@ fn fill(
         },
     );
 
+    let pixels = render_pixels(
+        renderer,
+        (size, transform),
+        // The picture the monitor scans out, element for element, onto the
+        // colour the backends clear to (#398).
+        Color32F::new(0.05, 0.05, 0.06, 1.0),
+        &elements,
+        scale,
+        readback,
+    )?;
+    write_rows(buffer, &pixels, capture.size)
+}
+
+/// One window drawn alone at its monitor's scale, its corner at the
+/// buffer's, and copied into the client's buffer (#47): `toplevels.capture`
+/// says whether it is the client as it drew itself, its popups over it, or
+/// the whole pane as it is on screen, frame and effects included.
+///
+/// Told to draw again once it has been captured, as a window on screen is
+/// after each frame: a window on another workspace or minimised gets no
+/// frame callbacks of its own, and a share of it would stop moving.
+fn fill_window(
+    state: &mut Solium,
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    prepared: &crate::render::Prepared,
+    capture: &Capture,
+    id: u64,
+    look: crate::toplevels::WindowCapture,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use smithay::backend::renderer::Color32F;
+    use smithay::utils::{Physical, Size, Transform};
+
+    let buffer = capture
+        .buffer
+        .as_ref()
+        .context("a capture with no buffer")?;
+    let extent = crate::image_copy::window_extent(state, id).context("the window is gone")?;
+    anyhow::ensure!(
+        extent.size == capture.size && extent.window == capture.window,
+        "the window changed after the capture buffer was announced"
+    );
+    let window = state
+        .panes
+        .by_script_id(id)
+        .and_then(crate::pane::Pane::client)
+        .cloned()
+        .context("the window is gone")?;
+    let scale = extent.output_state.scale;
+    let elements = crate::render::window_capture_elements(
+        state,
+        renderer,
+        &window,
+        look,
+        scale,
+        &prepared.slots,
+    );
+    let size: Size<i32, Physical> = (capture.size.w, capture.size.h).into();
+    let pixels = render_pixels(
+        renderer,
+        (size, Transform::Normal),
+        // Nothing behind a window: what its corners and shadow leave.
+        Color32F::new(0.0, 0.0, 0.0, 1.0),
+        &elements,
+        scale,
+        Rectangle::from_size((size.w, size.h).into()),
+    )?;
+    write_rows(buffer, &pixels, capture.size)?;
+    let primary = Some(&capture.output);
+    window.send_frame(
+        &capture.output,
+        crate::pacing::monotonic_now(),
+        None,
+        move |_, _| primary.cloned(),
+    );
+    Ok(())
+}
+
+/// `elements` drawn into a texture of `size`, turned by `transform`, onto
+/// `background`, and `readback` of it read back in [`FORMAT`].
+fn render_pixels(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    (size, transform): (
+        smithay::utils::Size<i32, smithay::utils::Physical>,
+        smithay::utils::Transform,
+    ),
+    background: smithay::backend::renderer::Color32F,
+    elements: &[crate::render::Element],
+    scale: f64,
+    readback: Rectangle<i32, BufferCoords>,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+    use smithay::backend::{
+        allocator::Fourcc,
+        renderer::{Bind, ExportMem, Frame as _, Offscreen, Renderer},
+    };
+
+    let buffer_size: smithay::utils::Size<i32, BufferCoords> = (size.w, size.h).into();
+    let upright = transform.transform_size(size);
     // Its own texture, for the same reason the deform path uses one: this
     // binds a framebuffer, and doing that underneath the output's own bind
     // sends the whole frame into the texture instead of onto the screen.
@@ -568,15 +672,9 @@ fn fill(
             let mut frame = renderer
                 .render(&mut framebuffer, size, transform.invert())
                 .context("rendering the capture")?;
-            // The picture the monitor scans out, element for element, onto
-            // the colour the backends clear to (#398).
-            if let Err(err) = crate::pool::paint_over(
-                &mut frame,
-                upright,
-                Color32F::new(0.05, 0.05, 0.06, 1.0),
-                &elements,
-                scale,
-            ) {
+            if let Err(err) =
+                crate::pool::paint_over(&mut frame, upright, background, elements, scale)
+            {
                 tracing::warn!(?err, "an element did not render into a capture");
             }
             frame
@@ -594,9 +692,20 @@ fn fill(
             .to_vec()
     };
     crate::warp::release_framebuffer(renderer);
+    Ok(pixels)
+}
 
-    let stride = usize::try_from(capture.size.w * BYTES).unwrap_or_default();
-    let rows = usize::try_from(capture.size.h).unwrap_or_default();
+/// Rows of `pixels`, `size` in [`FORMAT`], copied into the client's shm
+/// `buffer` as they are.
+fn write_rows(
+    buffer: &WlBuffer,
+    pixels: &[u8],
+    size: smithay::utils::Size<i32, BufferCoords>,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let stride = usize::try_from(size.w * BYTES).unwrap_or_default();
+    let rows = usize::try_from(size.h).unwrap_or_default();
     anyhow::ensure!(
         pixels.len() >= stride * rows,
         "the capture is {} bytes, expected {}",
@@ -614,8 +723,8 @@ fn fill(
             .context("capture buffer size overflow")?;
         anyhow::ensure!(
             data.format == FORMAT
-                && data.width == capture.size.w
-                && data.height == capture.size.h
+                && data.width == size.w
+                && data.height == size.h
                 && client_stride >= stride
                 && len >= wanted,
             "the client's buffer does not match the announced capture"

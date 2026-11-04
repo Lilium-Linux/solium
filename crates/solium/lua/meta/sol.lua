@@ -429,6 +429,7 @@
 ---@class sol.ToplevelsOptions
 ---@field list? boolean `ext-foreign-toplevel-list-v1`: the windows' titles and applications. Default `true`.
 ---@field manage? boolean `wlr-foreign-toplevel-management-v1`: the same with monitors and states, and requests that reach Lua as `windows.*` actions of the surface `"foreign-toplevel"`. Default `true`.
+---@field capture? "client"|"pane"|false What a capture of one window through `ext-image-copy-capture-v1` is a picture of (#47): the client as it drew itself, its popups over it (`"client"`, the default), or the pane as it is on screen, frame and effects included (`"pane"`). `false` offers no window as a capture source. Needs `list`, which names the window.
 
 ---Who draws a Wayland window's frame (#462).
 ---@alias sol.FramePolicy
