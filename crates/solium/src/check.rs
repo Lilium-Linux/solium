@@ -2080,11 +2080,10 @@ mod tests {
         );
     }
 
-    /// **A rule reading the live backdrop fails the check** (Ruling 14),
-    /// naming X4.1, as it is refused at load; one reading xray (T2, from
-    /// X2.1 on) passes.
+    /// **A rule reading the live backdrop passes the check** (#209), as one
+    /// reading xray does.
     #[test]
-    fn a_rule_reading_the_live_backdrop_fails_the_check() {
+    fn a_rule_reading_the_live_backdrop_passes_the_check() {
         let place = crate::effect::host::tests::scratch("check-xray");
         let effects = place.join("effects");
         crate::effect::host::tests::folder(
@@ -2104,8 +2103,7 @@ mod tests {
         let (passed, out) = check(
             r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "live" } } }"#,
         );
-        assert!(!passed, "{out}");
-        assert!(out.contains("rule 1") && out.contains("X4.1"), "{out}");
+        assert!(passed, "{out}");
         let (passed, out) =
             check(r#"{ { match = "*", part = "client", slot = "behind", effect = "soft" } }"#);
         let _ = std::fs::remove_dir_all(place);

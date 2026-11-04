@@ -2142,6 +2142,14 @@ local defaults = {
         -- compositor blends the slot's result at another opacity on each
         -- frame and runs nothing for it.
         --
+        -- `source = "live"` on a rule whose effect reads the backdrop reads
+        -- everything drawn beneath its part instead of the layers below it:
+        -- the windows under a bar or a translucent window, which glass then
+        -- bends and a blur blurs (#209). It is drawn again only when
+        -- something beneath the part changes, at `xray.scale`, and costs
+        -- that redraw each frame a window moves under it. `"auto"` is the
+        -- same.
+        --
         -- A list, so yours replaces this one whole. A set with a broken rule
         -- is refused whole, named on the overlay, and the rules that ran stay.
         -- A pane style's own rules, in its effects.lua, come first: yours win.

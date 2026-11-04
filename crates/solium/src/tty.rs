@@ -1782,12 +1782,19 @@ impl State {
             if full_redraw() {
                 screen.compositor.reset_buffer_ages();
             }
-            let rendered = screen.compositor.render_frame(
-                renderer,
-                &elements,
-                [0.05, 0.05, 0.06, 1.0],
-                FrameFlags::DEFAULT,
-            );
+            // Nothing on an overlay plane under a live backdrop (#209): its
+            // cut is drawn from the elements, and an element scanned out
+            // beneath the composited frame -- an underlay, with its
+            // holepunch -- would show through the blur unblurred.
+            let flags = if self.solium.xrays.live_on(&screen.output.name()) {
+                FrameFlags::DEFAULT.difference(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
+            } else {
+                FrameFlags::DEFAULT
+            };
+            let rendered =
+                screen
+                    .compositor
+                    .render_frame(renderer, &elements, [0.05, 0.05, 0.06, 1.0], flags);
             drop(gles);
             drop(frame);
             if let (Some(timer), Some(stamp)) = (self.solium.timer.as_mut(), stamp) {

@@ -2435,7 +2435,7 @@ fn want_resolved(
         // A T2 chain on a part no xray layer lies below (a part on
         // `background`) reads nothing: no slot, and no problem (Ruling
         // F29). `effect::xray::tests::a_part_reads_the_xray_layers_strictly_below_its_band`.
-        if chain.tier == crate::effect::rules::Tier::Xray && t2_cut(state, owner, chain).is_none() {
+        if chain.tier.reads_a_cut() && t2_cut(state, owner, chain).is_none() {
             continue;
         }
         slots.want(owner.clone(), slot, shown.key);
@@ -2456,8 +2456,7 @@ fn want_resolved(
         // here, as above, leaves this one's alone.
         if let Some((from, share)) = shown.from
             && let Some(leaving) = state.chains.get(from)
-            && (leaving.tier != crate::effect::rules::Tier::Xray
-                || t2_cut(state, owner, leaving).is_some())
+            && (!leaving.tier.reads_a_cut() || t2_cut(state, owner, leaving).is_some())
         {
             slots.want(owner.clone(), slot.leaving(), from);
             slots.set_mix(owner.clone(), slot, share);
@@ -2673,7 +2672,7 @@ pub(crate) fn record_boxes(state: &Solium, slots: &mut Slots) {
         // checks:
         // `state::tests::real_client::a_window_across_two_monitors_has_a_t2_place_on_each`,
         // `state::tests::real_client::a_gliding_windows_t2_place_follows_its_drawn_rectangle`.
-        if chain.tier == crate::effect::rules::Tier::Xray
+        if chain.tier.reads_a_cut()
             && let Some(cut) = t2_cut(state, &owner, chain)
         {
             let measured = measured(state, &owner, slot, &found);
@@ -3021,7 +3020,7 @@ pub(crate) fn run_slots(
         // T2: each place on its own monitor, from that monitor's memo
         // (Ruling F30;
         // `state::tests::real_client::a_window_across_two_monitors_has_a_t2_place_on_each`).
-        if chain.tier == Tier::Xray {
+        if chain.tier.reads_a_cut() {
             if run_t2(cx, pool, runner, slots, &owner, slot, key, &mut began) {
                 let _ = cx.chains.refuse_once(
                     key,
@@ -3051,7 +3050,7 @@ pub(crate) fn run_slots(
                 runner.blank(pool).map(|blank| (blank, BoxMap::WHOLE)),
                 input_redrawn(chain.tier, false),
             ),
-            // T3 was refused at load (Ruling 14); T2 ran above.
+            // T2 and the live backdrop ran above.
             Tier::Xray | Tier::Live => continue,
         };
         let size = part.size();
@@ -3659,6 +3658,13 @@ fn t2_cut(
     use crate::effect::plan::Owner as Whose;
     use crate::stack::{Band, Owner as By};
     use smithay::reexports::wayland_server::Resource as _;
+    // A live backdrop reads everything beneath its part, whatever its band
+    // (#209).
+    if chain.tier == crate::effect::rules::Tier::Live {
+        return Some(crate::effect::xray::Cut::Beneath(
+            crate::effect::xray::owner_key(owner),
+        ));
+    }
     let band = match owner {
         Whose::Pane(..) => Band::Windows,
         Whose::Surface(id, _) => Band::Layer(state.surfaces.get(*id)?.layer(), By::Script),
@@ -4074,6 +4080,7 @@ pub(crate) fn want_t2(state: &mut Solium, slots: &mut Slots, pass: u64) {
             continue;
         };
         for place in slots.places(&owner, slot) {
+            state.xrays.name_beneath(place.cut, &owner);
             state.xrays.want(&place.monitor, place.cut);
             let size = output_named(state, &place.monitor).map_or((1, 1), |output| {
                 let xray = crate::offscreen::xray_size(state, &output);

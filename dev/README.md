@@ -1370,6 +1370,12 @@ connected, how many modes it offers, the one it would choose, its size, dpi and
 the scale it would pick, and then every mode, in the form the configuration's
 `mode` takes.
 
+**The live backdrop** (#209) is checked there too: from a free TTY,
+`dev/live-backdrop-tty.sh` starts the shipped desktop with the bar's glass
+reading what is beneath it, plays a video when `mpv` (with `PACING_CLIP`) or
+`ffplay` is installed, and lists what to look for as you drag windows under
+the bar. `ROTATE=<connector>` turns that monitor to 90 degrees for the run.
+
 **Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
 
 ```sh

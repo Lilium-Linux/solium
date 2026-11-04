@@ -61,7 +61,7 @@ return {
 | `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar` (the band along the one side a pane style reserves most for: the window's full width above or below the client, its two outer corners rounded as the client's largest, or square down a side between those; a style that reserves its most on two sides or more, such as `border`, or nothing, and a bare window have none), `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
 | `slot` | `behind` the part, in `front` of it, or `replace` it. A `pane`'s go around its frame and client and under its popups, so a menu stays on top; a `client`'s between the pane style's layers and the client; a `popup`'s around the popups; `region:titlebar`'s around the pane style's layer named `bar` (else its first `frame` layer) and a `layer:<name>`'s around that layer; a scripted or layer surface's just under and over it |
 | `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name; a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
-| `source` | what the chain's first input reads in place of its own: `"self"`, the part's own pixels. On the rule or in its first link, never a later one |
+| `source` | what the chain's first input reads in place of its own: `"self"`, the part's own pixels; for an effect reading the `backdrop`, `"xray"` (the default: the layers below the part's band, the wallpaper first), or `"live"`, everything drawn beneath the part, the windows under a bar included (T3, below). `"auto"` is read as `"live"`: what is beneath a part with no window under it is the xray picture, kept until it changes. On the rule or in its first link, never a later one |
 | `mask` | how the result is cut: `"shape"`, the part's own shape (the default: the client's own rectangle and rounded corners for `client`; the whole window rounded at its largest corner for `pane`; the band, as above, for `region:titlebar`; the rectangle for the rest), or `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"` |
 | `memo` | `false` shares nothing of this rule's chain per monitor: each part runs its whole chain over xray, whatever `effects.memo.split` says (see *The memo*). `true` unless you say so |
 | `cut` | which xray a chain reading the `backdrop` reads: `"below"` (the default), every layer `effects.xray.layers` names below the part's own; or `"background"`, the wallpaper alone, even where `layers` has `"bottom"` |
@@ -105,8 +105,7 @@ the overlay, by the rule's number and key, or at the effect's own file and
 line when the effect is what failed. `solium --check` fails on it too.
 
 Some of what a rule can say waits for a later part of Solium, and is refused
-until then, by name: the live backdrop (`source = "live"` or `"auto"`)
-arrives with X4.1; regions other than the
+until then, by name: regions other than the
 titlebar, a `region:titlebar` rule whose chain reads the band's own pixels
 (`self`), `part = "output"`, `keep`, a `surface` match naming a plane, and an
 alpha mask without `source = "self"` likewise. This build reads, checks and
@@ -174,13 +173,14 @@ tier is fixed when the rules are applied: a reload is what changes it.
 | T0 | nothing of the frame: only `shape` and its own states (a border, a glow, a gradient) | no capture. It runs once, and again only when its params or the part's size change, whatever the window draws under it: on every pass the part changes size (a drag on its edge), unless `effects.motion_hz` caps how many times a second (its last result stretched over the part between). Its `sol_tex` reads a transparent texel | runs |
 | T1 | the part's own pixels: `self`, or its first input given `source = "self"` | a capture of the part, padded by the chain's `reach` or its `bleed`, whichever is further, drawn again only when the part commits. The chain runs again only then, or when its params or the part's size change; otherwise its last result is placed as it was | runs |
 | T2 | the `backdrop`, what is behind the part, from xray: a sharp picture of the layers below the part's own, per monitor (`effects.xray`) | xray is drawn only on a monitor a T2 part is on, and again only when what is in it changes. The chain's start that reads only the backdrop (a blur) runs once per monitor and is shared (*The memo*); the rest runs per part, at the part's own size, again only when the part moves, its params change or xray is redrawn. A plain blur runs nothing per part: each part is a crop of the shared result | runs |
-| T3 | the live backdrop, with `source = "live"` or `"auto"` | | refused, naming X4.1 |
+| T3 | the live backdrop, with `source = "live"` or `"auto"`: everything drawn beneath the part, the windows under a bar included, not only the layers below its band | a cut of its own, per part and monitor, drawn as xray's are (at `effects.xray.scale`, kept for `keep_ms`) and again only when something beneath the part changes: a window moving under a bar draws it each frame it moves, and a still desktop draws it once. The chain then runs as T2's does, from its memo and per part. On a monitor showing one, nothing is scanned out on an overlay plane, which the cut could not hold. A window beneath is held as it is drawn without effects of its own | runs |
 
 A rule in a tier this build cannot run is an error, not an effect that draws
 nothing: the rules that ran stay, the overlay names it, and `solium --check`
 fails on it, so a rule that cannot work yet says so. The shipped `blur` reads
 the backdrop, so `{ "blur" }` behind a translucent window blurs what is behind
-it (T2), and `{ "blur", source = "self" }` blurs the part's own pixels (T1).
+it (T2), `{ "blur", source = "live" }` blurs the windows behind it as well
+(T3), and `{ "blur", source = "self" }` blurs the part's own pixels (T1).
 An effect that reads its part's own pixels always captures the part for now,
 a tint or a dim included; drawing one inline, with no capture, comes later.
 
