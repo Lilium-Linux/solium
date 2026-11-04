@@ -1,6 +1,16 @@
 //! xray (Ruling F29): the sharp picture of the layers below a part's band,
 //! per monitor, from which every T2 effect reads its `backdrop`. Its source
 //! is a parameter, so FX6's lock xray is a second one (Ruling F52).
+//!
+//! **The live backdrop is a cut too** (#209): [`Cut::Beneath`] holds
+//! everything drawn strictly below one part on its monitor -- the windows
+//! under a bar as well as the wallpaper -- and a rule with `source = "live"`
+//! (or `"auto"`) reads it as `backdrop` where a T2 rule reads the wallpaper.
+//! So it is drawn as every cut is, kept while what it is drawn from is the
+//! same (\[fx0\] Ruling 9) and drawn again only when something under the part
+//! changes, and its chain runs through the same memos and places. What it
+//! holds of a window beneath is the window as it is drawn without effects
+//! of its own: an xray holds no pane's slots (Ruling F29).
 //! `tests::a_part_reads_the_xray_layers_strictly_below_its_band`,
 //! `tests::a_cuts_generation_moves_only_when_it_is_redrawn`.
 
@@ -27,6 +37,18 @@ pub(crate) enum Cut {
     Background,
     /// The background and bottom layers.
     Bottom,
+    /// Everything drawn strictly below one part, windows included: a live
+    /// backdrop (#209), the part named by its [`owner_key`].
+    Beneath(u64),
+}
+
+/// The number a live cut names its part by.
+/// `tests::a_live_cut_names_its_part_and_lets_it_go_with_its_cut`.
+pub(crate) fn owner_key(owner: &crate::effect::plan::Owner) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    owner.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A layer `effects.xray.layers` names.
@@ -235,6 +257,18 @@ impl XraySource for SessionLayers {
         let Some(screen) = state.space.output_geometry(output) else {
             return Vec::new();
         };
+        if let Cut::Beneath(key) = cut {
+            return state
+                .xrays
+                .owner_beneath(key)
+                .map_or_else(Vec::new, |owner| {
+                    beneath(
+                        crate::render::stacked(state, screen, state.clock.now()),
+                        owner,
+                        &output.name(),
+                    )
+                });
+        }
         crate::render::stacked(state, screen, state.clock.now())
             .into_iter()
             .filter(|each| match crate::render::band_of(state, each) {
@@ -244,6 +278,46 @@ impl XraySource for SessionLayers {
             })
             .collect()
     }
+}
+
+/// What is drawn strictly below `owner`, from a monitor's entries topmost
+/// first: every entry after its own, and in its own group of panes the panes
+/// after it. Nothing when it is not on that monitor.
+/// `state::tests::real_client::reflow_on_close::stacking::a_live_cut_holds_what_is_below_its_part_and_nothing_above`.
+pub(crate) fn beneath(
+    entries: Vec<Stacked>,
+    owner: &crate::effect::plan::Owner,
+    monitor: &str,
+) -> Vec<Stacked> {
+    use crate::effect::plan::Owner as Whose;
+    use smithay::reexports::wayland_server::Resource as _;
+    let mut below = Vec::new();
+    let mut found = false;
+    for each in entries {
+        if found {
+            below.push(each);
+            continue;
+        }
+        match (each, owner) {
+            (Stacked::Panes(nodes), Whose::Pane(pane, _)) => {
+                if let Some(at) = nodes.iter().position(|((id, ..), _)| id == pane) {
+                    found = true;
+                    let rest: Vec<_> = nodes.into_iter().skip(at + 1).collect();
+                    if !rest.is_empty() {
+                        below.push(Stacked::Panes(rest));
+                    }
+                }
+            }
+            (Stacked::Layer(surface, _), Whose::LayerShell(object)) => {
+                found = surface.wl_surface().id() == *object;
+            }
+            (Stacked::Surface(id, ..), Whose::Surface(own, on)) => {
+                found = id == *own && on == monitor;
+            }
+            _ => {}
+        }
+    }
+    below
 }
 
 /// Every monitor's xray captures, their generations, what is wanted this
@@ -269,6 +343,8 @@ pub(crate) struct Xrays {
     last_wanted: HashMap<(String, Cut), Duration>,
     built: HashSet<(String, Cut)>,
     asked: HashSet<(String, Cut)>,
+    /// Which part each live cut is beneath, by [`owner_key`].
+    beneath: HashMap<u64, crate::effect::plan::Owner>,
 }
 
 impl Xrays {
@@ -277,6 +353,30 @@ impl Xrays {
     pub(crate) fn want(&mut self, output: &str, cut: Cut) {
         self.wanted.insert((output.to_owned(), cut));
         self.asked.insert((output.to_owned(), cut));
+    }
+
+    /// A live cut's part, named as it is wanted, so its entries can be found
+    /// (`SessionLayers`).
+    /// `tests::a_live_cut_names_its_part_and_lets_it_go_with_its_cut`.
+    pub(crate) fn name_beneath(&mut self, cut: Cut, owner: &crate::effect::plan::Owner) {
+        if let Cut::Beneath(key) = cut {
+            self.beneath.entry(key).or_insert_with(|| owner.clone());
+        }
+    }
+
+    /// The part a live cut is beneath.
+    pub(crate) fn owner_beneath(&self, key: u64) -> Option<&crate::effect::plan::Owner> {
+        self.beneath.get(&key)
+    }
+
+    /// Whether a live cut is wanted on `output` this pass: there nothing
+    /// beneath a part may be scanned out on a plane of its own, which the
+    /// cut could not hold (`tty.rs`).
+    /// `tests::a_live_cut_names_its_part_and_lets_it_go_with_its_cut`.
+    pub(crate) fn live_on(&self, output: &str) -> bool {
+        self.wanted
+            .iter()
+            .any(|(monitor, cut)| monitor == output && matches!(cut, Cut::Beneath(_)))
     }
 
     /// The cuts wanted this pass, in order.
@@ -360,6 +460,16 @@ impl Xrays {
         self.generations.retain(|key, _| !stale(key));
         self.built.retain(|key| !stale(key));
         self.asked.retain(|key| !stale(key));
+        let held: HashSet<u64> = self
+            .captures
+            .keys()
+            .chain(self.wanted.iter())
+            .filter_map(|(_, cut)| match cut {
+                Cut::Beneath(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        self.beneath.retain(|key, _| held.contains(key));
         self.last_wanted
             .retain(|_, at| now.saturating_sub(*at) <= idle);
     }
@@ -719,5 +829,41 @@ mod tests {
             seen.windows(2).all(|pair| pair[0] < pair[1]),
             "each redraw a new, larger generation: {seen:?}"
         );
+    }
+
+    /// **A live cut names its part, says it is live where it is wanted, and
+    /// lets its part go with its cut** (#209): a cut nobody wants for
+    /// `keep_ms` takes its part's name with it.
+    #[test]
+    fn a_live_cut_names_its_part_and_lets_it_go_with_its_cut() {
+        use crate::effect::plan::{Owner, PaneSlot};
+        let owner = Owner::Pane(crate::pane::PaneId::from_raw(7), PaneSlot::Client);
+        let key = super::owner_key(&owner);
+        assert_eq!(key, super::owner_key(&owner.clone()), "one part, one name");
+        let cut = Cut::Beneath(key);
+        let mut xrays = Xrays::default();
+        xrays.name_beneath(cut, &owner);
+        xrays.want("DP-1", cut);
+        assert_eq!(xrays.owner_beneath(key), Some(&owner));
+        assert!(xrays.live_on("DP-1") && !xrays.live_on("DP-2"));
+        let mut pool = Pool::new(0);
+        xrays.sweep(
+            Duration::from_millis(0),
+            Duration::from_millis(100),
+            &mut pool,
+        );
+        xrays.clear_wants();
+        assert!(!xrays.live_on("DP-1"), "not wanted this pass");
+        assert_eq!(
+            xrays.owner_beneath(key),
+            Some(&owner),
+            "kept while its cut is"
+        );
+        xrays.sweep(
+            Duration::from_millis(500),
+            Duration::from_millis(100),
+            &mut pool,
+        );
+        assert_eq!(xrays.owner_beneath(key), None, "gone with its cut");
     }
 }

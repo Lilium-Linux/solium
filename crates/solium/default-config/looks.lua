@@ -103,6 +103,9 @@ local function rules()
             match = "*", part = "surface:" .. surface, slot = "behind",
             -- The bar's glass: its rim narrower, as the bar is 40 px tall; its
             -- blur the windows' own, so one blur per monitor serves both.
+            -- `source = "live"` here bends the windows under the bar as well
+            -- as the wallpaper (#209), at the cost of drawing what is under
+            -- it again each frame a window moves there.
             effect = { "glass", soften_passes = 5, soften_offset = 6, bezel = 14, bend = 4,
                        shine = 0, shine_back = 0, shade = 0 },
         }

@@ -1390,6 +1390,12 @@ to watch for. Nested, `wl-probe`'s `WL_PROBE_OUTPUTS=1` lists the heads and
 `WL_PROBE_ARRANGE="scale=1.5 transform=90 x=0 y=0 mode=WxH@R vrr=on"`
 proposes the first head so (`WL_PROBE_ARRANGE_TEST=1` tests it instead).
 
+**The live backdrop** (#209) is checked there too: from a free TTY,
+`dev/live-backdrop-tty.sh` starts the shipped desktop with the bar's glass
+reading what is beneath it, plays a video when `mpv` (with `PACING_CLIP`) or
+`ffplay` is installed, and lists what to look for as you drag windows under
+the bar. `ROTATE=<connector>` turns that monitor to 90 degrees for the run.
+
 **Then, on a free TTY.** `Ctrl`+`Alt`+`F3` (or any free one), log in, and:
 
 ```sh

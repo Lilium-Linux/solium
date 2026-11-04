@@ -647,10 +647,10 @@ fn a_rule_whose_effect_is_broken_is_named_at_the_frags_line_until_mended() {
     let _ = std::fs::remove_dir_all(place);
 }
 
-/// **A rule reading the backdrop binds from X2.1 on** (T2, Task 44), and one
-/// reading the live backdrop is refused at load, naming X4.1.
+/// **A rule reading the backdrop binds**, from xray (T2, Task 44) or, with
+/// `source = "live"`, from everything beneath its part (#209).
 #[test]
-fn a_blur_rule_without_source_binds_and_live_is_refused() {
+fn a_blur_rule_binds_from_xray_or_live() {
     let place = crate::effect::host::tests::scratch("state-xray");
     crate::effect::host::tests::folder(
         &place,
@@ -666,16 +666,7 @@ fn a_blur_rule_without_source_binds_and_live_is_refused() {
         r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "live" } } }"#,
     ))
     .expect("parses")));
-    assert!(state.rules.is_empty());
-    assert!(
-        state
-            .effects
-            .problems()
-            .iter()
-            .any(|each| each.message.contains("X4.1")),
-        "{:?}",
-        state.effects.problems()
-    );
+    assert!(!state.rules.is_empty(), "{:?}", state.effects.problems());
     state.apply_effects(Ok(crate::effect::rules::parse(&tree(
         r#"{ { match = "*", part = "client", slot = "behind", effect = "soft" } }"#,
     ))
@@ -38350,6 +38341,91 @@ end)"#,
                         Band::Layer(Scripted::Background, Whose::Script),
                     ],
                     "the band of each of stacked's entries"
+                );
+            }
+
+            /// **A live cut holds what is drawn below its part, and nothing
+            /// of it or above it** (#209): under a bar on `top`, both windows
+            /// and every layer below them; under the upper window, the lower
+            /// one and those layers, not the bar or itself.
+            #[test]
+            fn a_live_cut_holds_what_is_below_its_part_and_nothing_above() {
+                use crate::effect::plan::Owner as Part;
+                use crate::effect::xray::beneath;
+                use smithay::reexports::wayland_server::Resource as _;
+                let mut desk = Desk::new();
+                let lower = desk.open_surface();
+                let upper = desk.open_surface();
+                landed(&mut desk);
+                let wallpaper = scripted(&mut desk, "wallpaper", Scripted::Background, screen());
+                let (bar, _bar) = layer_surface(&mut desk, Client::Top, None, 30, 0);
+                let (widgets, _widgets) =
+                    layer_surface(&mut desk, Client::Bottom, Some(200), 30, 0);
+                let output = desk.state.output_for(screen()).expect("the desk's monitor");
+                let all = crate::render::stacked(&desk.state, screen(), desk.state.clock.now());
+                let panes: Vec<crate::pane::PaneId> = all
+                    .iter()
+                    .filter_map(|each| match each {
+                        Stacked::Panes(nodes) => Some(
+                            nodes
+                                .iter()
+                                .map(|((pane, ..), _)| *pane)
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                assert_eq!(
+                    panes,
+                    [upper.pane, lower.pane],
+                    "the premise: the one opened last is on top"
+                );
+                let seen = |entries: &[Stacked]| -> Vec<Seen> {
+                    entries
+                        .iter()
+                        .flat_map(|each| match each {
+                            Stacked::Layer(surface, _) => {
+                                vec![Seen::Layer(surface.wl_surface().id().protocol_id())]
+                            }
+                            Stacked::Surface(id, ..) => vec![Seen::Script(*id)],
+                            Stacked::Panes(nodes) => nodes
+                                .iter()
+                                .map(|((pane, ..), _)| Seen::Pane(*pane))
+                                .collect(),
+                        })
+                        .collect()
+                };
+                let bar_object = smithay::desktop::layer_map_for_output(&output)
+                    .layers()
+                    .find(|surface| surface.wl_surface().id().protocol_id() == id(&bar))
+                    .map(|surface| surface.wl_surface().id())
+                    .expect("the bar on the layer map");
+                let monitor = output.name();
+                let under_bar = beneath(all.clone(), &Part::LayerShell(bar_object), &monitor);
+                assert_eq!(
+                    seen(&under_bar),
+                    vec![
+                        Seen::Pane(upper.pane),
+                        Seen::Pane(lower.pane),
+                        Seen::Layer(id(&widgets)),
+                        Seen::Script(wallpaper),
+                    ],
+                    "under the bar"
+                );
+                let under_upper = beneath(
+                    all,
+                    &Part::Pane(upper.pane, crate::effect::plan::PaneSlot::Client),
+                    &monitor,
+                );
+                assert_eq!(
+                    seen(&under_upper),
+                    vec![
+                        Seen::Pane(lower.pane),
+                        Seen::Layer(id(&widgets)),
+                        Seen::Script(wallpaper),
+                    ],
+                    "under the upper window"
                 );
             }
 

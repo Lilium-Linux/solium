@@ -10,7 +10,7 @@ use solium_effects::stage::{Plan, Split};
 use super::element::EffectElement;
 use super::host::{Host, Problem};
 use super::memo::MemoKey;
-use super::rules::{CutChoice, Fill, Origin, Part, Rule, RuleKey, Slot, Tier, runnable, tier};
+use super::rules::{CutChoice, Fill, Origin, Part, Rule, RuleKey, Slot, Tier, tier};
 use super::run::BoxMap;
 use super::xray::Cut;
 use crate::pane::PaneId;
@@ -70,7 +70,9 @@ impl BoundChain {
     /// `state::tests::real_client::the_memo_split_key_reaches_the_bound_chain`,
     /// `state::tests::real_client::a_rule_with_memo_false_is_never_split`.
     fn split(&mut self) {
-        self.memo = (self.tier == Tier::Xray)
+        self.memo = self
+            .tier
+            .reads_a_cut()
             .then(|| solium_effects::stage::split_memo(&self.plan, self.split_by));
         self.memo_keys = self.memo.as_ref().map_or_else(Vec::new, |memo| {
             let keys = memo.prefix.as_ref().map(Plan::keys).unwrap_or_default();
@@ -205,12 +207,6 @@ impl Chains {
                 "a region's own pixels arrive with P15's Solium.region".to_owned(),
             ));
         }
-        runnable(tier).map_err(|why| {
-            plain(format!(
-                "`{}` {why}",
-                links.first().map_or("", |link| link.effect.as_str())
-            ))
-        })?;
         let mut chain = BoundChain {
             plan,
             reach,

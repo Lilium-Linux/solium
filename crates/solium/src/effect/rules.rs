@@ -1189,13 +1189,14 @@ pub(crate) fn tier(reads: Reads, source: Option<Source>) -> Tier {
         .unwrap_or(Tier::Generated)
 }
 
-/// Whether this build runs a tier; the error names what brings it. T2
-/// runs from X2.1 on (Task 44): the backdrop from xray.
-/// `tests::tiers_follow_what_the_plan_reads_and_the_source`.
-pub(crate) fn runnable(tier: Tier) -> Result<(), &'static str> {
-    match tier {
-        Tier::Generated | Tier::Own | Tier::Xray => Ok(()),
-        Tier::Live => Err("reads the live backdrop, which arrives with X4.1 (FX6)"),
+impl Tier {
+    /// Whether a chain of this tier reads its backdrop from a cut: the
+    /// wallpaper's (T2) or everything beneath its part (T3, #209,
+    /// `effect::xray::Cut::Beneath`). Both run as T2 does, through memos
+    /// and places; only the cut differs.
+    /// `tests::tiers_follow_what_the_plan_reads_and_the_source`.
+    pub(crate) fn reads_a_cut(self) -> bool {
+        matches!(self, Self::Xray | Self::Live)
     }
 }
 
@@ -1969,7 +1970,7 @@ mod tests {
 
     #[test]
     fn tiers_follow_what_the_plan_reads_and_the_source() {
-        use super::{Source, Tier, runnable, tier};
+        use super::{Source, Tier, tier};
         use solium_effects::stage::Reads;
         let backdrop = Reads {
             backdrop: true,
@@ -2009,9 +2010,11 @@ mod tests {
             Tier::Own,
             "reading its own pixels is T1 until X1.4b's inline tier"
         );
-        assert!(runnable(Tier::Generated).is_ok() && runnable(Tier::Own).is_ok());
-        assert!(runnable(Tier::Xray).is_ok(), "T2 runs from X2.1 on");
-        assert!(runnable(Tier::Live).expect_err("refused").contains("X4.1"));
+        assert!(
+            Tier::Xray.reads_a_cut() && Tier::Live.reads_a_cut(),
+            "the wallpaper's cut and the live one (#209)"
+        );
+        assert!(!Tier::Own.reads_a_cut() && !Tier::Generated.reads_a_cut());
     }
 
     /// The picture from before a resize (`old`) is the part's own too, and a
