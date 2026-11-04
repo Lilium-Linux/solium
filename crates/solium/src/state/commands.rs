@@ -1528,19 +1528,21 @@ impl Solium {
             }
         };
         let running = self.rules_generation;
-        let same_rules = self.rules.user().len() == rules.len()
-            && self
-                .rules
-                .user()
-                .iter()
-                .zip(&rules)
-                .all(|(running, taken)| running.same_but_params(taken));
-        let mut taken = crate::effect::rules::Rules::new(
-            Vec::new(),
-            Vec::new(),
-            rules,
-            running.wrapping_add(1),
-        );
+        // What the configuration's settings expand to (#78), ahead of the
+        // user's rules and bound with them.
+        let expansion = self.effect_settings.expansion();
+        let same = |running: &[crate::effect::rules::Rule],
+                    taken: &[crate::effect::rules::Rule]| {
+            running.len() == taken.len()
+                && running
+                    .iter()
+                    .zip(taken)
+                    .all(|(running, taken)| running.same_but_params(taken))
+        };
+        let same_rules =
+            same(self.rules.user(), &rules) && same(self.rules.expansion(), &expansion);
+        let mut taken =
+            crate::effect::rules::Rules::new(Vec::new(), expansion, rules, running.wrapping_add(1));
         let before = self.rules.effects();
         self.effects.want("rules", taken.effects());
         let mut bound = Vec::new();
@@ -1550,8 +1552,40 @@ impl Solium {
                 continue;
             }
             match Chains::bind(&mut self.effects, rule) {
-                Ok(chain) => bound.push((u32::try_from(index).unwrap_or(u32::MAX), chain)),
+                Ok(chain) => bound.push((
+                    Origin::User,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    chain,
+                )),
                 Err(problem) => problems.push(rule_problem(index + 1, problem, &file)),
+            }
+        }
+        // `effects.client_blur`'s, bound one by one as a style's are: one
+        // that cannot bind (its effect gone from both folders, say) is named
+        // on the overlay under `client_blur` and costs only its own slot,
+        // never the user's rules.
+        // `tests::a_client_blur_that_cannot_bind_costs_only_its_own_slots`.
+        let mut expansion_problems = Vec::new();
+        let mut expansion_bound = Vec::new();
+        for (index, rule) in taken.expansion().iter().enumerate() {
+            if rule.fill == Fill::Off {
+                continue;
+            }
+            match Chains::bind(&mut self.effects, rule) {
+                Ok(chain) => {
+                    expansion_bound.push(rule.clone());
+                    bound.push((
+                        Origin::Expansion,
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                        chain,
+                    ));
+                }
+                Err(problem) => expansion_problems.push(Problem::error(
+                    "client_blur",
+                    &file,
+                    problem.line,
+                    format!("effects.client_blur: {}", problem.message),
+                )),
             }
         }
         self.effects.clear_problems_of("rules");
@@ -1563,6 +1597,23 @@ impl Solium {
             self.effects.hold(self.chains.programs());
             return;
         }
+        self.effects.clear_problems_of("client_blur");
+        if !expansion_problems.is_empty() {
+            // Only what bound stays wanted, so what `client_blur` named is
+            // one problem, its own, and not a missing effect beside it.
+            let kept = crate::effect::rules::Rules::new(
+                Vec::new(),
+                expansion_bound,
+                taken.user().to_vec(),
+                0,
+            );
+            self.effects.want("rules", kept.effects());
+        }
+        // Each only once: the two rules name one effect.
+        expansion_problems.dedup_by(|a, b| a.message == b.message);
+        for problem in expansion_problems {
+            self.effects.push_problem(problem);
+        }
         // A set that differs from the running one only in its links' params,
         // binding to chains that run the same passes, keeps the running
         // generation: every slot keeps its capture and targets, and the new
@@ -1573,9 +1624,9 @@ impl Solium {
         // Anything else starts afresh, as a rebind after the probe must.
         let keep = fresh_slots == FreshSlots::IfChanged
             && same_rules
-            && bound.iter().all(|(index, chain)| {
+            && bound.iter().all(|(origin, index, chain)| {
                 let key = RuleKey {
-                    origin: Origin::User,
+                    origin: *origin,
                     index: *index,
                     generation: running,
                 };
@@ -1591,22 +1642,25 @@ impl Solium {
         if keep {
             taken = crate::effect::rules::Rules::new(
                 Vec::new(),
-                Vec::new(),
+                taken.expansion().to_vec(),
                 taken.user().to_vec(),
                 generation,
             );
         }
         self.rules_generation = generation;
-        for (index, chain) in bound {
+        for (origin, index, chain) in bound {
             let key = RuleKey {
-                origin: Origin::User,
+                origin,
                 index,
                 generation,
             };
             self.chains.insert(key, chain);
         }
         self.chains.retain_generation(Origin::User, generation);
+        self.chains.retain_generation(Origin::Expansion, generation);
         self.effects.hold(self.chains.programs());
+        // A client is offered a blur only while a rule draws one (#78).
+        self.background_effect.offer(taken.draws_regions());
         self.rules = taken;
         self.redraw = true;
     }

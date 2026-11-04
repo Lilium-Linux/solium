@@ -92,6 +92,8 @@ fn a_reload_reads_the_effect_folders_again() {
         Some(effects.clone()),
         effects.join("none"),
     ));
+    // No shipped effects, so no shipped `client_blur` to draw either.
+    state.effect_settings.client_blur = None;
     state.effects.want("rules", ["a".to_owned()]);
     let v1 = state
         .effects
@@ -489,6 +491,8 @@ fn state_with_effects_in(place: &std::path::Path) -> (TestDisplay, Solium) {
         Some(place.to_path_buf()),
         place.join("none"),
     ));
+    // No shipped effects, so no shipped `client_blur` to draw either.
+    state.effect_settings.client_blur = None;
     (display, state)
 }
 
@@ -537,6 +541,30 @@ fn a_program_run_in_the_background_opens_no_window() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&marker);
+}
+
+/// **A `client_blur` that cannot bind costs only its own slots** (#78): with
+/// no `blur` anywhere, a rule of the user's still binds and runs, and the one
+/// problem listed is `client_blur`'s.
+#[test]
+fn a_client_blur_that_cannot_bind_costs_only_its_own_slots() {
+    let place = crate::effect::host::tests::scratch("state-client-blur-unbound");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.effect_settings.client_blur = Some(crate::effect::tree::Tree::Text("blur".to_owned()));
+    let rules = crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = { "tint", amount = 0.2 } } }"#,
+    ))
+    .expect("parses");
+    state.apply_effects(Ok(rules));
+    assert_eq!(state.rules.user().len(), 1, "the user's rule was refused");
+    let problems: Vec<String> = state
+        .effects
+        .problems()
+        .iter()
+        .map(|problem| problem.effect.clone())
+        .collect();
+    assert_eq!(problems, ["client_blur"], "{:?}", state.effects.problems());
 }
 
 /// **A broken rule keeps the rules that ran**, and the error is a problem;
@@ -2911,6 +2939,9 @@ mod real_client {
         wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
     };
     use wayland_client::{Connection, Dispatch, QueueHandle};
+    use wayland_protocols::ext::background_effect::v1::client::{
+        ext_background_effect_manager_v1, ext_background_effect_surface_v1,
+    };
     use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
         ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
     };
@@ -3013,6 +3044,10 @@ mod real_client {
         dmabuf: Option<explicit_sync::ZwpLinuxDmabufV1>,
         compositor: Option<wl_compositor::WlCompositor>,
         wm_base: Option<xdg_wm_base::XdgWmBase>,
+        /// `ext_background_effect_manager_v1`, and the capabilities it said
+        /// it has (#78).
+        background_effect: Option<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1>,
+        blur_capabilities: Option<u32>,
         /// `ext_workspace_manager_v1`'s global name, as the registry announced
         /// it: bound only by a test that asks, with [`Self::bind_workspaces`]
         /// (#60).
@@ -3542,6 +3577,9 @@ mod real_client {
                 // Version 2 for the tiled states, #228; a client bound at 1
                 // is never sent them.
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 2, qh, ())),
+                "ext_background_effect_manager_v1" => {
+                    state.background_effect = Some(registry.bind(name, 1, qh, ()));
+                }
                 "zxdg_decoration_manager_v1" => {
                     state.decoration = Some(registry.bind(name, 1, qh, ()));
                 }
@@ -3744,6 +3782,26 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
     wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
     wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+    wayland_client::delegate_noop!(Client: ignore ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
+
+    /// See [`Client::blur_capabilities`].
+    impl Dispatch<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, ()> for Client {
+        fn event(
+            state: &mut Self,
+            _manager: &ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+            event: ext_background_effect_manager_v1::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let ext_background_effect_manager_v1::Event::Capabilities {
+                flags: wayland_client::WEnum::Value(flags),
+            } = event
+            {
+                state.blur_capabilities = Some(flags.bits());
+            }
+        }
+    }
 
     impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for Client {
         fn event(
@@ -13363,6 +13421,8 @@ end)"#,
             Some(place.clone()),
             place.join("none"),
         ));
+        // No shipped effects, so no shipped `client_blur` to draw either.
+        fixture.state.effect_settings.client_blur = None;
         fixture.scratch = Some(place);
     }
 
@@ -15008,6 +15068,8 @@ end)"#,
             Some(fixtures.to_owned()),
             fixtures.join("none"),
         ));
+        // No shipped effects, so no shipped `client_blur` to draw either.
+        fixture.state.effect_settings.client_blur = None;
         let walk = |slots: &Slots| {
             let mut pieces = Vec::new();
             crate::render::pane_walk(
@@ -36817,6 +36879,190 @@ end)"#,
             }
         }
 
+        /// What is behind a surface, blurred at its client's asking (#78):
+        /// `ext-background-effect-v1` against a real client.
+        mod background_effect {
+            use super::*;
+            use wayland_client::Proxy as _;
+
+            fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+                Rectangle::new((x, y).into(), (w, h).into())
+            }
+
+            /// A 300×40 layer surface at the bottom layer, drawn, and its
+            /// server side.
+            fn panel(
+                desk: &mut Desk,
+            ) -> (
+                wl_surface::WlSurface,
+                zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+                WlSurface,
+            ) {
+                use zwlr_layer_surface_v1::Anchor;
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let shell = desk
+                    .client
+                    .layer_shell
+                    .clone()
+                    .expect("zwlr_layer_shell_v1 bound");
+                let surface = compositor.create_surface(&desk.qh, ());
+                let layered = shell.get_layer_surface(
+                    &surface,
+                    None,
+                    zwlr_layer_shell_v1::Layer::Bottom,
+                    "panel".to_owned(),
+                    &desk.qh,
+                    (),
+                );
+                layered.set_anchor(Anchor::Bottom | Anchor::Left);
+                layered.set_size(300, 40);
+                surface.commit();
+                desk.pump();
+                commit_buffer(&desk.client, &desk.qh, &surface, 300, 40);
+                desk.pump();
+                let ours = desk
+                    .state
+                    .space
+                    .outputs()
+                    .find_map(|output| {
+                        smithay::desktop::layer_map_for_output(output)
+                            .layers()
+                            .find(|layer| {
+                                layer.wl_surface().id().protocol_id() == surface.id().protocol_id()
+                            })
+                            .map(|layer| layer.wl_surface().clone())
+                    })
+                    .expect("the panel is mapped");
+                (surface, layered, ours)
+            }
+
+            fn region(desk: &Desk, rects: &[(i32, i32, i32, i32)]) -> wl_region::WlRegion {
+                let compositor = desk.client.compositor.clone().expect("wl_compositor bound");
+                let region = compositor.create_region(&desk.qh, ());
+                for (x, y, w, h) in rects {
+                    region.add(*x, *y, *w, *h);
+                }
+                region
+            }
+
+            /// **A client is offered blur, and its region takes effect at
+            /// its next commit**: none before it, the region after it, and
+            /// none again once it asks for none.
+            #[test]
+            fn a_region_takes_effect_at_the_next_commit_and_none_takes_it_away() {
+                let mut desk = Desk::new();
+                desk.pump();
+                assert_eq!(
+                    desk.client.blur_capabilities,
+                    Some(ext_background_effect_manager_v1::Capability::Blur.bits()),
+                    "the premise: blur is offered"
+                );
+                let (surface, _layered, ours) = panel(&mut desk);
+                let manager = desk.client.background_effect.clone().expect("bound");
+                let effect = manager.get_background_effect(&surface, &desk.qh, ());
+                effect.set_blur_region(Some(&region(&desk, &[(0, 0, 300, 40)])));
+                desk.pump();
+                assert_eq!(
+                    crate::background_effect::region_of(&ours),
+                    None,
+                    "taken before the commit"
+                );
+                surface.commit();
+                desk.pump();
+                assert_eq!(
+                    crate::background_effect::region_of(&ours),
+                    Some(vec![rect(0, 0, 300, 40)])
+                );
+                effect.set_blur_region(None);
+                surface.commit();
+                desk.pump();
+                assert_eq!(crate::background_effect::region_of(&ours), None);
+            }
+
+            /// **The surface is matched by `blur_region`**, as a layer
+            /// surface's fact and a window's in `sol.windows()`.
+            #[test]
+            fn a_window_that_asked_is_blur_region_in_sol_windows() {
+                let mut desk = Desk::new();
+                let opened = desk.open_surface();
+                let manager = desk.client.background_effect.clone().expect("bound");
+                let effect = manager.get_background_effect(&opened.surface, &desk.qh, ());
+                effect.set_blur_region(Some(&region(&desk, &[(0, 0, 32, 32)])));
+                opened.surface.commit();
+                desk.pump();
+                let row = desk
+                    .state
+                    .snapshot()
+                    .windows
+                    .into_iter()
+                    .find(|window| window.id == opened.pane.get())
+                    .expect("its row");
+                assert!(row.blur_region);
+            }
+
+            /// **A backdrop rule on a layer surface is resolved** (#78): the
+            /// shipped `client_blur` behind a panel that asked for a blur is
+            /// wanted. Resolving it reads which layers are below the panel
+            /// (`t2_cut`), and the layer map was held across the walk that
+            /// asked, so the compositor waited on its own lock for ever.
+            #[test]
+            fn a_backdrop_rule_on_a_layer_surface_is_resolved() {
+                let mut desk = Desk::new();
+                fixture_effects(&mut desk.state);
+                let (surface, _layered, ours) = panel(&mut desk);
+                let manager = desk.client.background_effect.clone().expect("bound");
+                let effect = manager.get_background_effect(&surface, &desk.qh, ());
+                effect.set_blur_region(Some(&region(&desk, &[(0, 0, 300, 40)])));
+                surface.commit();
+                desk.pump();
+                desk.state.apply_effects_set(
+                    Ok(Vec::new()),
+                    Ok(crate::effect::settings::Settings::default()),
+                );
+                assert!(
+                    desk.state.effects.problems().is_empty(),
+                    "{:?}",
+                    desk.state.effects.problems()
+                );
+                let slots = crate::render::build_slots(&mut desk.state);
+                assert!(slots.wanted(
+                    &crate::effect::plan::Owner::LayerShell(ours.id()),
+                    crate::effect::rules::Slot::Behind
+                ));
+            }
+
+            /// **With nothing drawing regions the protocol is not offered**:
+            /// `effects.client_blur = false` and no rule of the user's
+            /// matching `blur_region` or cut by `mask = "region"`.
+            #[test]
+            fn with_no_rule_drawing_regions_it_is_not_offered() {
+                let mut desk = Desk::new();
+                let effects = |desk: &mut Desk, client_blur: bool| {
+                    let settings = crate::effect::settings::Settings {
+                        client_blur: client_blur
+                            .then(|| crate::effect::tree::Tree::Text("blur".to_owned())),
+                        ..crate::effect::settings::Settings::default()
+                    };
+                    desk.state.apply(crate::script::Outcome {
+                        commands: vec![crate::script::Command::Effects {
+                            rules: Ok(Vec::new()),
+                            settings: Ok(settings),
+                        }],
+                        ..crate::script::Outcome::default()
+                    });
+                };
+                effects(&mut desk, false);
+                let (_conn, _queue, late) = connect(&mut desk.display, &mut desk.state);
+                assert!(
+                    late.background_effect.is_none(),
+                    "offered with nothing drawing it"
+                );
+                effects(&mut desk, true);
+                let (_conn, _queue, later) = connect(&mut desk.display, &mut desk.state);
+                assert!(later.background_effect.is_some(), "not offered again");
+            }
+        }
+
         mod stacking {
             use super::*;
             use crate::render::{Stacked, Walked};
@@ -37177,6 +37423,8 @@ end)"#,
                         Some(fixtures.to_owned()),
                         fixtures.join("none"),
                     ));
+                // No shipped effects, so no shipped `client_blur` to draw either.
+                desk.state.effect_settings.client_blur = None;
                 let rules = r#"{ { match = "*", part = "layer_shell:*", slot = "behind", effect = "ring" },
                                  { match = "*", part = "layer_shell:*", slot = "replace", effect = "fail-compile" },
                                  { match = "*", part = "surface:strip", slot = "front", effect = "ring" },

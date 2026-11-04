@@ -1085,6 +1085,7 @@ mod desk {
         WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {

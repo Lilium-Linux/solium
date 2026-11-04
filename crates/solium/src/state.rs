@@ -444,6 +444,9 @@ pub(crate) struct Solium {
     /// recording and screen sharing. See `screencopy.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) screencopy_state: crate::screencopy::ScreencopyState,
+    /// `ext-background-effect-v1`: what is behind a surface, blurred where
+    /// its client asks (#78). See `background_effect.rs`.
+    pub(crate) background_effect: crate::background_effect::BackgroundEffect,
     /// `ext-workspace-v1`: the declared workspaces, for a shell that is its
     /// own program (#60). See `ext_workspace.rs`.
     pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
@@ -1531,6 +1534,7 @@ impl Solium {
             rescan_outputs: false,
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
+            background_effect: crate::background_effect::BackgroundEffect::new(&display_handle),
             ext_workspaces: crate::ext_workspace::ExtWorkspaces::new(&display_handle),
             toplevels: crate::toplevels::Toplevels::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),

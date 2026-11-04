@@ -88,6 +88,10 @@ struct Probe {
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    /// `ext_background_effect_manager_v1`, for `WL_PROBE_BLUR` (#78).
+    background_effect: Option<
+        wayland_protocols::ext::background_effect::v1::client::ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+    >,
     screencopy: Option<ZwlrScreencopyManagerV1>,
     session_lock: Option<ExtSessionLockManagerV1>,
     idle_notifier: Option<ExtIdleNotifierV1>,
@@ -306,6 +310,19 @@ fn main() {
     if let Ok(hold) = std::env::var("WL_PROBE_WINDOWS") {
         let seconds: u64 = hold.trim().parse().unwrap_or(20);
         show_windows(&connection, &mut queue, &mut probe, seconds);
+        return;
+    }
+
+    // A translucent panel that asks for what is behind it to be blurred
+    // (#78), held up to be photographed: the blur region is two halves with a
+    // gap between them, so a capture shows the blur cut to the region the
+    // client named and not to the surface. `WL_PROBE_BLUR=<seconds>`.
+    if let Ok(hold) = std::env::var("WL_PROBE_BLUR") {
+        let seconds: u64 = hold.trim().parse().unwrap_or(20);
+        if let Err(reason) = show_blur_panel(&connection, &mut queue, &mut probe, seconds) {
+            eprintln!("wl-probe: {reason}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -703,6 +720,66 @@ fn show_popup(
         }
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+/// A 900×140 panel over the windows at the bottom of the screen, a dark tint
+/// at a third opacity, its blur region its left and right 420 px with a 60 px
+/// gap in the middle (#78).
+fn show_blur_panel(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<Probe>,
+    probe: &mut Probe,
+    seconds: u64,
+) -> Result<(), String> {
+    let handle = queue.handle();
+    let (Some(compositor), Some(shm), Some(layer_shell)) = (
+        probe.compositor.clone(),
+        probe.shm.clone(),
+        probe.layer_shell.clone(),
+    ) else {
+        return Err("the compositor would not hand over a layer shell".to_owned());
+    };
+    let Some(manager) = probe.background_effect.clone() else {
+        return Err("ext_background_effect_manager_v1 is not offered".to_owned());
+    };
+    let surface = compositor.create_surface(&handle, ());
+    let panel = layer_shell.get_layer_surface(
+        &surface,
+        None,
+        Layer::Top,
+        "wl-probe-blur".to_owned(),
+        &handle,
+        "blur".to_owned(),
+    );
+    panel.set_anchor(Anchor::Bottom);
+    panel.set_size(900, 140);
+    panel.set_margin(0, 0, 80, 0);
+    surface.commit();
+    for _ in 0..50 {
+        settle(connection, queue, probe)?;
+        if probe.bars.iter().any(|(on, _, _)| on == "blur") {
+            break;
+        }
+    }
+    let effect = manager.get_background_effect(&surface, &handle, ());
+    let region = compositor.create_region(&handle, ());
+    region.add(0, 0, 420, 140);
+    region.add(480, 0, 420, 140);
+    effect.set_blur_region(Some(&region));
+    // Premultiplied: a dark violet at a third.
+    let buffer = tinted_buffer(&shm, &handle, 900, 140, [0x26, 0x12, 0x1c, 0x55]);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage(0, 0, i32::MAX, i32::MAX);
+    surface.commit();
+    println!("a blurred panel is up");
+    let until = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        if queue.roundtrip(probe).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Ok(())
 }
 
 /// Ask for a screenshot, and look at it.
@@ -1904,6 +1981,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "zwlr_layer_shell_v1" => {
                 state.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
             }
+            "ext_background_effect_manager_v1" => {
+                state.background_effect = Some(registry.bind(name, 1, handle, ()));
+            }
             "zwlr_screencopy_manager_v1" => {
                 state.screencopy = Some(registry.bind(name, version.min(3), handle, ()));
             }
@@ -2018,6 +2098,9 @@ impl Dispatch<XdgSurface, ()> for Probe {
 }
 
 delegate_noop!(Probe: ignore WlCompositor);
+delegate_noop!(Probe: ignore wayland_client::protocol::wl_region::WlRegion);
+delegate_noop!(Probe: ignore wayland_protocols::ext::background_effect::v1::client::ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1);
+delegate_noop!(Probe: ignore wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
 delegate_noop!(Probe: ignore WlSurface);
 delegate_noop!(Probe: ignore wl_shm::WlShm);
 delegate_noop!(Probe: ignore WlShmPool);
