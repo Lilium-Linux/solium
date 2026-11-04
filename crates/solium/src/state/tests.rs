@@ -92,6 +92,8 @@ fn a_reload_reads_the_effect_folders_again() {
         Some(effects.clone()),
         effects.join("none"),
     ));
+    // No shipped effects, so no shipped `client_blur` to draw either.
+    state.effect_settings.client_blur = None;
     state.effects.want("rules", ["a".to_owned()]);
     let v1 = state
         .effects
@@ -489,6 +491,8 @@ fn state_with_effects_in(place: &std::path::Path) -> (TestDisplay, Solium) {
         Some(place.to_path_buf()),
         place.join("none"),
     ));
+    // No shipped effects, so no shipped `client_blur` to draw either.
+    state.effect_settings.client_blur = None;
     (display, state)
 }
 
@@ -537,6 +541,30 @@ fn a_program_run_in_the_background_opens_no_window() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&marker);
+}
+
+/// **A `client_blur` that cannot bind costs only its own slots** (#78): with
+/// no `blur` anywhere, a rule of the user's still binds and runs, and the one
+/// problem listed is `client_blur`'s.
+#[test]
+fn a_client_blur_that_cannot_bind_costs_only_its_own_slots() {
+    let place = crate::effect::host::tests::scratch("state-client-blur-unbound");
+    crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
+    let (_display, mut state) = state_with_effects_in(&place);
+    state.effect_settings.client_blur = Some(crate::effect::tree::Tree::Text("blur".to_owned()));
+    let rules = crate::effect::rules::parse(&tree(
+        r#"{ { match = "*", part = "client", slot = "replace", effect = { "tint", amount = 0.2 } } }"#,
+    ))
+    .expect("parses");
+    state.apply_effects(Ok(rules));
+    assert_eq!(state.rules.user().len(), 1, "the user's rule was refused");
+    let problems: Vec<String> = state
+        .effects
+        .problems()
+        .iter()
+        .map(|problem| problem.effect.clone())
+        .collect();
+    assert_eq!(problems, ["client_blur"], "{:?}", state.effects.problems());
 }
 
 /// **A broken rule keeps the rules that ran**, and the error is a problem;
@@ -13393,6 +13421,8 @@ end)"#,
             Some(place.clone()),
             place.join("none"),
         ));
+        // No shipped effects, so no shipped `client_blur` to draw either.
+        fixture.state.effect_settings.client_blur = None;
         fixture.scratch = Some(place);
     }
 
@@ -15038,6 +15068,8 @@ end)"#,
             Some(fixtures.to_owned()),
             fixtures.join("none"),
         ));
+        // No shipped effects, so no shipped `client_blur` to draw either.
+        fixture.state.effect_settings.client_blur = None;
         let walk = |slots: &Slots| {
             let mut pieces = Vec::new();
             crate::render::pane_walk(
@@ -37391,6 +37423,8 @@ end)"#,
                         Some(fixtures.to_owned()),
                         fixtures.join("none"),
                     ));
+                // No shipped effects, so no shipped `client_blur` to draw either.
+                desk.state.effect_settings.client_blur = None;
                 let rules = r#"{ { match = "*", part = "layer_shell:*", slot = "behind", effect = "ring" },
                                  { match = "*", part = "layer_shell:*", slot = "replace", effect = "fail-compile" },
                                  { match = "*", part = "surface:strip", slot = "front", effect = "ring" },
