@@ -682,6 +682,12 @@ impl Solium {
                 // `real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`,
                 // `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
                 // `crate::models::workspaces::tests::a_workspace_declared_twice_is_one_row`.
+                Command::OutputManagement(offered) => {
+                    if self.output_management.offered() != offered {
+                        tracing::debug!(offered, "wlr-output-management offered set");
+                        self.output_management.offer(offered);
+                    }
+                }
                 Command::WorkspacesOffered(offered) => {
                     if self.ext_workspaces.offered() != offered {
                         tracing::debug!(offered, "ext-workspace offered set");
@@ -981,8 +987,10 @@ impl Solium {
                     // everything downstream is concerned, and `enabled = true`
                     // is a plug -- so the backend is asked to look again
                     // rather than this growing its own way to drop a screen.
-                    // Nothing to do nested: there are no connectors there.
-                    if was.enablement() != self.arrangement.enablement() {
+                    // A new mode, rotation or vrr on a monitor already lit is
+                    // both, one after the other (#51). Nothing to do nested:
+                    // there are no connectors there.
+                    if was.lit_as() != self.arrangement.lit_as() {
                         self.rescan_outputs = true;
                     }
                     // Applied immediately, and applied again on reload, so

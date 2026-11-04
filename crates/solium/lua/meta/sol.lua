@@ -1131,6 +1131,19 @@ function sol.x11(options) end
 ---@return nil
 function sol.workspaces_offered(offered) end
 
+---Whether a program that arranges the monitors -- kanshi, wlr-randr, a
+---settings panel -- sees them, through `zwlr-output-management-v1` (#51):
+---`config.output_management`, which the shipped `init.lua` hands over. What
+---such a program proposes reaches the `surface` listeners as the action
+---`monitors.apply`, `{ monitors = { row, ... } }` with each row as
+---`sol.monitors` takes it, from the surface `"output-management"`; the
+---program is told it succeeded only when an answer called `sol.monitors`.
+---`false` hides the global and tells every program that bound it that it is
+---finished.
+---@param offered boolean
+---@return nil
+function sol.output_management(offered) end
+
 ---Which window protocols a shell that is its own program is offered:
 ---`config.toplevels`, which the shipped `init.lua` hands over. A protocol
 ---taken away is hidden from clients and closes every handle it gave out. See

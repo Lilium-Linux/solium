@@ -451,6 +451,11 @@ pub(crate) struct Solium {
     /// `ext-foreign-toplevel-list` and `wlr-foreign-toplevel-management`
     /// globals, and what each client was told (#50). See `toplevels.rs`.
     pub(crate) toplevels: crate::toplevels::Toplevels,
+    /// The monitors for a program that arranges them (#51):
+    /// `zwlr-output-management-v1`, what each client was told, and the
+    /// connected monitors the configuration switched off. See
+    /// `output_management.rs`.
+    pub(crate) output_management: crate::output_management::OutputManagement,
     /// Registers `ext_output_image_capture_source_manager_v1` and
     /// `ext_image_copy_capture_manager_v1`, the successor to the one above,
     /// which screen sharing through the portal asks for first. See
@@ -1533,6 +1538,7 @@ impl Solium {
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
             ext_workspaces: crate::ext_workspace::ExtWorkspaces::new(&display_handle),
             toplevels: crate::toplevels::Toplevels::new(&display_handle),
+            output_management: crate::output_management::OutputManagement::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
             pending_captures: Vec::new(),
             space: Space::default(),

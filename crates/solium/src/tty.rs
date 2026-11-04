@@ -1021,6 +1021,10 @@ struct Screen {
     /// Resting until its next vblank after a pass that queued nothing on
     /// it, so it is drawn at most once a refresh (#392). See `cadence.rs`.
     cadence: crate::cadence::Cadence,
+    /// The mode, rotation and variable refresh it was lit with: a screen
+    /// the arrangement now wants lit otherwise is lit again (#51,
+    /// `monitor::Arrangement::lit_as`).
+    lit_with: (DrmMode, Transform, Option<bool>),
 }
 
 impl Screen {
@@ -1184,8 +1188,24 @@ impl State {
         // logical size and needs no modeset, unlike the mode and the
         // transform, which is why those two are settled here and it is
         // not.
+        // Every mode the monitor offers, so a program arranging the monitors
+        // can choose one (#51), and the one its EDID prefers named so.
+        for offered in mode_infos(connector) {
+            output.add_mode(Mode {
+                size: (offered.width, offered.height).into(),
+                refresh: offered.refresh,
+            });
+        }
         output.change_current_state(Some(wl_mode), Some(transform), None, Some((0, 0).into()));
-        output.set_preferred(wl_mode);
+        output.set_preferred(
+            mode_infos(connector)
+                .into_iter()
+                .find(|offered| offered.preferred)
+                .map_or(wl_mode, |offered| Mode {
+                    size: (offered.width, offered.height).into(),
+                    refresh: offered.refresh,
+                }),
+        );
         let blank = crate::pacing::vertical_blank(frame_interval(&output), height, scanned);
         // Mapped anywhere; `place_outputs` decides where, once, from the
         // configured arrangement — the same call the nested backend makes,
@@ -1258,6 +1278,7 @@ impl State {
             told: None,
             answering: false,
             cadence: crate::cadence::Cadence::default(),
+            lit_with: (mode, transform, self.solium.arrangement.vrr(&name)),
         });
         true
     }
@@ -1344,6 +1365,40 @@ impl State {
         for index in gone(&mine, &theirs) {
             self.drop_screen(index);
             changed = true;
+        }
+        // Still here, and wanted lit with another mode, rotation or variable
+        // refresh (#51): dropped, and lit again below as a monitor just
+        // plugged in is, with what the arrangement says now.
+        let arrangement = &self.solium.arrangement;
+        let relit: Vec<usize> = self
+            .screens
+            .iter()
+            .enumerate()
+            .filter(|(_, screen)| {
+                found.iter().any(|(connector, _, mode)| {
+                    let name = screen.output.name();
+                    connector.handle() == screen.connector
+                        && screen.lit_with
+                            != (
+                                *mode,
+                                arrangement.transform(&name).unwrap_or(Transform::Normal),
+                                arrangement.vrr(&name),
+                            )
+                })
+            })
+            .map(|(index, _)| index)
+            .rev()
+            .collect();
+        for index in relit {
+            tracing::info!(
+                monitor = self.screens[index].output.name(),
+                "lit again with a new mode, rotation or vrr"
+            );
+            self.drop_screen(index);
+            changed = true;
+        }
+        if let Some(drm) = self.drm.as_ref() {
+            self.solium.output_management.dark = switched_off(drm, &self.solium.arrangement);
         }
 
         let formats = match self.renderer.as_ref() {
@@ -1523,6 +1578,7 @@ impl State {
         self.node = Some(node);
         self.gbm = Some(gbm);
         let found = connected(&device, &self.solium.arrangement, false)?;
+        self.solium.output_management.dark = switched_off(&device, &self.solium.arrangement);
         self.drm = Some(device);
 
         for (connector, crtc, mode) in found {
@@ -2258,6 +2314,68 @@ fn connected(
         return Err(anyhow!("no connected display with a usable mode"));
     }
     Ok(found)
+}
+
+/// Every mode a connector offers, once each, its refresh in mHz as the
+/// output reports it, and which its EDID prefers (#51).
+fn mode_infos(connector: &connector::Info) -> Vec<crate::output_management::ModeInfo> {
+    let mut infos: Vec<crate::output_management::ModeInfo> = Vec::new();
+    for mode in connector.modes() {
+        let (width, height) = mode.size();
+        let offered = crate::output_management::ModeInfo {
+            width: i32::from(width),
+            height: i32::from(height),
+            refresh: i32::try_from(mode.vrefresh()).unwrap_or(60) * 1000,
+            preferred: mode.mode_type().contains(ModeTypeFlags::PREFERRED),
+        };
+        match infos.iter_mut().find(|each| {
+            (each.width, each.height, each.refresh)
+                == (offered.width, offered.height, offered.refresh)
+        }) {
+            Some(each) => each.preferred |= offered.preferred,
+            None => infos.push(offered),
+        }
+    }
+    infos
+}
+
+/// The connected monitors the configuration switched off, as a program
+/// arranging the monitors is told them, so it can turn one on (#51). Read
+/// from the connector cache `connected` filled.
+fn switched_off(
+    device: &DrmDevice,
+    arrangement: &crate::monitor::Arrangement,
+) -> Vec<crate::output_management::Dark> {
+    let Ok(resources) = device.resource_handles() else {
+        return Vec::new();
+    };
+    resources
+        .connectors()
+        .iter()
+        .filter_map(|handle| device.get_connector(*handle, false).ok())
+        .filter(|connector| connector.state() == connector::State::Connected)
+        .filter_map(|connector| {
+            let name = format!(
+                "{}-{}",
+                connector.interface().as_str(),
+                connector.interface_id()
+            );
+            if arrangement.enabled(&name) {
+                return None;
+            }
+            let (width, height) = connector.size().unwrap_or((0, 0));
+            Some(crate::output_management::Dark {
+                modes: mode_infos(&connector),
+                make: "Solium".to_owned(),
+                model: "DRM".to_owned(),
+                physical: (
+                    i32::try_from(width).unwrap_or_default(),
+                    i32::try_from(height).unwrap_or_default(),
+                ),
+                name,
+            })
+        })
+        .collect()
 }
 
 /// Real input devices, feeding the same seam the winit backend feeds.

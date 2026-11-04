@@ -23,6 +23,7 @@ use std::time::Duration;
 
 mod crop;
 mod dmabuf;
+mod outputs;
 mod pixels;
 
 use wayland_client::protocol::{
@@ -264,6 +265,17 @@ xkb_symbols \"pc_ua_us_2_inet(evdev)\" {
 }
 
 fn main() {
+    // The monitors as a program arranging them sees them, and an arrangement
+    // proposed: `outputs.rs` (#51).
+    if std::env::var_os("WL_PROBE_OUTPUTS").is_some()
+        || std::env::var_os("WL_PROBE_ARRANGE").is_some()
+    {
+        if let Err(err) = outputs::run() {
+            eprintln!("wl-probe: output management: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::var_os("WL_PROBE_DMABUF").is_some() {
         if let Err(err) = dmabuf::check() {
             eprintln!("wl-probe: DMA-BUF feedback: {err}");

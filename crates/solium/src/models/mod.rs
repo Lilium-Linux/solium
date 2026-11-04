@@ -102,6 +102,8 @@ impl crate::state::Solium {
         // The windows a dock that is its own program sees, from the same list
         // the models below are built from (#50).
         self.publish_toplevels();
+        // The monitors a program that arranges them sees (#51).
+        self.publish_output_heads();
         // The caret each decoration is told this frame:
         // `text_input::tests::only_the_pane_whose_window_has_the_caret_is_given_it`.
         self.settle_caret();
