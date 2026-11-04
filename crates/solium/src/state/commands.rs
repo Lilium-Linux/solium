@@ -1528,19 +1528,21 @@ impl Solium {
             }
         };
         let running = self.rules_generation;
-        let same_rules = self.rules.user().len() == rules.len()
-            && self
-                .rules
-                .user()
-                .iter()
-                .zip(&rules)
-                .all(|(running, taken)| running.same_but_params(taken));
-        let mut taken = crate::effect::rules::Rules::new(
-            Vec::new(),
-            Vec::new(),
-            rules,
-            running.wrapping_add(1),
-        );
+        // What the configuration's settings expand to (#78), ahead of the
+        // user's rules and bound with them.
+        let expansion = self.effect_settings.expansion();
+        let same = |running: &[crate::effect::rules::Rule],
+                    taken: &[crate::effect::rules::Rule]| {
+            running.len() == taken.len()
+                && running
+                    .iter()
+                    .zip(taken)
+                    .all(|(running, taken)| running.same_but_params(taken))
+        };
+        let same_rules =
+            same(self.rules.user(), &rules) && same(self.rules.expansion(), &expansion);
+        let mut taken =
+            crate::effect::rules::Rules::new(Vec::new(), expansion, rules, running.wrapping_add(1));
         let before = self.rules.effects();
         self.effects.want("rules", taken.effects());
         let mut bound = Vec::new();
@@ -1550,8 +1552,32 @@ impl Solium {
                 continue;
             }
             match Chains::bind(&mut self.effects, rule) {
-                Ok(chain) => bound.push((u32::try_from(index).unwrap_or(u32::MAX), chain)),
+                Ok(chain) => bound.push((
+                    Origin::User,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    chain,
+                )),
                 Err(problem) => problems.push(rule_problem(index + 1, problem, &file)),
+            }
+        }
+        // `effects.client_blur`'s, named so on the overlay when one cannot
+        // bind (an effect nobody ships, say).
+        for (index, rule) in taken.expansion().iter().enumerate() {
+            if rule.fill == Fill::Off {
+                continue;
+            }
+            match Chains::bind(&mut self.effects, rule) {
+                Ok(chain) => bound.push((
+                    Origin::Expansion,
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    chain,
+                )),
+                Err(problem) => problems.push(Problem::error(
+                    "rules",
+                    &file,
+                    problem.line,
+                    format!("effects.client_blur: {}", problem.message),
+                )),
             }
         }
         self.effects.clear_problems_of("rules");
@@ -1573,9 +1599,9 @@ impl Solium {
         // Anything else starts afresh, as a rebind after the probe must.
         let keep = fresh_slots == FreshSlots::IfChanged
             && same_rules
-            && bound.iter().all(|(index, chain)| {
+            && bound.iter().all(|(origin, index, chain)| {
                 let key = RuleKey {
-                    origin: Origin::User,
+                    origin: *origin,
                     index: *index,
                     generation: running,
                 };
@@ -1591,22 +1617,25 @@ impl Solium {
         if keep {
             taken = crate::effect::rules::Rules::new(
                 Vec::new(),
-                Vec::new(),
+                taken.expansion().to_vec(),
                 taken.user().to_vec(),
                 generation,
             );
         }
         self.rules_generation = generation;
-        for (index, chain) in bound {
+        for (origin, index, chain) in bound {
             let key = RuleKey {
-                origin: Origin::User,
+                origin,
                 index,
                 generation,
             };
             self.chains.insert(key, chain);
         }
         self.chains.retain_generation(Origin::User, generation);
+        self.chains.retain_generation(Origin::Expansion, generation);
         self.effects.hold(self.chains.programs());
+        // A client is offered a blur only while a rule draws one (#78).
+        self.background_effect.offer(taken.draws_regions());
         self.rules = taken;
         self.redraw = true;
     }

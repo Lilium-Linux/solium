@@ -245,6 +245,9 @@ pub(crate) struct WindowInfo {
     /// Whether its application draws its own titlebar, and its frame is the
     /// style's client-side one (#462): what a rule's `client_side` match reads.
     pub(crate) client_side: bool,
+    /// Whether its client asked for what is behind it to be blurred, through
+    /// `ext-background-effect` (#78): what a rule's `blur_region` matches.
+    pub(crate) blur_region: bool,
     /// Its `_NET_WM_WINDOW_TYPE`, by the name `xwayland::window_type_name`
     /// gives it -- `"normal"` for an X11 window with none, same as
     /// `xwayland::places_itself` and `floats_over_its_parent` already read it
@@ -4136,6 +4139,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 entry.set("maximized", window.maximized)?;
                 entry.set("style", window.style.clone())?;
                 entry.set("client_side", window.client_side)?;
+                entry.set("blur_region", window.blur_region)?;
                 entry.set("x11_type", window.x11_type.clone())?;
                 entry.set("accepts_input", window.accepts_input)?;
                 entry.set("class", window.class.clone())?;
@@ -8874,6 +8878,7 @@ mod tests {
             windows: vec![WindowInfo {
                 icon: None,
                 client_side: false,
+                blur_region: false,
                 insets: crate::decoration::Insets::default(),
                 id: 7,
                 rect: Rect {
@@ -12192,6 +12197,7 @@ mod tests {
         let window = |id: u64, modal: bool, parent: Parentage| WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect::default(),
@@ -12906,6 +12912,7 @@ mod tests {
                 .map(|id| WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     id: *id,
                     rect: Rect {
@@ -17242,6 +17249,7 @@ mod dialogs {
         WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect: Rect {
@@ -17297,6 +17305,7 @@ mod dialogs {
         WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets::default(),
             modal: true,
             parent,
@@ -17368,6 +17377,7 @@ mod dialogs {
         let framed = WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets {
                 top: 32,
                 right: 1,
@@ -17920,6 +17930,7 @@ mod dialogs {
                         WindowInfo {
                             icon: None,
                             client_side: false,
+                            blur_region: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
@@ -18397,6 +18408,7 @@ mod dialogs {
                 .map(|window| WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: ids.contains(&window.id),
                     ..window
@@ -18536,6 +18548,7 @@ mod dialogs {
                             .map(|id| WindowInfo {
                                 icon: None,
                                 client_side: false,
+                                blur_region: false,
                                 insets: crate::decoration::Insets::default(),
                                 leaving: leaving && id == 3,
                                 ..on(&second_monitor(), window(id, 800.0, 600.0))
@@ -18659,6 +18672,7 @@ mod dialogs {
                         WindowInfo {
                             icon: None,
                             client_side: false,
+                            blur_region: false,
                             insets: crate::decoration::Insets::default(),
                             rect,
                             drawn: drawn(rect),
@@ -19345,6 +19359,7 @@ mod dialogs {
             let closing = |id| WindowInfo {
                 icon: None,
                 client_side: false,
+                blur_region: false,
                 insets: crate::decoration::Insets::default(),
                 leaving: true,
                 ..window(id, 800.0, 600.0)
@@ -19585,6 +19600,7 @@ mod dialogs {
             WindowInfo {
                 icon: None,
                 client_side: false,
+                blur_region: false,
                 insets: crate::decoration::Insets::default(),
                 min: size(w, h),
                 ..plain(id)
@@ -19596,6 +19612,7 @@ mod dialogs {
             WindowInfo {
                 icon: None,
                 client_side: false,
+                blur_region: false,
                 insets: crate::decoration::Insets::default(),
                 max: size(w, h),
                 ..plain(id)
@@ -19606,6 +19623,7 @@ mod dialogs {
             WindowInfo {
                 icon: None,
                 client_side: false,
+                blur_region: false,
                 insets: crate::decoration::Insets::default(),
                 app_id: app_id.to_owned(),
                 ..window
@@ -19682,6 +19700,7 @@ mod dialogs {
                 WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     max: size(1200, 0),
                     cramped: true,
@@ -19972,6 +19991,7 @@ mod dialogs {
                 let launched = WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     shown: false,
                     ..plain(2)
@@ -19985,6 +20005,7 @@ mod dialogs {
                 let arrived = WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     shown,
                     ..at_least(2, 2450, 1350)
@@ -20028,6 +20049,7 @@ mod dialogs {
                     let again = WindowInfo {
                         icon: None,
                         client_side: false,
+                        blur_region: false,
                         insets: crate::decoration::Insets::default(),
                         shown: false,
                         ..at_least(2, 2450, 1350)
@@ -20211,6 +20233,7 @@ mod dialogs {
                 Some(rect) => WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     rect: *rect,
                     ..window(id, rect.w, rect.h)
@@ -20672,6 +20695,7 @@ mod dialogs {
                                 WindowInfo {
                                     icon: None,
                                     client_side: false,
+                                    blur_region: false,
                                     insets: crate::decoration::Insets::default(),
                                     monitor: "DP-2".to_owned(),
                                     ..each
@@ -20910,6 +20934,7 @@ mod directions {
         WindowInfo {
             icon: None,
             client_side: false,
+            blur_region: false,
             insets: crate::decoration::Insets::default(),
             id,
             rect,
@@ -22647,6 +22672,7 @@ mod directions {
                 WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)
@@ -22717,6 +22743,7 @@ mod directions {
                 WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(1, "DP-1", WIDE)
@@ -22724,6 +22751,7 @@ mod directions {
                 WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     minimized: true,
                     above: false,
@@ -22732,6 +22760,7 @@ mod directions {
                 WindowInfo {
                     icon: None,
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     leaving: true,
                     ..window(3, "DP-1", WIDE)
@@ -22811,6 +22840,7 @@ mod directions {
                 window(4, "DP-1", WIDE),
                 WindowInfo {
                     client_side: false,
+                    blur_region: false,
                     insets: crate::decoration::Insets::default(),
                     focused,
                     ..window(3, "DP-1", WIDE)

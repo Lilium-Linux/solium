@@ -15,6 +15,7 @@ use super::tree::Tree;
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 pub(crate) const KEYS: &[&str] = &[
     "rules",
+    "client_blur",
     "sandbox",
     "limits",
     "present",
@@ -51,6 +52,58 @@ pub(crate) struct Settings {
     /// `effect::store::tests::a_moving_parts_suffix_runs_at_most_motion_hz_times_a_second`,
     /// `effect::store::tests::a_resized_parts_t0_chain_runs_at_most_motion_hz_times_a_second`.
     pub(crate) motion_hz: f64,
+    /// `effects.client_blur` (#78): what is drawn behind a surface whose
+    /// client asked for a blur with `ext-background-effect`, a link or a
+    /// chain as a rule's `effect` takes it; `None` is `false`, which leaves
+    /// such a surface to your own rules. [`Settings::expansion`] makes it
+    /// the rules it stands for.
+    /// `tests::client_blur_is_a_chain_true_or_false_and_expands_to_its_rules`.
+    pub(crate) client_blur: Option<Tree>,
+}
+
+/// What `effects.client_blur` is when nothing says: the shipped `blur`.
+fn client_blur_default() -> Option<Tree> {
+    Some(Tree::Text("blur".to_owned()))
+}
+
+impl Settings {
+    /// The rules `effects.client_blur` expands to (#78), ahead of your own so
+    /// a rule of yours for the same part and slot wins: behind every layer
+    /// surface and every window's client whose client asked for a blur
+    /// (`blur_region = true`), cut to the region it asked for
+    /// (`mask = "region"`). None for `false`.
+    /// `tests::client_blur_is_a_chain_true_or_false_and_expands_to_its_rules`.
+    pub(crate) fn expansion(&self) -> Vec<crate::effect::rules::Rule> {
+        let Some(effect) = &self.client_blur else {
+            return Vec::new();
+        };
+        let rule = |part: &str| {
+            let mut fields = std::collections::BTreeMap::new();
+            let mut matching = std::collections::BTreeMap::new();
+            matching.insert("blur_region".to_owned(), Tree::Bool(true));
+            fields.insert(
+                "match".to_owned(),
+                Tree::Table {
+                    list: Vec::new(),
+                    fields: matching,
+                },
+            );
+            fields.insert("part".to_owned(), Tree::Text(part.to_owned()));
+            fields.insert("slot".to_owned(), Tree::Text("behind".to_owned()));
+            fields.insert("mask".to_owned(), Tree::Text("region".to_owned()));
+            fields.insert("effect".to_owned(), effect.clone());
+            Tree::Table {
+                list: Vec::new(),
+                fields,
+            }
+        };
+        let rules = Tree::Table {
+            list: vec![rule("layer_shell:*"), rule("client")],
+            fields: std::collections::BTreeMap::new(),
+        };
+        // Checked when read (`parse`), so a refusal here is not reachable.
+        crate::effect::rules::parse(&rules).unwrap_or_default()
+    }
 }
 
 impl Default for Settings {
@@ -63,6 +116,7 @@ impl Default for Settings {
             xray: crate::effect::xray::XrayConfig::default(),
             memo: crate::effect::memo::MemoConfig::default(),
             motion_hz: MOTION_HZ_DEFAULT,
+            client_blur: client_blur_default(),
         }
     }
 }
@@ -411,6 +465,32 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
         return Err("`effects.motion_hz` is 0, or a number from 10 to 1000".to_owned());
     }
     let wanted = load_names(options)?;
+    // `true` is the shipped blur, `false` none, and a link or a chain is
+    // what to draw: checked now by expanding it, so a broken one refuses the
+    // set naming its key.
+    let client_blur = match options.field("client_blur") {
+        None | Some(Tree::Bool(true)) => client_blur_default(),
+        Some(Tree::Bool(false)) => None,
+        Some(effect @ (Tree::Text(_) | Tree::Table { .. })) => Some(effect.clone()),
+        Some(_) => {
+            return Err(
+                "`effects.client_blur` is an effect as a rule's `effect` takes it, true or false"
+                    .to_owned(),
+            );
+        }
+    };
+    if let Some(effect) = &client_blur {
+        let probe = Settings {
+            client_blur: Some(effect.clone()),
+            ..Settings::default()
+        };
+        if probe.expansion().len() != 2 {
+            return Err(
+                "`effects.client_blur` is an effect as a rule's `effect` takes it: a name, { \"blur\", passes = 3 } or a chain"
+                    .to_owned(),
+            );
+        }
+    }
     Ok(Settings {
         sandbox: Caps {
             load: Duration::from_secs_f64(load / 1000.0),
@@ -422,6 +502,7 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
         xray,
         memo,
         motion_hz,
+        client_blur,
     })
 }
 
@@ -466,6 +547,54 @@ mod tests {
     /// outside its bounds (one that is not finite included), a word outside
     /// its words, a table's key given anything but a table, and an unknown
     /// key are each refused, naming the key.
+    /// **`client_blur` is an effect, `true` or `false`, and expands to its
+    /// two rules** (#78): behind a layer surface and a window's client that
+    /// asked, cut to the region; none for `false`; anything else refused.
+    #[test]
+    fn client_blur_is_a_chain_true_or_false_and_expands_to_its_rules() {
+        use crate::effect::rules::{Fill, MaskKind, Part, Slot};
+        let read = |lua: &str| super::parse(&tree(lua));
+        let shipped = read("{}").expect("parses");
+        assert_eq!(shipped, super::Settings::default());
+        let rules = shipped.expansion();
+        assert_eq!(
+            rules
+                .iter()
+                .map(|rule| (
+                    rule.part.clone(),
+                    rule.slot,
+                    rule.mask,
+                    rule.matches.blur_region
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    Part::LayerShell(crate::effect::rules::Glob::Any),
+                    Slot::Behind,
+                    MaskKind::Region,
+                    Some(true)
+                ),
+                (Part::Client, Slot::Behind, MaskKind::Region, Some(true)),
+            ]
+        );
+        assert!(
+            rules
+                .iter()
+                .all(|rule| matches!(&rule.fill, Fill::Chain(links) if links[0].effect == "blur"))
+        );
+        assert_eq!(read("{ client_blur = true }").expect("parses"), shipped);
+        assert!(
+            read("{ client_blur = false }")
+                .expect("parses")
+                .expansion()
+                .is_empty()
+        );
+        let chain =
+            read(r#"{ client_blur = { { "blur", passes = 4 }, { "tint" } } }"#).expect("parses");
+        assert!(matches!(&chain.expansion()[0].fill, Fill::Chain(links) if links.len() == 2));
+        assert!(read("{ client_blur = 3 }").is_err());
+    }
+
     #[test]
     fn the_engines_keys_read_with_their_defaults_and_bounds() {
         let none = super::parse(&tree("{ rules = {} }")).expect("parses");

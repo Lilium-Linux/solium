@@ -181,6 +181,29 @@ pub(crate) struct EffectElement {
     texture: GlesTexture,
     program: GlesTexProgram,
     placement: Placement,
+    /// Where it is drawn at all, when its rule's `mask = "region"` says so
+    /// (#78): the rectangles of the region its surface's client asked to be
+    /// blurred, in `dst`'s physical pixels from its corner. `None` draws it
+    /// wherever its mask lets it.
+    region: Option<std::sync::Arc<[Rectangle<i32, Physical>]>>,
+}
+
+/// Each damaged rectangle cut to `region`'s rectangles: what a result whose
+/// rule asked for its region draws, each pixel of it once, since the region
+/// is disjoint (`background_effect::disjoint`).
+/// `tests::a_result_in_a_region_draws_only_the_damage_inside_it`.
+pub(crate) fn damage_in(
+    damage: &[Rectangle<i32, Physical>],
+    region: &[Rectangle<i32, Physical>],
+) -> Vec<Rectangle<i32, Physical>> {
+    damage
+        .iter()
+        .flat_map(|damaged| {
+            region
+                .iter()
+                .filter_map(|inside| damaged.intersection(*inside))
+        })
+        .collect()
 }
 
 impl EffectElement {
@@ -196,6 +219,16 @@ impl EffectElement {
             texture,
             program,
             placement: Placement::of(Rectangle::default(), None, 1.0),
+            region: None,
+        }
+    }
+
+    /// The same result drawn only inside `region`, rectangles in `dst`'s
+    /// physical pixels from its corner (#78).
+    pub(crate) fn in_region(self, region: Vec<Rectangle<i32, Physical>>) -> Self {
+        Self {
+            region: Some(region.into()),
+            ..self
         }
     }
 
@@ -296,6 +329,17 @@ impl RenderElement<GlesRenderer> for EffectElement {
     ) -> Result<(), GlesError> {
         let alpha = self.placement.alpha;
         let size = self.texture.size();
+        let inside;
+        let damage = match self.region.as_deref() {
+            Some(region) => {
+                inside = damage_in(damage, region);
+                if inside.is_empty() {
+                    return Ok(());
+                }
+                inside.as_slice()
+            }
+            None => damage,
+        };
         let Some(mask) = mask_uniforms(self.placement, (size.w, size.h)) else {
             return frame.render_texture_from_to(
                 &self.texture,
@@ -328,6 +372,26 @@ impl RenderElement<GlesRenderer> for EffectElement {
 
     fn underlying_storage(&self, _renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use smithay::utils::{Physical, Rectangle};
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn a_result_in_a_region_draws_only_the_damage_inside_it() {
+        let region = [rect(0, 0, 10, 10), rect(20, 0, 10, 10)];
+        assert_eq!(
+            super::damage_in(&[rect(5, 5, 20, 2)], &region),
+            [rect(5, 5, 5, 2), rect(20, 5, 5, 2)]
+        );
+        assert!(super::damage_in(&[rect(12, 0, 6, 10)], &region).is_empty());
+        assert!(super::damage_in(&[rect(0, 0, 30, 10)], &[]).is_empty());
     }
 }
 

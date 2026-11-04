@@ -107,6 +107,9 @@ pub(crate) struct Match {
     /// Whether the window's application draws its own titlebar, and its frame
     /// is the style's client-side one (#462).
     pub(crate) client_side: Option<bool>,
+    /// Whether the part's client asked for what is behind it to be blurred,
+    /// with `ext-background-effect` (#78): a window's or a layer surface's.
+    pub(crate) blur_region: Option<bool>,
     pub(crate) surface: Option<Glob>,
     pub(crate) layer_shell: Option<Glob>,
     /// `values = { key = value }`: what the configuration handed the window
@@ -127,15 +130,19 @@ pub(crate) enum Source {
     Own,
 }
 
-/// How the result is cut: the part's shape, or the alpha of the self capture
-/// `source = "self"` makes; an alpha without one waits for X4.3.
+/// How the result is cut: the part's shape, the alpha of the self capture
+/// `source = "self"` makes (an alpha without one waits for X4.3), or the
+/// region the part's client asked to have blurred (#78), and nothing where
+/// it asked for none.
 /// `tests::the_rest_of_a_rule_is_read_as_written`,
-/// `tests::what_waits_for_a_later_item_is_refused_by_name`.
+/// `tests::what_waits_for_a_later_item_is_refused_by_name`,
+/// `tests::mask_region_and_blur_region_are_read`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum MaskKind {
     #[default]
     Shape,
     Alpha,
+    Region,
 }
 
 /// A link's `reach` and `bleed`, which override its file's for this binding
@@ -271,7 +278,7 @@ const KEYS: [&str; 9] = [
 ];
 const FADE_KEYS: [&str; 2] = ["duration", "easing"];
 const CUTS: [&str; 2] = ["below", "background"];
-const WINDOW_KEYS: [&str; 9] = [
+const WINDOW_KEYS: [&str; 10] = [
     "app_id",
     "title",
     "focused",
@@ -280,9 +287,11 @@ const WINDOW_KEYS: [&str; 9] = [
     "monitor",
     "style",
     "client_side",
+    "blur_region",
     "values",
 ];
-const MATCH_KEYS: [&str; 11] = [
+const MATCH_KEYS: [&str; 12] = [
+    "blur_region",
     "app_id",
     "title",
     "focused",
@@ -296,7 +305,7 @@ const MATCH_KEYS: [&str; 11] = [
     "layer_shell",
 ];
 const SOURCES: [&str; 4] = ["xray", "live", "auto", "self"];
-const MASKS: [&str; 2] = ["shape", "alpha"];
+const MASKS: [&str; 3] = ["shape", "alpha", "region"];
 const NO_EFFECT: &str = "`effect` names no effect: give its name, a link such as { \"blur\", passes = 3 }, a chain of links, or false to empty the slot";
 const NOT_A_LINK: &str = "a chain is a list of links, each a name or { \"name\", params }";
 
@@ -526,16 +535,17 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
         None => MaskKind::Shape,
         Some(Tree::Text(text)) if text == "shape" => MaskKind::Shape,
         Some(Tree::Text(text)) if text == "alpha" => MaskKind::Alpha,
+        Some(Tree::Text(text)) if text == "region" => MaskKind::Region,
         Some(Tree::Text(text)) => {
             return Err((
                 "mask",
                 format!(
-                    "`{text}` is not a mask: shape or alpha{}",
+                    "`{text}` is not a mask: shape, alpha or region{}",
                     meant(text, &MASKS)
                 ),
             ));
         }
-        Some(_) => return Err(("mask", "`mask` is shape or alpha".to_owned())),
+        Some(_) => return Err(("mask", "`mask` is shape, alpha or region".to_owned())),
     };
     // The alpha is the self capture's (Ruling 15), and only `source = "self"`
     // says at parse that one exists: what an effect reads is not known until
@@ -652,7 +662,7 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
     let (family_keys, whose): (&[&str], &str) = match part.family() {
         Family::Window => (&WINDOW_KEYS, "a window's"),
         Family::Surface => (&["surface"], "a scripted surface's"),
-        Family::LayerShell => (&["layer_shell"], "a layer surface's"),
+        Family::LayerShell => (&["layer_shell", "blur_region"], "a layer surface's"),
     };
     let mut read = Match::default();
     for (key, value) in fields {
@@ -669,7 +679,8 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
                 family_keys.join(", ")
             ));
         }
-        if let "focused" | "fullscreen" | "maximized" | "client_side" = key.as_str() {
+        if let "focused" | "fullscreen" | "maximized" | "client_side" | "blur_region" = key.as_str()
+        {
             let Tree::Bool(yes) = value else {
                 return Err(format!("`{key}` is true or false"));
             };
@@ -677,6 +688,7 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
                 "focused" => read.focused = Some(*yes),
                 "fullscreen" => read.fullscreen = Some(*yes),
                 "client_side" => read.client_side = Some(*yes),
+                "blur_region" => read.blur_region = Some(*yes),
                 _ => read.maximized = Some(*yes),
             }
             continue;
@@ -905,6 +917,7 @@ pub(crate) struct Facts<'a> {
     pub(crate) monitor: &'a str,
     pub(crate) style: &'a str,
     pub(crate) client_side: bool,
+    pub(crate) blur_region: bool,
     pub(crate) surface: &'a str,
     pub(crate) layer_shell: &'a str,
     /// The window's own values, `sol.frame(id, { ... })`; none for a part
@@ -967,6 +980,7 @@ impl Match {
             && word(self.monitor.as_ref(), facts.monitor)
             && word(self.style.as_ref(), facts.style)
             && flag(self.client_side, facts.client_side)
+            && flag(self.blur_region, facts.blur_region)
             && word(self.surface.as_ref(), facts.surface)
             && word(self.layer_shell.as_ref(), facts.layer_shell)
             && self.values.iter().all(|(key, wanted)| {
@@ -1016,6 +1030,24 @@ impl Rules {
     pub(crate) fn user(&self) -> &[Rule] {
         let [_, _, user] = &self.lists;
         user
+    }
+
+    /// The rules the configuration's own settings expand to, ahead of the
+    /// user's: `effects.client_blur`'s (#78).
+    pub(crate) fn expansion(&self) -> &[Rule] {
+        let [_, expansion, _] = &self.lists;
+        expansion
+    }
+
+    /// Whether any of these rules draws where a client asked for a blur
+    /// (#78): one matching `blur_region = true` or cut by `mask = "region"`.
+    /// What decides whether `ext-background-effect` is offered.
+    /// `tests::a_rule_set_draws_regions_when_a_rule_matches_or_masks_by_one`.
+    pub(crate) fn draws_regions(&self) -> bool {
+        self.lists.iter().flatten().any(|rule| {
+            rule.fill != Fill::Off
+                && (rule.mask == MaskKind::Region || rule.matches.blur_region == Some(true))
+        })
     }
 
     /// Each origin's list with its generation, in the order a later rule
@@ -1179,6 +1211,53 @@ mod tests {
         let state = mlua::Lua::new();
         let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
         Tree::from_lua(&value).expect("readable").expect("a value")
+    }
+
+    /// **`mask = "region"` and `blur_region` are read** (#78): for a
+    /// layer surface and for a window, and `blur_region` is a flag.
+    #[test]
+    fn mask_region_and_blur_region_are_read() {
+        let read = parse(&rules(
+            r#"{
+                { match = { blur_region = true }, part = "layer_shell:*", slot = "behind", effect = "blur", mask = "region" },
+                { match = { blur_region = false, app_id = "x" }, part = "client", slot = "behind", effect = "blur" },
+            }"#,
+        ))
+        .expect("parses");
+        assert_eq!(
+            (read[0].mask, read[0].matches.blur_region),
+            (MaskKind::Region, Some(true))
+        );
+        assert_eq!(
+            (read[1].mask, read[1].matches.blur_region),
+            (MaskKind::Shape, Some(false))
+        );
+        assert!(
+            parse(&rules(
+                r#"{ { match = { blur_region = "yes" }, part = "client", slot = "behind", effect = "blur" } }"#
+            ))
+            .is_err()
+        );
+        assert!(
+            parse(&rules(
+                r#"{ { match = { blur_region = true }, part = "surface:bar", slot = "behind", effect = "blur" } }"#
+            ))
+            .is_err(),
+            "a scripted surface has no client to ask"
+        );
+    }
+
+    /// **A rule set draws regions when a rule matches `blur_region` or is
+    /// cut by one** (#78), which is what offers the protocol.
+    #[test]
+    fn a_rule_set_draws_regions_when_a_rule_matches_or_masks_by_one() {
+        assert!(
+            !user(r#"{ { match = "*", part = "client", slot = "behind", effect = "blur" } }"#)
+                .draws_regions()
+        );
+        assert!(user(r#"{ { match = { blur_region = true }, part = "client", slot = "behind", effect = "blur" } }"#).draws_regions());
+        assert!(user(r#"{ { match = "*", part = "layer_shell:*", slot = "behind", effect = "blur", mask = "region" } }"#).draws_regions());
+        assert!(!user(r#"{ { match = { blur_region = true }, part = "client", slot = "behind", effect = false } }"#).draws_regions());
     }
 
     #[test]

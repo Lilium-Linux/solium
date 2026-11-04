@@ -13,6 +13,7 @@ mod apps;
 mod assets;
 mod auth;
 mod autoreload;
+mod background_effect;
 mod cadence;
 mod capture;
 mod check;

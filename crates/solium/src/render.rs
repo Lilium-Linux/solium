@@ -2308,6 +2308,12 @@ fn resolve_slots(
             monitor: &facts.monitor,
             style: &facts.style,
             client_side: facts.client_side,
+            blur_region: held.client().is_some_and(|window| {
+                use smithay::wayland::seat::WaylandFocus as _;
+                window
+                    .wl_surface()
+                    .is_some_and(|surface| crate::background_effect::region_of(&surface).is_some())
+            }),
             values: Some(held.frame_values().fields()),
             ..Facts::default()
         };
@@ -2365,13 +2371,18 @@ fn resolve_slots(
                 );
             }
         }
-        // And one per client layer surface, matched by its namespace.
-        let map = layer_map_for_output(output);
-        for layer in map.layers() {
+        // And one per client layer surface, matched by its namespace. The
+        // layers are taken out of the map before any is resolved: a chain
+        // that reads the backdrop asks the map which layers are below it
+        // (`t2_cut`), and the map is a lock that is not taken twice.
+        // `state::tests::real_client::reflow_on_close::background_effect::a_backdrop_rule_on_a_layer_surface_is_resolved`.
+        let layers: Vec<LayerSurface> = layer_map_for_output(output).layers().cloned().collect();
+        for layer in &layers {
             slots.gathered();
             let namespace = layer.namespace();
             let facts = Facts {
                 layer_shell: namespace,
+                blur_region: crate::background_effect::region_of(layer.wl_surface()).is_some(),
                 ..Facts::default()
             };
             let resolved = state
@@ -4934,11 +4945,12 @@ fn placed_result(
             .map_or(&[][..], |held| style_rules(held.frame()).0),
         crate::effect::plan::Owner::Surface(..) | crate::effect::plan::Owner::LayerShell(_) => &[],
     };
+    let kind = state
+        .rules
+        .rule(style, key)
+        .map_or(MaskKind::Shape, |rule| rule.mask);
     let cut = cut_by_shape(
-        state
-            .rules
-            .rule(style, key)
-            .map_or(MaskKind::Shape, |rule| rule.mask),
+        kind,
         state
             .chains
             .get(key)
@@ -4950,7 +4962,83 @@ fn placed_result(
         ready.reach,
         corners_times(radii, scale),
     );
+    // `mask = "region"` (#78): drawn only where the part's client asked for
+    // a blur, and nowhere when it asked for none.
+    if kind == MaskKind::Region {
+        let region = region_in_part(state, owner, rect)?;
+        let origin = dst.loc.to_f64();
+        let inside = region
+            .into_iter()
+            .map(|each| {
+                let each = each.to_physical(scale);
+                Rectangle::new(each.loc - origin, each.size).to_i32_round()
+            })
+            .filter(|each| each.size.w > 0 && each.size.h > 0)
+            .collect::<Vec<_>>();
+        return Some(ready.element.at(dst, None, alpha).in_region(inside));
+    }
     Some(ready.element.at(dst, cut.then_some(mask), alpha))
+}
+
+/// The region a part's client asked to have blurred (#78), as rectangles in
+/// the part's drawn space, `rect`: the surface's own rectangles, taken from
+/// the surface onto the part as it is drawn. A layer surface is its part; a
+/// window's client part is its window geometry, at whatever size it is drawn.
+/// `None` for a part with no surface of a client's, and for one whose client
+/// asked for no region.
+/// `tests::a_clients_region_lands_on_its_part_as_drawn`.
+fn region_in_part(
+    state: &Solium,
+    owner: &crate::effect::plan::Owner,
+    rect: Rectangle<f64, Logical>,
+) -> Option<Vec<Rectangle<f64, Logical>>> {
+    use crate::effect::plan::{Owner, PaneSlot};
+    use smithay::reexports::wayland_server::Resource as _;
+    use smithay::wayland::seat::WaylandFocus as _;
+    let (surface, geometry) = match owner {
+        // By its object, not through the layer map: the map is locked while
+        // its surfaces are drawn, which is where this is asked from.
+        Owner::LayerShell(object) => {
+            let surface = WlSurface::from_id(&state.display_handle, object.clone()).ok()?;
+            let size = rect.size.to_i32_round();
+            (surface, Rectangle::from_size(size))
+        }
+        Owner::Pane(pane, PaneSlot::Client) => {
+            let window = state.panes.get(*pane)?.client()?;
+            (window.wl_surface()?.into_owned(), window.geometry())
+        }
+        _ => return None,
+    };
+    let region = crate::background_effect::region_of(&surface)?;
+    Some(onto_part(&region, geometry, rect))
+}
+
+/// `region`'s rectangles, in a surface's space where `geometry` is the part,
+/// placed on the part as it is drawn at `rect`.
+/// `tests::a_clients_region_lands_on_its_part_as_drawn`.
+fn onto_part(
+    region: &[Rectangle<i32, Logical>],
+    geometry: Rectangle<i32, Logical>,
+    rect: Rectangle<f64, Logical>,
+) -> Vec<Rectangle<f64, Logical>> {
+    let along = |drawn: f64, own: i32| if own > 0 { drawn / f64::from(own) } else { 1.0 };
+    let (sx, sy) = (
+        along(rect.size.w, geometry.size.w),
+        along(rect.size.h, geometry.size.h),
+    );
+    region
+        .iter()
+        .map(|each| {
+            Rectangle::new(
+                (
+                    rect.loc.x + f64::from(each.loc.x - geometry.loc.x) * sx,
+                    rect.loc.y + f64::from(each.loc.y - geometry.loc.y) * sy,
+                )
+                    .into(),
+                (f64::from(each.size.w) * sx, f64::from(each.size.h) * sy).into(),
+            )
+        })
+        .collect()
 }
 
 /// The ready slots around a pane's layers at `depth`, placed, each with its
@@ -11487,6 +11575,39 @@ pub(crate) mod tests {
             "half size"
         );
         assert_eq!(mask, (at(6.0, 6.0, 100.0, 50.0), radii));
+    }
+
+    /// **A client's region lands on its part as drawn** (#78): from its
+    /// surface's space, past the window geometry's offset, at the part's
+    /// drawn size.
+    #[test]
+    fn a_clients_region_lands_on_its_part_as_drawn() {
+        use smithay::utils::{Logical, Rectangle};
+        let region = [Rectangle::<i32, Logical>::new(
+            (10, 20).into(),
+            (30, 40).into(),
+        )];
+        // A window whose geometry starts 10 px into its surface, drawn at
+        // twice its size from (100, 100).
+        let geometry = Rectangle::<i32, Logical>::new((10, 10).into(), (200, 100).into());
+        let drawn = Rectangle::<f64, Logical>::new((100.0, 100.0).into(), (400.0, 200.0).into());
+        assert_eq!(
+            super::onto_part(&region, geometry, drawn),
+            [Rectangle::<f64, Logical>::new(
+                (100.0, 120.0).into(),
+                (60.0, 80.0).into()
+            )]
+        );
+        // A layer surface, its part one to one.
+        let layer = Rectangle::<i32, Logical>::from_size((300, 40).into());
+        let at = Rectangle::<f64, Logical>::new((0.0, 1040.0).into(), (300.0, 40.0).into());
+        assert_eq!(
+            super::onto_part(&region, layer, at),
+            [Rectangle::<f64, Logical>::new(
+                (10.0, 1060.0).into(),
+                (30.0, 40.0).into()
+            )]
+        );
     }
 
     /// **A result is cut by its part's shape unless it owns its edges**: an

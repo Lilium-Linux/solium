@@ -2196,6 +2196,19 @@ local defaults = {
         -- frames), and is exact again within it once the window stops. A
         -- backdrop that changes, or new params, run it at once either way.
         motion_hz = 0,
+        -- What is drawn behind a surface whose client asks for what is
+        -- behind it to be blurred (#78), through ext-background-effect-v1: a
+        -- panel, a dock, a launcher, a dialog of a shell that is its own
+        -- program. The client names the region; this names the effect, as a
+        -- rule's `effect` does -- "blur" is the shipped folder, and a link
+        -- such as { "blur", passes = 4 } or a chain such as
+        -- { { "blur" }, { "tint", amount = 0.2 } } works too. It is drawn
+        -- behind the surface, cut to the region, ahead of `rules`, so a rule
+        -- of yours for the same part and slot wins. `false` draws nothing
+        -- for it: match such a surface yourself with `blur_region = true`
+        -- and cut by `mask = "region"`, or not at all, and while no rule
+        -- does, clients are not offered the protocol.
+        client_blur = "blur",
     },
 
     -- Starting up. The first desktop frame waits until what it shows is
