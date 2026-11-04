@@ -36785,6 +36785,8 @@ end)"#,
                     late.image_sources.is_some(),
                     "monitors are still offered as sources"
                 );
+            }
+        }
 
         /// A program that arranges the monitors (#51), against
         /// `zwlr-output-management-v1` from a real client.
