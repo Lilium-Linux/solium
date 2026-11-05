@@ -846,6 +846,20 @@ pub(crate) enum Command {
         program: String,
         args: Vec<String>,
     },
+    /// `sol.run({ argv }, options)`: a command whose output, exit and lines
+    /// come back to the functions kept under its id in `sol._runs` (#472).
+    /// See `crate::runs`.
+    RunRead(crate::runs::Request),
+    /// `sol.after` (`period` none) and `sol.every`: timer `id`, whose
+    /// function is kept in `sol._timers`, falls due `after` from now (#472).
+    /// See `crate::timers`.
+    Timer {
+        id: u64,
+        after: Duration,
+        period: Option<Duration>,
+    },
+    /// A timer's `cancel`, or one whose function is gone.
+    TimerCancel(u64),
     /// `folder.trust { uri }`, validated and resolved to an absolute path by
     /// `Solium::act` (04-ui.md §4.9): mark a desktop launcher trusted,
     /// durably, so `folder.open` will run it. Its own command, rather than a
@@ -1048,6 +1062,9 @@ impl Command {
             | Self::SurfaceGone(_)
             | Self::Spawn { .. }
             | Self::Run { .. }
+            | Self::RunRead(_)
+            | Self::Timer { .. }
+            | Self::TimerCancel(_)
             | Self::FolderTrust { .. }
             | Self::Loading(_)
             | Self::ClientSizes(_)
@@ -3188,6 +3205,94 @@ impl Scripts {
         })
     }
 
+    /// What `sol.run{}`'s children said and how they ended (#472), in the
+    /// order it was heard, in one dispatch: each line to its run's `lines`
+    /// as `(line, stream)`, and each end to its `done`, once, with the
+    /// result, after which the run's functions are let go. Each call has the
+    /// whole handler deadline, and a function stopped there three times is
+    /// not called again until the next reload.
+    /// `tests::sol_run_with_a_table_hands_its_output_to_done`,
+    /// `tests::sol_run_tells_lines_then_done`.
+    pub(crate) fn runs_heard(
+        &mut self,
+        heard: &[crate::runs::Heard],
+        snapshot: Snapshot,
+    ) -> Outcome {
+        use crate::runs::Heard;
+        self.dispatch(snapshot, move |lua, sol| {
+            let runs: Table = sol.get("_runs")?;
+            let strikes: Table = sol.get("_strikes")?;
+            for each in heard {
+                match each {
+                    Heard::Line { id, stream, line } => {
+                        let Some(kept) = runs.get::<Option<Table>>(*id)? else {
+                            continue;
+                        };
+                        let Some(lines) = kept.get::<Option<mlua::Function>>("lines")? else {
+                            continue;
+                        };
+                        let line = lua.create_string(line)?;
+                        call_struck(lua, &strikes, &lines, (line, stream.name()), "lines")?;
+                    }
+                    Heard::Done { id, ended } => {
+                        let Some(kept) = runs.get::<Option<Table>>(*id)? else {
+                            continue;
+                        };
+                        runs.set(*id, Value::Nil)?;
+                        let Some(done) = kept.get::<Option<mlua::Function>>("done")? else {
+                            continue;
+                        };
+                        let result = lua.create_table()?;
+                        result.set("code", ended.code)?;
+                        result.set("signal", ended.signal)?;
+                        result.set("timed_out", ended.timed_out)?;
+                        result.set("truncated", ended.truncated)?;
+                        result.set("stdout", lua.create_string(&ended.stdout)?)?;
+                        result.set("stderr", lua.create_string(&ended.stderr)?)?;
+                        result.set("error", ended.error.as_deref())?;
+                        call_struck(lua, &strikes, &done, result, "done")?;
+                    }
+                }
+            }
+            Ok(true)
+        })
+    }
+
+    /// Timers due (#472), in the order they fell due, in one dispatch: each
+    /// one's function, under the whole handler deadline. A `sol.after`'s is
+    /// let go before it runs. A timer with no function left, and one whose
+    /// function was stopped three times, is cancelled.
+    /// `tests::timers_run_in_the_order_they_fall_due`,
+    /// `tests::a_timer_stopped_three_times_is_cancelled`.
+    pub(crate) fn timers_due(&mut self, due: &[(u64, bool)], snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, sol| {
+            let timers: Table = sol.get("_timers")?;
+            let strikes: Table = sol.get("_strikes")?;
+            let mut gone = Vec::new();
+            for &(id, last) in due {
+                let Some(run) = timers.get::<Option<mlua::Function>>(id)? else {
+                    gone.push(id);
+                    continue;
+                };
+                if last {
+                    timers.set(id, Value::Nil)?;
+                }
+                if call_struck(lua, &strikes, &run, (), "timer")? && !last {
+                    timers.set(id, Value::Nil)?;
+                    gone.push(id);
+                }
+            }
+            if !gone.is_empty() {
+                with_pending(lua, |pending| {
+                    pending
+                        .commands
+                        .extend(gone.into_iter().map(Command::TimerCancel));
+                })?;
+            }
+            Ok(true)
+        })
+    }
+
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
     }
@@ -3928,6 +4033,12 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set("_attempts", lua.create_table()?)?;
     // `sol.notify`'s action functions, by token, until one runs (#346).
     sol.set("_notify_actions", lua.create_table()?)?;
+    // Each `sol.run{}`'s `lines` and `done`, by run id, until it is done,
+    // and each timer's function, by timer id, until it is cancelled or, for
+    // `sol.after`, has run (#472). A reload starts with neither, so no
+    // function of the old configuration runs into the new one.
+    sol.set("_runs", lua.create_table()?)?;
+    sol.set("_timers", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
     // How many times each listener or `done` was stopped at the deadline, by
     // function. `tests::a_listener_stopped_three_times_is_taken_out`,
@@ -7028,9 +7139,26 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
 
     // `sol.run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.5")`: a
     // program that shows no window, so no window is opened for it (#319).
+    // With a table first, `sol.run({ "nmcli", "-t", "radio" }, { done = fn })`,
+    // its output and how it ended come back (#472): see `run_read`.
     sol.set(
         "run",
-        lua.create_function(|lua, mut args: mlua::Variadic<String>| {
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            if let Some(Value::Table(argv)) = args.front() {
+                let argv = argv.clone();
+                let options = match args.get(1) {
+                    None | Some(Value::Nil) => None,
+                    Some(Value::Table(options)) => Some(options.clone()),
+                    Some(_) => {
+                        return Err(mlua::Error::runtime(
+                            "sol.run's second argument is a table of options",
+                        ));
+                    }
+                };
+                return run_read(lua, &argv, options.as_ref());
+            }
+            let mut args =
+                <mlua::Variadic<String> as mlua::FromLuaMulti>::from_lua_multi(args, lua)?;
             if args.is_empty() {
                 return Err(mlua::Error::runtime("sol.run needs a program to run"));
             }
@@ -7040,6 +7168,20 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 pending.commands.push(Command::Run { program, args });
             })
         })?,
+    )?;
+
+    // `sol.after(ms, fn)` and `sol.every(ms, fn)` (#472): `fn` on the
+    // compositor's clock, once or every `ms`, until the handle's `cancel`.
+    // See `crate::timers`.
+    sol.set(
+        "after",
+        lua.create_function(|lua, (ms, run): (f64, mlua::Function)| {
+            set_timer(lua, ms, run, false)
+        })?,
+    )?;
+    sol.set(
+        "every",
+        lua.create_function(|lua, (ms, run): (f64, mlua::Function)| set_timer(lua, ms, run, true))?,
     )?;
 
     // Whether a program exists to be run. A desktop cannot assume any
@@ -7378,6 +7520,185 @@ fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspac
         groups,
         windows,
     })
+}
+
+/// Ids for `sol.run{}`'s runs and for timers, counting up across reloads,
+/// so an old configuration's id never names a new configuration's run or
+/// timer. A timer's is also its place among timers due at the same moment.
+static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TIMERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The options `sol.run{}` reads, for its error about any other.
+const RUN_OPTIONS: [&str; 6] = ["cwd", "env", "timeout", "max_output", "lines", "done"];
+
+/// `sol.run({ argv }, options)` (#472): queue the run, and keep its `lines`
+/// and `done` under its id until it is done.
+/// `tests::sol_run_with_a_table_hands_its_output_to_done`.
+fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Result<()> {
+    let argv = argv
+        .sequence_values::<String>()
+        .collect::<mlua::Result<Vec<String>>>()?;
+    if argv.is_empty() {
+        return Err(mlua::Error::runtime("sol.run needs a program to run"));
+    }
+    let empty = lua.create_table()?;
+    let options = options.unwrap_or(&empty);
+    for pair in options.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let key = match &key {
+            Value::String(key) => key.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        if !RUN_OPTIONS.contains(&key.as_str()) {
+            return Err(mlua::Error::runtime(format!(
+                "sol.run has no option `{key}`; it takes {}",
+                RUN_OPTIONS.join(", ")
+            )));
+        }
+    }
+    let cwd: Option<String> = options.get("cwd")?;
+    let mut env = Vec::new();
+    if let Some(table) = options.get::<Option<Table>>("env")? {
+        for pair in table.pairs::<String, Value>() {
+            let (name, value) = pair?;
+            let value = match value {
+                Value::Boolean(false) => None,
+                Value::String(value) => Some(value.to_string_lossy()),
+                Value::Integer(value) => Some(value.to_string()),
+                Value::Number(value) => Some(value.to_string()),
+                _ => {
+                    return Err(mlua::Error::runtime(format!(
+                        "sol.run's env.{name} is a string, or false to remove it"
+                    )));
+                }
+            };
+            env.push((name, value));
+        }
+        env.sort();
+    }
+    let timeout = match options.get::<Option<f64>>("timeout")? {
+        None => Duration::from_millis(crate::runs::TIMEOUT_MS),
+        Some(ms) if ms > 0.0 => Duration::try_from_secs_f64(ms / 1000.0)
+            .map_err(|_| mlua::Error::runtime("sol.run's timeout is too long"))?,
+        Some(_) => {
+            return Err(mlua::Error::runtime(
+                "sol.run's timeout is a number of milliseconds above 0",
+            ));
+        }
+    };
+    let max_output = match options.get::<Option<f64>>("max_output")? {
+        None => crate::runs::MAX_OUTPUT,
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to be a whole number from 0, and saturating past usize"
+        )]
+        Some(bytes) if bytes >= 0.0 && bytes.fract() == 0.0 => bytes as usize,
+        Some(_) => {
+            return Err(mlua::Error::runtime(
+                "sol.run's max_output is a whole number of bytes, 0 or more",
+            ));
+        }
+    };
+    let lines: Option<mlua::Function> = options.get("lines")?;
+    let done: Option<mlua::Function> = options.get("done")?;
+    let id = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let request = crate::runs::Request {
+        id,
+        argv,
+        cwd,
+        env,
+        timeout,
+        max_output,
+        lines: lines.is_some(),
+    };
+    with_pending(lua, |pending| {
+        pending.commands.push(Command::RunRead(request));
+    })?;
+    if lines.is_some() || done.is_some() {
+        let kept = lua.create_table()?;
+        kept.set("lines", lines)?;
+        kept.set("done", done)?;
+        let runs: Table = lua.globals().get::<Table>("sol")?.get("_runs")?;
+        runs.set(id, kept)?;
+    }
+    Ok(())
+}
+
+/// `sol.after` and `sol.every` (#472): keep `run` under a new timer's id,
+/// queue the timer, and hand back its handle.
+/// `tests::timers_run_in_the_order_they_fall_due`.
+fn set_timer(lua: &Lua, ms: f64, run: mlua::Function, every: bool) -> mlua::Result<TimerHandle> {
+    let name = if every { "sol.every" } else { "sol.after" };
+    if ms.is_nan() || (every && ms <= 0.0) {
+        return Err(mlua::Error::runtime(if every {
+            "sol.every's period is a number of milliseconds above 0"
+        } else {
+            "sol.after's delay is a number of milliseconds"
+        }));
+    }
+    let after = Duration::try_from_secs_f64(ms.max(0.0) / 1000.0)
+        .map_err(|_| mlua::Error::runtime(format!("{name}: {ms} ms is too long")))?;
+    let id = TIMERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    with_pending(lua, |pending| {
+        pending.commands.push(Command::Timer {
+            id,
+            after,
+            period: every.then_some(after),
+        });
+    })?;
+    let timers: Table = lua.globals().get::<Table>("sol")?.get("_timers")?;
+    timers.set(id, run)?;
+    Ok(TimerHandle(id))
+}
+
+/// What `sol.after` and `sol.every` hand back: the timer, to cancel.
+#[derive(Debug, Clone, Copy)]
+struct TimerHandle(u64);
+
+impl mlua::UserData for TimerHandle {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // Its function is let go here, so it cannot run again whatever the
+        // compositor has queued; the compositor is told when it can be. A
+        // timer cancelled where no command can be queued is forgotten by the
+        // compositor the next time it falls due and finds no function.
+        // `tests::a_cancelled_timer_does_not_run`.
+        methods.add_method("cancel", |lua, this, ()| {
+            let timers: Table = lua.globals().get::<Table>("sol")?.get("_timers")?;
+            if timers.get::<Value>(this.0)?.is_nil() {
+                return Ok(());
+            }
+            timers.set(this.0, Value::Nil)?;
+            let _ = with_pending(lua, |pending| {
+                pending.commands.push(Command::TimerCancel(this.0));
+            });
+            Ok(())
+        });
+    }
+}
+
+/// Call a run's or a timer's function under the handler deadline. One
+/// stopped there is struck as a listener is, by function, and one struck
+/// three times is not called again until the next reload: true then.
+fn call_struck(
+    lua: &Lua,
+    strikes: &Table,
+    run: &mlua::Function,
+    args: impl mlua::IntoLuaMulti,
+    event: &str,
+) -> mlua::Result<bool> {
+    if strikes.get::<Option<u32>>(run)?.unwrap_or(0) >= STRIKES {
+        return Ok(true);
+    }
+    start_clock(lua);
+    match run.call::<()>(args) {
+        Ok(()) => Ok(false),
+        Err(err) if err.to_string().contains(STOPPED) => strike(lua, strikes, run, event, &err),
+        Err(err) => {
+            tracing::error!(%err, event, "a function failed");
+            Ok(false)
+        }
+    }
 }
 
 fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Result<()> {
@@ -14836,6 +15157,290 @@ mod tests {
             None,
             "done was called twice"
         );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The `sol.run{}` requests among `outcome`'s commands.
+    fn run_requests(outcome: &Outcome) -> Vec<crate::runs::Request> {
+        outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::RunRead(request) => Some(request.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Start `requests` as the compositor would, read them until each is
+    /// done, and tell `scripts` what was heard after every read: the status
+    /// each telling left, in order.
+    fn run_to_the_end(scripts: &mut Scripts, requests: Vec<crate::runs::Request>) -> Vec<String> {
+        let mut runs = crate::runs::Runs::default();
+        let count = requests.len();
+        for request in requests {
+            let mut process = crate::launch::command(&request.argv[0]);
+            process.args(&request.argv[1..]);
+            runs.start(request, process, Duration::ZERO);
+        }
+        let started = std::time::Instant::now();
+        let mut done = 0;
+        let mut statuses = Vec::new();
+        while done < count {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the runs never ended"
+            );
+            let heard = runs.pump(Duration::ZERO);
+            done += heard
+                .iter()
+                .filter(|each| matches!(each, crate::runs::Heard::Done { .. }))
+                .count();
+            if !heard.is_empty() {
+                statuses.extend(scripts.runs_heard(&heard, one_screen(&[])).status);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        statuses
+    }
+
+    /// **`sol.run` with a table hands its output to `done`** (#472): the
+    /// program's stdout, stderr, code and the rest, once, and its functions
+    /// are let go. The variadic form is still fire and forget.
+    #[test]
+    fn sol_run_with_a_table_hands_its_output_to_done() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-run-done",
+            r#"sol.run({ "sh", "-c", "echo out; echo err >&2; exit 4" }, {
+                   done = function(r)
+                       sol.status(r.stdout .. r.stderr .. tostring(r.code) .. " "
+                           .. tostring(r.signal) .. " " .. tostring(r.timed_out) .. " "
+                           .. tostring(r.truncated) .. " " .. tostring(r.error))
+                   end,
+               })
+               sol.run("true")"#,
+        );
+        let outcome = scripts.startup();
+        assert!(
+            outcome.commands.iter().any(|command| matches!(
+                command,
+                Command::Run { program, args } if program == "true" && args.is_empty()
+            )),
+            "the variadic form changed: {:?}",
+            outcome.commands
+        );
+        let requests = run_requests(&outcome);
+        let [request] = requests.as_slice() else {
+            panic!("one run: {requests:?}")
+        };
+        assert_eq!(
+            (request.timeout, request.max_output, request.lines),
+            (Duration::from_secs(30), 1 << 20, false),
+            "the defaults"
+        );
+        assert_eq!(
+            run_to_the_end(&mut scripts, requests),
+            ["out\nerr\n4 nil false false nil"]
+        );
+        assert_eq!(
+            scripts.evaluate("return tostring(next(sol._runs))"),
+            "nil",
+            "a done run's functions were kept"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.run` tells each line, then `done`** (#472): `(line, stream)`
+    /// for every whole line, the last unterminated one at the end, and the
+    /// options it was given reach the request.
+    #[test]
+    fn sol_run_tells_lines_then_done() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-run-lines",
+            r#"local seen = {}
+               sol.run({ "sh", "-c", "printf 'a\nb'; echo c >&2" }, {
+                   timeout = 5000,
+                   max_output = 4096,
+                   cwd = "/",
+                   env = { SOLIUM_A = "1", SOLIUM_B = false },
+                   lines = function(line, stream) seen[#seen + 1] = stream .. ":" .. line end,
+                   done = function(r) sol.status(table.concat(seen, ",") .. "|" .. r.stdout) end,
+               })"#,
+        );
+        let requests = run_requests(&scripts.startup());
+        let [request] = requests.as_slice() else {
+            panic!("one run: {requests:?}")
+        };
+        assert_eq!(
+            (
+                request.timeout,
+                request.max_output,
+                request.lines,
+                request.cwd.as_deref()
+            ),
+            (Duration::from_secs(5), 4096, true, Some("/"))
+        );
+        assert_eq!(
+            request.env,
+            [
+                ("SOLIUM_A".to_owned(), Some("1".to_owned())),
+                ("SOLIUM_B".to_owned(), None)
+            ]
+        );
+        let statuses = run_to_the_end(&mut scripts, requests);
+        assert_eq!(
+            statuses.last().map(String::as_str),
+            Some("stdout:a,stderr:c,stdout:b|a\nb")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.run` refuses what it cannot do**: an option it does not know, a
+    /// timeout that is not above 0, an empty argv.
+    #[test]
+    fn sol_run_refuses_an_option_it_does_not_know() {
+        let (directory, scripts) = loaded("solium-script-test-run-refuses", "");
+        for (chunk, says) in [
+            (
+                r#"sol.run({ "true" }, { timout = 5 })"#,
+                "no option `timout`",
+            ),
+            (r#"sol.run({ "true" }, { timeout = 0 })"#, "above 0"),
+            (r#"sol.run({ "true" }, { max_output = -1 })"#, "max_output"),
+            (r#"sol.run({}, {})"#, "needs a program"),
+            (r#"sol.every(0, function() end)"#, "above 0"),
+        ] {
+            let answer = scripts.evaluate(&format!(
+                "local ok, err = pcall(function() {chunk} end) return tostring(ok) .. ' ' .. tostring(err)"
+            ));
+            assert!(
+                answer.starts_with("false ") && answer.contains(says),
+                "{chunk}: {answer}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Play `outcome`'s timer commands into `timers` at `now`.
+    fn play_timers(timers: &mut crate::timers::Timers, outcome: &Outcome, now: Duration) {
+        for command in &outcome.commands {
+            match command {
+                Command::Timer { id, after, period } => timers.add(*id, now, *after, *period),
+                Command::TimerCancel(id) => timers.cancel(*id),
+                _ => {}
+            }
+        }
+    }
+
+    /// Move a clock from 0 to `until` in `step`s, telling `scripts` the
+    /// timers due at each, as `timers::settle` does.
+    fn run_timers(
+        scripts: &mut Scripts,
+        timers: &mut crate::timers::Timers,
+        until: u64,
+        step: u64,
+    ) {
+        let mut at = 0;
+        while at <= until {
+            let now = Duration::from_millis(at);
+            let due = timers.due(now);
+            if !due.is_empty() {
+                let outcome = scripts.timers_due(&due, one_screen(&[]));
+                play_timers(timers, &outcome, now);
+            }
+            at += step;
+        }
+    }
+
+    /// **Timers run in the order they fall due** (#472), and by creation
+    /// among those due at once; `sol.after`'s once, `sol.every`'s each
+    /// period.
+    #[test]
+    fn timers_run_in_the_order_they_fall_due() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-timers-order",
+            r#"order = {}
+               local function note(name) return function() order[#order + 1] = name end end
+               sol.after(50, note("b"))
+               sol.after(10, note("a"))
+               sol.after(50, note("c"))
+               sol.every(20, note("e"))"#,
+        );
+        let mut timers = crate::timers::Timers::default();
+        play_timers(&mut timers, &scripts.startup(), Duration::ZERO);
+        run_timers(&mut scripts, &mut timers, 60, 10);
+        assert_eq!(
+            scripts.evaluate("return table.concat(order, ',')"),
+            "a,e,e,b,c,e"
+        );
+        assert_eq!(timers.len(), 1, "only the every is still set");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A cancelled timer does not run** (#472): cancelled from a handler,
+    /// or from another timer due at the same moment; and cancelling one that
+    /// has run changes nothing.
+    #[test]
+    fn a_cancelled_timer_does_not_run() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-timers-cancel",
+            r#"ran = {}
+               local every = sol.every(10, function() ran[#ran + 1] = "every" end)
+               local other
+               sol.after(30, function() other:cancel() end)
+               other = sol.after(30, function() ran[#ran + 1] = "other" end)
+               local once = sol.after(5, function() ran[#ran + 1] = "once" end)
+               sol.on("surface", function() every:cancel() once:cancel() end)"#,
+        );
+        let mut timers = crate::timers::Timers::default();
+        play_timers(&mut timers, &scripts.startup(), Duration::ZERO);
+        run_timers(&mut scripts, &mut timers, 20, 5);
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        play_timers(&mut timers, &outcome, Duration::from_millis(20));
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .all(|command| matches!(command, Command::TimerCancel(_))),
+            "{:?}",
+            outcome.commands
+        );
+        run_timers(&mut scripts, &mut timers, 100, 5);
+        assert_eq!(
+            scripts.evaluate("return table.concat(ran, ',')"),
+            "once,every,every"
+        );
+        assert_eq!(timers.len(), 0);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A timer stopped three times is cancelled** (#472): its function ran
+    /// past the handler deadline each time, and the compositor is told to
+    /// forget it.
+    #[test]
+    fn a_timer_stopped_three_times_is_cancelled() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-timers-stopped",
+            "sol.every(10, function() while true do end end)",
+        );
+        let mut timers = crate::timers::Timers::default();
+        play_timers(&mut timers, &scripts.startup(), Duration::ZERO);
+        let mut cancelled = Vec::new();
+        for round in 1..=3_u64 {
+            let due = timers.due(Duration::from_millis(10 * round));
+            assert_eq!(due.len(), 1, "round {round}");
+            let outcome = scripts.timers_due(&due, one_screen(&[]));
+            cancelled.push(
+                outcome
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, Command::TimerCancel(_))),
+            );
+            play_timers(&mut timers, &outcome, Duration::from_millis(10 * round));
+        }
+        assert_eq!(cancelled, [false, false, true]);
+        assert_eq!(timers.len(), 0);
         let _ = std::fs::remove_dir_all(&directory);
     }
 

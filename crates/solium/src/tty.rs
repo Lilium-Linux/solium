@@ -915,6 +915,10 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
             crate::logind::settle(&mut state.solium);
             crate::services::settle(&mut state.solium);
+            // What `sol.run{}`'s children said, and the timers due, on the
+            // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
+            crate::runs::settle(&mut state.solium);
+            crate::timers::settle(&mut state.solium);
             // The native lock's password check: the one place its yes unlocks.
             crate::lock_auth::settle(&mut state.solium);
             // And the end of its exit, at `lock.exit_ms` whatever the scene

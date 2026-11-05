@@ -910,6 +910,11 @@ impl Solium {
                 }
                 Command::Spawn { program, args } => self.spawn(&program, &args),
                 Command::Run { program, args } => self.run(&program, &args),
+                Command::RunRead(request) => self.run_read(request),
+                Command::Timer { id, after, period } => {
+                    self.timers.add(id, self.clock.now(), after, period);
+                }
+                Command::TimerCancel(id) => self.timers.cancel(id),
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
                     // Copied only when an entry changes, so `Folder` is sent
@@ -1226,6 +1231,11 @@ impl Solium {
                 // is gone (`tests::a_reload_drops_a_refused_settings_problem`).
                 self.effects.clear_problems_of("settings");
                 self.effects.clear_problems_of("startup");
+                // The old configuration's children and timers go with it, so
+                // none of its functions runs into the new one, which starts
+                // its own (#472): `tests::a_reload_kills_the_runs_and_cancels_the_timers`.
+                self.runs.stop_all();
+                self.timers.clear();
                 self.start_scripts(Some(scripts));
                 // After the new configuration's `sol.startup`, so its
                 // `on_reload` is the one obeyed: the first frame's gate armed

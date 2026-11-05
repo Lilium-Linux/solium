@@ -1960,6 +1960,62 @@ The shipped `XF86AudioPlay`, `Pause`, `Next` and `Prev` keys send
 spawn `playerctl` only when `media.watch` is off. Nested, players are
 followed only on the bus `SOLIUM_SESSION_BUS` names.
 
+### Running a command and reading what it says
+
+`sol.run` with its arguments one by one starts a command and forgets it:
+`sol.run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%+")`. Give it a
+table instead, the command and its arguments, and what the command says
+comes back to your functions:
+
+```lua
+sol.run({ "nmcli", "-t", "-f", "WIFI", "radio" }, {
+    done = function(r)
+        if r.code == 0 then
+            sol.log("Wi-Fi is " .. r.stdout:gsub("%s+$", ""))
+        else
+            sol.log("nmcli failed: " .. (r.error or r.stderr))
+        end
+    end,
+})
+```
+
+`done` is called once, when the command has ended, with `code` (its exit
+code), `signal` (the signal that ended it, if one did), `stdout` and
+`stderr`, `timed_out`, `truncated`, and `error` when it could not be started
+at all. `lines = function(line, stream) ... end` is called with each line as
+it arrives, `stream` being `"stdout"` or `"stderr"`, for a command that
+reports as it goes. Both run like any other handler, under the same 100 ms
+deadline, so do the work there and let the command do the waiting.
+
+Nothing waits for the command: Solium reads it each time round its loop and
+goes on drawing meanwhile. Each run is bounded, by `timeout` (milliseconds,
+default 30000), after which the command is killed with everything it
+started, and `max_output` (bytes of each stream, default 1 MiB), past which
+Solium stops reading and the result says `truncated`. `cwd` and `env` (a
+variable to set, or `false` to remove one) are the rest of the options. The
+command starts as every program Solium starts does: the environment Solium
+was started with, no file descriptors of Solium's, a session of its own, and
+stdin on `/dev/null`.
+
+Timers run on the compositor's clock, the same one its animations and QML
+use. `sol.after(ms, fn)` calls `fn` once, `sol.every(ms, fn)` every `ms`
+milliseconds, and each hands back a timer whose `cancel()` stops it:
+
+```lua
+-- The battery, every half minute, from a command that prints a number.
+local battery = sol.every(30000, function()
+    sol.run({ "cat", "/sys/class/power_supply/BAT0/capacity" }, {
+        done = function(r) sol.log("battery " .. r.stdout) end,
+    })
+end)
+
+sol.bind("super+ctrl+b", function() battery:cancel() end)
+```
+
+Reloading the configuration kills every command a `sol.run{}` started and
+cancels every timer, so nothing the old configuration set going calls into
+the new one.
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the

@@ -777,9 +777,11 @@ def lua_api(rev):
     for item in items:
         if item["kind"] in ("class", "alias"):
             kinds[item["name"]] = "type-" + item["name"].replace(".", "-").lower()
-    # A tree and a strip have sections of their own, which is where they link.
+    # A tree, a strip and a timer have sections of their own, which is where
+    # they link.
     kinds["sol.Tree"] = "tree"
     kinds["sol.Scroller"] = "scroller"
+    kinds["sol.Timer"] = "timer"
     kinds["sol.Event"] = "events"
 
     def function_entry(item):
@@ -894,7 +896,8 @@ def lua_api(rev):
         if item["name"].startswith("sol.layout."):
             out += function_entry(item)
     for prefix, title, anchor, cls in (("Tree:", "A dwindle tree", "tree", "sol.Tree"),
-                                       ("Scroller:", "A scrolling strip", "scroller", "sol.Scroller")):
+                                       ("Scroller:", "A scrolling strip", "scroller", "sol.Scroller"),
+                                       ("Timer:", "A timer", "timer", "sol.Timer")):
         out += [f"## {title} {{#{anchor}}}", ""]
         doc = next(item for item in items if item["name"] == cls)
         out += [description(doc["doc"]), ""]
@@ -904,7 +907,7 @@ def lua_api(rev):
     out += ["## Types {#types}", "",
             "The shapes of the tables the calls above take and return.", ""]
     for item in types:
-        if item["name"] in ("sol.Tree", "sol.Scroller"):
+        if item["name"] in ("sol.Tree", "sol.Scroller", "sol.Timer"):
             continue
         out += type_entry(item)
     out += ["## Internal {#internal}", "",
