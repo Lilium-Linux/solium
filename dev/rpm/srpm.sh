@@ -66,6 +66,11 @@ mkdir -p "$vendor"
     2>"$out/vendor.log" || { cat "$out/vendor.log" >&2; die "cargo vendor failed"; }
 grep -q '^replace-with = "vendored-sources"$' "$vendor/vendor-config.toml" \
     || die "cargo vendor printed no source replacement (see $out/vendor.log)"
+# It names the directory it filled, an absolute path on this machine; the spec
+# unpacks it as vendor/ in the source tree.
+sed -i 's|^directory = .*$|directory = "vendor"|' "$vendor/vendor-config.toml"
+grep -q '^directory = "vendor"$' "$vendor/vendor-config.toml" \
+    || die "the vendor configuration names no directory"
 tar -C "$vendor" -czf "$topdir/SOURCES/solium-vendor.tar.gz" vendor vendor-config.toml
 rm -rf "$vendor"
 
