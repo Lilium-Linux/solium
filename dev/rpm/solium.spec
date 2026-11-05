@@ -1,18 +1,33 @@
-# Solium as a Fedora package (#66): a development snapshot of one commit.
+# Solium as a Fedora package (#66, #486), one of two:
 #
-# dev/rpm.sh builds it: the release binary in the build container, then this
-# spec on the host `--with prebuilt`, which packages that binary. Without it,
-# %build compiles the source tarball, as COPR will. Either way %install is
-# dev/install.sh with a system prefix, so the package holds exactly what that
-# installs: dev/install-check.sh's "the Fedora package" compares %files with
-# it both ways, and rpmbuild itself fails on a file one has and the other not.
+# - `--with stage` (the default) is solium-stage, a snapshot of one commit,
+#   versioned after the last release as <version>^<date>.<count>.git<commit>,
+#   so each push to `stage` is newer than the one before;
+# - `--without stage` is solium, a released version: Cargo.toml's.
+#
+# They conflict: a machine has one or the other.
+#
+# dev/rpm.sh builds one here: the release binary in the build container, then
+# this spec on the host `--with prebuilt`, which packages that binary. Without
+# it, %build compiles the source tarball, as COPR does from what
+# dev/rpm/srpm.sh makes, `--with vendored`: every crate is in the source
+# package, because COPR builds offline. Either way %install is dev/install.sh
+# with a system prefix, so the package holds exactly what that installs:
+# dev/install-check.sh's "the Fedora package" compares %files with it both
+# ways, and rpmbuild itself fails on a file one has and the other not.
 
+%bcond stage 1
 %bcond prebuilt 0
+%bcond vendored 0
 
-# dev/rpm.sh defines both from the commit it packages. dev/install-check.sh
-# asserts the spec refuses to parse without them.
+# dev/rpm.sh and dev/rpm/srpm.sh define these from the commit they package.
+# dev/install-check.sh asserts the spec refuses to parse without the first two.
 %{!?commit:%{error:define commit, the short hash of the commit packaged (dev/rpm.sh does)}}
 %{!?commitdate:%{error:define commitdate, that commit's date as YYYYMMDD (dev/rpm.sh does)}}
+# Cargo.toml's version, and how many commits lead to this one: the count keeps
+# two snapshots of one day in order.
+%{!?base:%global base 0.0.0}
+%{!?count:%global count 0}
 
 # The prebuilt binary, from the release profile, has no debug information to
 # put in a debuginfo package, and rpmbuild fails on an empty one: dev/rpm.sh
@@ -22,8 +37,13 @@
 # it has no date to take from one, and dev/rpm.sh repeats any warning.
 %global source_date_epoch_from_changelog 0
 
+%if %{with stage}
+Name:           solium-stage
+Version:        %{base}^%{commitdate}.%{count}.git%{commit}
+%else
 Name:           solium
-Version:        0.0.0~git%{commitdate}.%{commit}
+Version:        %{base}
+%endif
 Release:        1%{?dist}
 Summary:        Configurable Wayland compositor with Lua scripting and QML scenes
 # GPL-3.0-only for the code, CC-BY-SA-4.0 for the wallpaper: dev/install-check.sh
@@ -34,6 +54,17 @@ Source0:        solium-%{version}.tar.gz
 %if %{with prebuilt}
 Source1:        solium
 Source2:        solium-auth
+%endif
+%if %{with vendored}
+# Every crate Cargo.lock names, from `cargo vendor`, with the configuration
+# that points cargo at them (dev/rpm/srpm.sh).
+Source3:        solium-vendor.tar.gz
+%endif
+
+%if %{with stage}
+Conflicts:      solium
+%else
+Conflicts:      solium-stage
 %endif
 
 BuildRequires:  systemd-rpm-macros
@@ -93,11 +124,21 @@ Solium is a standalone Wayland compositor, written in Rust on Smithay and
 configured in Lua. Its window frames, its wallpaper and the desktop shell it
 hosts are QML running inside the compositor.
 
-This is a development snapshot of one commit, built for one Fedora release,
-for starting Solium from the login screen or a text console.
+%if %{with stage}
+This is solium-stage, a development snapshot of one commit on the stage
+branch, for starting Solium from the login screen or a text console.
+%else
+This is a released version, for starting Solium from the login screen or a
+text console.
+%endif
 
 %prep
-%autosetup
+%autosetup -n solium-%{version}
+%if %{with vendored}
+tar -xzf %{SOURCE3}
+mkdir -p .cargo
+cat vendor-config.toml >> .cargo/config.toml
+%endif
 %if %{with prebuilt}
 install -Dm755 %{SOURCE1} target/install/release/solium
 install -Dm755 %{SOURCE2} target/install/release/solium-auth
@@ -107,7 +148,7 @@ install -Dm755 %{SOURCE2} target/install/release/solium-auth
 %if %{without prebuilt}
 export SOLIUM_DATADIR=%{_datadir}/solium
 export CARGO_TARGET_DIR=target/install
-cargo build --locked --release -p solium -p solium-auth
+cargo build --locked %{?with_vendored:--offline} --release -p solium -p solium-auth
 %endif
 
 %install
