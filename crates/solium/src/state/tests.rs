@@ -683,6 +683,35 @@ fn a_store_is_saved_at_most_once_a_second_and_survives_a_fresh_start() {
     let _ = std::fs::remove_dir_all(stored);
 }
 
+/// **A configured `files.store_interval` is the one used** (#473): with
+/// 5000, a change is not saved a second later, and is at five.
+#[test]
+fn a_configured_store_interval_is_used() {
+    use std::time::Duration;
+    let stored = crate::files::tests::scratch("state-store-interval");
+    crate::files::tests::use_state_dir(&stored);
+    let (_display, mut state, directory) = state_running(
+        "state-store-interval",
+        r#"sol.files({ store_interval = 5000 })
+           prefs = sol.store("prefs", { volume = 50 })"#,
+    );
+    let file = stored.join("prefs.json");
+    let saved = || std::fs::read_to_string(&file).unwrap_or_default();
+    files_written(&mut state, Duration::ZERO);
+    assert_eq!(saved(), "{\"volume\":50}\n");
+    lua(&state, "prefs.volume = 60 return ''");
+    for at in [1000, 4999] {
+        crate::files::settle_at(&mut state, Duration::from_millis(at));
+        assert_eq!(state.files.writing(), 0, "saved at {at} ms");
+    }
+    crate::files::settle_at(&mut state, Duration::from_millis(5000));
+    assert_eq!(state.files.writing(), 1, "not saved at 5000 ms");
+    files_written(&mut state, Duration::from_millis(5000));
+    assert_eq!(saved(), "{\"volume\":60}\n");
+    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(stored);
+}
+
 /// **A reload ends the watches and keeps the store** (#473): the store is
 /// saved before the reload and handed to the new configuration as it was,
 /// and the old watch's function is not called again.

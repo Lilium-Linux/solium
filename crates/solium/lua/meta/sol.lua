@@ -324,9 +324,11 @@
 ---@field decorated? boolean Whether its frame is drawn while it waits.
 ---@field fade? integer Milliseconds the scene takes to fade off the application.
 
----`config.lua`'s `files`: how much a `sol.read` reads (#473).
+---`config.lua`'s `files`: how much a `sol.read` reads, and how the stores are kept (#473).
 ---@class sol.FilesOptions
 ---@field max_read? integer The most bytes a read takes, 0 or more; a longer file's function gets `nil, "longer than files.max_read"`. Default 4194304 (4 MiB).
+---@field store_interval? number Milliseconds between the comparisons of each store with what was last saved, above 0. Default 1000.
+---@field store_max? integer The most bytes of a store's file that are read, 0 or more; a larger file is broken. Default 1048576 (1 MiB).
 
 ---What a `sol.watch` function is told (#473).
 ---@class sol.WatchEvent
@@ -1812,8 +1814,11 @@ function sol.every(ms, fn) end
 ---file or directory (os error 2)"`). A file longer than `files.max_read` in
 ---`config.lua` (`sol.files`), 4 MiB by default, is not read: `fn` gets `nil,
 ---"longer than files.max_read"`. `fn` is dispatched like any event, under the
----handler deadline, at most a frame after the read ends. A read is not
----ordered with writes. A reload drops `fn`, and it is not called.
+---handler deadline, at most a frame after the read ends. A read of a path
+---waits for the `sol.write`s to it asked for before it, so a configuration
+---reads back what it wrote. At most four reads run at once; the rest wait,
+---in the order they were asked for. A reload drops `fn`, and it is not
+---called.
 ---@param path string Absolute, or starting with `~/`; anything else is an error.
 ---@param fn fun(data: string?, err: string?)
 ---@return nil
@@ -1840,8 +1845,9 @@ function sol.write(path, data, fn) end
 ---rename, as editors and `sol.write` replace one, is still followed, and one
 ---that does not exist yet is allowed and told `"created"` when it appears.
 ---Writing a new file is told as `"created"`, then `"changed"`. Its
----directory must exist: watching a file in a missing directory is an error,
----and a watch whose directory is removed ends. Events are read once each
+---directory must exist: watching a file in a missing directory is an error.
+---When the directory is removed, the watch is told `"removed"`, once, and
+---ends, and `fn` is let go. Events are read once each
 ---time round the event loop and dispatched like any event. The watch ends
 ---with the handle's `cancel` or a reload, or when `fn` has been stopped at the
 ---handler deadline three times.
@@ -1852,26 +1858,35 @@ function sol.watch(path, fn) end
 
 ---A table that survives a restart (#473): `sol.keep`'s, also saved to
 ---`$XDG_STATE_HOME/solium/state/<name>.json` (`~/.local/state/...` without
----it). The file is read here, at the call: a key in it wins over the one in
----`defaults`, and a default it lacks is filled in, inside nested tables
----too; a list is taken whole. Mutate the table in place. At most once a
----second it is compared with what was last saved and, when it differs,
+---it). The file is read the first time the store is asked for in a
+---session, here, at the call: a key in it wins over the one in `defaults`,
+---and a default it lacks is filled in, inside nested tables too; a list is
+---taken whole. Mutate the table in place. Every `files.store_interval`
+---(a second) it is compared with what was last saved and, when it differs,
 ---saved as `sol.write` writes; and before a reload, and when the compositor
----stops. Only strings, finite numbers, booleans, and tables of them (lists,
----and tables with string keys) are saved; anything else is left out and
----named in the log once. A missing file gives the defaults; one that is not
----a JSON object or list, or is larger than 1 MiB, gives the defaults, is
----named in the log and is moved to `<name>.json.broken`, never written over.
----A reload hands the table back as the data it saves, as a restart would.
+---stops, which waits two seconds at most for it. Only strings, finite
+---numbers, booleans, and tables of them (lists, and tables with string
+---keys) are saved; anything else is left out and named in the log once. A
+---missing file gives the defaults; one that is not a JSON object or list,
+---or is larger than `files.store_max` (1 MiB), gives the defaults, is named
+---in the log and is moved to `<name>.json.broken`, never written over.
+---`solium --check` reads the file and changes nothing: a broken one is a
+---warning in its output, left where it is.
+---
+---After that first read, the store lives in the compositor for the rest of
+---the session: a reload hands the table back from memory, as the plain data
+---it saves, without reading the file again, and a store the new
+---configuration does not ask for is kept too, for a later one that does.
 ---Asked for twice under one name, it is the same table.
 ---@param name string Letters, digits, `_` and `-`; anything else is an error.
 ---@param defaults? table
 ---@return table
 function sol.store(name, defaults) end
 
----How much a `sol.read` reads: `config.files`, which the shipped `init.lua`
----hands over (#473). A key left out, or one of the wrong kind, keeps the
----default.
+---How much a `sol.read` reads, how often the stores are saved and how large
+---a store file is read: `config.files`, which the shipped `init.lua` hands
+---over (#473), before any `sol.store` of the configuration's. A key left
+---out, or one of the wrong kind, keeps the default.
 ---@param options? sol.FilesOptions
 ---@return nil
 function sol.files(options) end

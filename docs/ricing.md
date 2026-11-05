@@ -2060,16 +2060,19 @@ return { files = { max_read = 65536 } }
 A write is atomic: the data goes to a temporary file beside the target, is
 synced to disk, and is renamed over it, so a crash half-way leaves the old
 file whole and a reader never sees half of the new one. Writes to one file
-land in the order you asked for them. The directory must already exist,
-and a symbolic link is followed.
+land in the order you asked for them, and a read of a file waits for the
+writes to it you asked for first, so you read back what you wrote. The
+directory must already exist, and a symbolic link is followed. At most four
+reads run at once; the rest wait their turn.
 
 `sol.watch(path, fn)` calls `fn` with `{ kind = ..., path = path }` whenever
 the file changes: `"changed"` when it is written and closed or another file
 is renamed onto it, `"created"` when it appears, `"removed"` when it is
 deleted or renamed away. The watch is on the file's directory, which must
 exist, so a file an editor replaces by renaming a new one over it is still
-followed, and a file that does not exist yet can be watched for. The handle
-it returns has `cancel()`:
+followed, and a file that does not exist yet can be watched for. If the
+directory itself is removed, the watch is told `"removed"` once and ends.
+The handle it returns has `cancel()`:
 
 ```lua
 local theme = sol.watch("~/.config/my-bar/theme.json", function(event)
@@ -2082,8 +2085,8 @@ end)
 `sol.store(name, defaults)` is `sol.keep` that also survives a restart. It
 hands back a table you change in place, and Solium saves it to
 `$XDG_STATE_HOME/solium/state/<name>.json` (`~/.local/state/solium/state/`
-by default) when it changed, at most once a second, before a reload, and when
-Solium stops:
+by default) when it changed, at most once every `files.store_interval`
+milliseconds (1000), before a reload, and when Solium stops:
 
 ```lua
 local prefs = sol.store("prefs", { volume = 50, recent = {} })
@@ -2094,13 +2097,23 @@ The file is read when the store is first asked for. A key in it wins over
 the default, and a default the file lacks, such as one added in a later
 version of your configuration, is filled in. Only strings, numbers,
 booleans, and tables of them are saved: a function in a store is named in
-the log and left out. A file that is not JSON, or is larger than 1 MiB, gives
-the defaults, is named in the log, and is moved aside to `<name>.json.broken`
-rather than written over. The name is letters, digits, `_` and `-`.
+the log and left out. A file that is not JSON, or is larger than
+`files.store_max` bytes (1 MiB), gives the defaults, is named in the log, and
+is moved aside to `<name>.json.broken` rather than written over;
+`solium --check` only warns about it and leaves it where it is. The name is
+letters, digits, `_` and `-`.
+
+```lua
+return { files = { store_interval = 5000, store_max = 65536 } }
+```
 
 Reloading ends every watch and drops the functions of reads and writes still
-under way, though the writes themselves still land. Stores come back after a
-reload as they were.
+under way, though the writes themselves still land. The file is read only the
+first time a store is asked for in a session: after that the store lives in
+the compositor, and a reload hands it back from memory as the data it saves,
+even when the configuration in between did not use it. When Solium stops it
+waits two seconds at most for the last saves; one still unwritten then is
+named in the log, and its file is left as it was.
 
 ### Bars, docks and wallpapers
 

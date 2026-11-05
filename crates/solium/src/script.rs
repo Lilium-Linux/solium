@@ -2501,6 +2501,10 @@ impl Scripts {
     /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
     pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
         let mut out = Vec::new();
+        // A check saves nothing.
+        if self.lua.app_data_ref::<CheckOnly>().is_some() {
+            return out;
+        }
         if let Ok(stores) = self
             .lua
             .globals()
@@ -2536,6 +2540,33 @@ impl Scripts {
         out
     }
 
+    /// How often the stores are saved: `files.store_interval` (#473).
+    pub(crate) fn store_interval(&self) -> Duration {
+        self.lua
+            .try_app_data_ref::<FileSettings>()
+            .ok()
+            .flatten()
+            .map_or(crate::files::STORE_INTERVAL, |settings| {
+                settings.store_interval
+            })
+    }
+
+    /// Load the configuration for `solium --check`: as [`Self::load`] does,
+    /// except that nothing of the user's is changed, so a store's broken
+    /// file stays where it is and is said in [`Self::check_notes`] (#473).
+    pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
+        Self::load_as(config, Keep::new(), true)
+    }
+
+    /// What a check found that a session would act on: a store's broken
+    /// file, left where it is.
+    pub(crate) fn check_notes(&self) -> Vec<String> {
+        self.lua
+            .app_data_ref::<CheckOnly>()
+            .map(|check| check.0.clone())
+            .unwrap_or_default()
+    }
+
     /// Load the configuration again, handing back what the last one kept.
     ///
     /// ## What a script is entitled to know after a reload
@@ -2558,7 +2589,15 @@ impl Scripts {
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
     pub(crate) fn load_carrying(config: &Path, carried: Keep) -> Result<Self> {
+        Self::load_as(config, carried, false)
+    }
+
+    /// [`Self::load_carrying`], or for `--check` (`checking`).
+    fn load_as(config: &Path, carried: Keep, checking: bool) -> Result<Self> {
         let lua = Lua::new();
+        if checking {
+            lua.set_app_data(CheckOnly::default());
+        }
         lua.set_app_data(Pending::default());
         lua.set_app_data(Snapshot::default());
         lua.set_app_data(Carried(carried));
@@ -3431,6 +3470,9 @@ impl Scripts {
                         };
                         files.set(*id, Value::Nil)?;
                         call_struck(lua, &strikes, &done, error.as_deref(), "write")?;
+                    }
+                    Heard::WatchEnded { id } => {
+                        watches.set(*id, Value::Nil)?;
                     }
                     Heard::Watched { id, kind, path } => {
                         let Some(run) = watches.get::<Option<mlua::Function>>(*id)? else {
@@ -7526,15 +7568,40 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             let found = match carried {
                 Some(carried) => Some(carried),
                 None => {
-                    let loaded = crate::files::load_store(&name);
-                    if let Some(loaded) = &loaded {
-                        let text = loaded.render();
-                        let name = name.clone();
-                        with_pending(lua, |pending| {
-                            pending.commands.push(Command::StoreLoaded { name, text });
-                        })?;
+                    let max = lua
+                        .try_app_data_ref::<FileSettings>()
+                        .ok()
+                        .flatten()
+                        .map_or(crate::files::MAX_STORE, |settings| settings.store_max);
+                    match crate::files::read_store(&name, max) {
+                        crate::files::StoreFile::Missing => {
+                            tracing::info!(store = name, "no store file yet; starting from the defaults");
+                            None
+                        }
+                        crate::files::StoreFile::Found(loaded) => {
+                            let text = loaded.render();
+                            let name = name.clone();
+                            with_pending(lua, |pending| {
+                                pending.commands.push(Command::StoreLoaded { name, text });
+                            })?;
+                            Some(loaded)
+                        }
+                        crate::files::StoreFile::Broken { path, why } => {
+                            tracing::warn!(store = name, path = %path.display(), why, "the store file cannot be used; starting from the defaults");
+                            // `--check` changes nothing of the user's: it
+                            // says so instead, and the session sets the
+                            // file aside. `check::tests::a_check_leaves_a_broken_store_file_as_it_was`.
+                            match lua.app_data_mut::<CheckOnly>() {
+                                Some(mut check) => check.0.push(format!(
+                                    "store `{name}`: {} is {why}; a session would start from the \
+                                     defaults and move it to {name}.json.broken",
+                                    path.display()
+                                )),
+                                None => crate::files::set_aside(&name, &path),
+                            }
+                            None
+                        }
                     }
-                    loaded
                 }
             };
             if let Some(found) = found {
@@ -7546,10 +7613,13 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     )?;
 
     // `config.files`, handed over by `init.lua` (#473): how much a
-    // `sol.read` reads. Left out, or of the wrong kind, keeps the default,
+    // `sol.read` reads, how often the stores are saved, and how large a
+    // store file is read. Left out, or of the wrong kind, keeps the default,
     // named in the log, as `sol.run_defaults` does; kept in this Lua state,
-    // where `sol.read` builds each request.
-    // `tests::sol_read_stops_at_files_max_read`.
+    // where `sol.read` and `sol.store` read them and the settle asks
+    // `Scripts::store_interval`.
+    // `tests::sol_read_stops_at_files_max_read`,
+    // `tests::sol_files_reads_the_store_settings`.
     sol.set(
         "files",
         lua.create_function(|lua, options: Option<Table>| {
@@ -7568,6 +7638,36 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                             value = describe(&value),
                             "files.max_read is a whole number of bytes, 0 or more; keeping the \
                              default, 4194304"
+                        ),
+                    },
+                }
+                match options.get::<Value>("store_interval") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value)
+                        .filter(|ms| *ms > 0.0)
+                        .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+                    {
+                        Some(every) => settings.store_interval = every,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "files.store_interval is a number of milliseconds above 0; keeping \
+                             the default, 1000"
+                        ),
+                    },
+                }
+                match options.get::<Value>("store_max") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "checked to be a whole number from 0, and saturating past u64"
+                        )]
+                        Some(bytes) => settings.store_max = bytes as u64,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "files.store_max is a whole number of bytes, 0 or more; keeping the \
+                             default, 1048576"
                         ),
                     },
                 }
@@ -8102,15 +8202,27 @@ static FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0
 struct FileSettings {
     /// The most a `sol.read` reads, in bytes.
     max_read: usize,
+    /// How often the stores are compared with what was last saved.
+    store_interval: Duration,
+    /// The largest store file that is read, in bytes.
+    store_max: u64,
 }
 
 impl Default for FileSettings {
     fn default() -> Self {
         Self {
             max_read: crate::files::MAX_READ,
+            store_interval: crate::files::STORE_INTERVAL,
+            store_max: crate::files::MAX_STORE,
         }
     }
 }
+
+/// Set in a Lua state `solium --check` loads (#473): `sol.store` then
+/// reads its file and changes nothing, and collects here what it would
+/// have set aside, for the check to say. Present means checking.
+#[derive(Debug, Default)]
+struct CheckOnly(Vec<String>);
 
 /// The key paths of stores already named in the log for holding what
 /// cannot be saved, so each is named once (#473).
@@ -16215,6 +16327,71 @@ mod tests {
         play_files(&mut files, &outcome);
         assert_eq!(files.watching(), 0);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A watch whose directory goes is told `removed` and let go at once**
+    /// (#473): its function leaves `sol._watches` without waiting for a
+    /// reload.
+    #[test]
+    fn a_watch_whose_directory_goes_is_told_removed_and_let_go() {
+        let directory = std::env::temp_dir().join("solium-script-test-watch-gone");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a directory");
+        let (config, mut scripts) = loaded(
+            "solium-script-test-watch-gone-config",
+            &format!(
+                r#"seen = {{}}
+                   sol.watch("{dir}/f", function(event) seen[#seen + 1] = event.kind end)"#,
+                dir = directory.display()
+            ),
+        );
+        let mut files = crate::files::Files::default();
+        play_files(&mut files, &scripts.startup());
+        std::fs::remove_dir_all(&directory).expect("removing the directory");
+        assert_eq!(pump_files(&mut scripts, &mut files, 1), ["removed"]);
+        let started = std::time::Instant::now();
+        while scripts.evaluate("return tostring(next(sol._watches))") != "nil" {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the function was kept"
+            );
+            let heard = files.pump();
+            if !heard.is_empty() {
+                play_files(&mut files, &scripts.files_heard(&heard, one_screen(&[])));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(files.watching(), 0);
+        assert_eq!(
+            scripts.evaluate("return table.concat(seen, ',')"),
+            "removed"
+        );
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// **`sol.files` reads the store settings** (#473): `store_interval` is
+    /// what the settle asks for, and `store_max` caps a store file; values
+    /// of the wrong kind keep the defaults.
+    #[test]
+    fn sol_files_reads_the_store_settings() {
+        let state = crate::files::tests::scratch("script-store-settings");
+        crate::files::tests::use_state_dir(&state);
+        std::fs::write(state.join("big.json"), r#"{"a": "0123456789"}"#).expect("writing");
+        let (directory, scripts) = loaded(
+            "solium-script-test-store-settings",
+            r#"sol.files({ store_interval = 5000, store_max = 10 })
+               big = sol.store("big", { a = "default" })"#,
+        );
+        assert_eq!(scripts.store_interval(), Duration::from_secs(5));
+        assert_eq!(scripts.evaluate("return big.a"), "default");
+        assert!(
+            state.join("big.json.broken").exists(),
+            "past store_max was read"
+        );
+        scripts.evaluate("sol.files({ store_interval = 0, store_max = -1 }) return ''");
+        assert_eq!(scripts.store_interval(), crate::files::STORE_INTERVAL);
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// **A store takes the file's keys and keeps the defaults it lacks**

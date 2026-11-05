@@ -40,12 +40,14 @@ use crate::{json::Json, state::Solium};
 
 /// How much `sol.read` reads when `files.max_read` does not say: 4 MiB.
 pub(crate) const MAX_READ: usize = 4 << 20;
-/// The largest store file that is read. A store is settings and small state,
-/// read on the compositor's own thread when it is first asked for, so a
-/// bigger one is taken for a broken one.
+/// The largest store file that is read when `files.store_max` does not
+/// say: 1 MiB. A store is settings and small state, read on the
+/// compositor's own thread when it is first asked for, so a bigger one is
+/// taken for a broken one.
 pub(crate) const MAX_STORE: u64 = 1 << 20;
-/// How often the stores are compared with what was last written.
-const STORE_EVERY: Duration = Duration::from_secs(1);
+/// How often the stores are compared with what was last written when
+/// `files.store_interval` does not say.
+pub(crate) const STORE_INTERVAL: Duration = Duration::from_secs(1);
 /// What a read past `files.max_read` is told.
 pub(crate) const TOO_LONG: &str = "longer than files.max_read";
 
@@ -173,53 +175,62 @@ pub(crate) fn store_path(name: &str) -> Option<PathBuf> {
     state_dir().map(|dir| dir.join(format!("{name}.json")))
 }
 
-/// Store `name`'s file, read: a JSON object or list, or `None` when there is
-/// no file or it cannot be used. One that is not JSON, not an object or a
-/// list, not UTF-8, or larger than [`MAX_STORE`] is renamed to
-/// `<name>.json.broken` and said in the log, so it is never overwritten
-/// unseen. `tests::a_broken_store_file_is_kept_as_broken`.
-pub(crate) fn load_store(name: &str) -> Option<Json> {
-    let path = store_path(name)?;
+/// What a store's file held.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StoreFile {
+    /// No file yet, or nowhere to keep one.
+    Missing,
+    /// A JSON object or list.
+    Found(Json),
+    /// A file that cannot be used, at `path`, and why.
+    Broken { path: PathBuf, why: String },
+}
+
+/// Store `name`'s file, read, at most `max` bytes of it
+/// (`files.store_max`), and nothing changed: the caller decides what
+/// happens to a broken one ([`set_aside`] in a session, a warning under
+/// `--check`). One that is not JSON, not an object or a list, not UTF-8, or
+/// larger than `max` is broken. `tests::a_broken_store_file_is_kept_as_broken`.
+pub(crate) fn read_store(name: &str, max: u64) -> StoreFile {
+    let Some(path) = store_path(name) else {
+        return StoreFile::Missing;
+    };
     let file = match File::open(&path) {
         Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            tracing::info!(store = name, path = %path.display(), "no store file yet; starting from the defaults");
-            return None;
-        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return StoreFile::Missing,
         Err(err) => {
-            tracing::warn!(store = name, path = %path.display(), %err, "cannot read the store file; starting from the defaults");
-            set_aside(name, &path);
-            return None;
+            return StoreFile::Broken {
+                path,
+                why: err.to_string(),
+            };
         }
     };
     let mut bytes = Vec::new();
-    let why = match file.take(MAX_STORE + 1).read_to_end(&mut bytes) {
+    let why = match file.take(max.saturating_add(1)).read_to_end(&mut bytes) {
         Err(err) => err.to_string(),
-        Ok(_) if bytes.len() as u64 > MAX_STORE => "larger than 1 MiB".to_owned(),
+        Ok(_) if bytes.len() as u64 > max => format!("larger than files.store_max, {max} bytes"),
         Ok(_) => match String::from_utf8(bytes)
             .ok()
             .and_then(|text| Json::parse(&text))
         {
-            Some(json @ (Json::Object(_) | Json::List(_))) => return Some(json),
+            Some(json @ (Json::Object(_) | Json::List(_))) => return StoreFile::Found(json),
             Some(_) => "neither a JSON object nor a list".to_owned(),
             None => "not JSON".to_owned(),
         },
     };
-    tracing::warn!(store = name, path = %path.display(), why, "the store file cannot be used; starting from the defaults");
-    set_aside(name, &path);
-    None
+    StoreFile::Broken { path, why }
 }
 
 /// Move a store file that cannot be used out of the way, to
 /// `<name>.json.broken`, so the next save does not overwrite it unseen.
-fn set_aside(name: &str, path: &Path) {
+pub(crate) fn set_aside(name: &str, path: &Path) {
     let broken = path.with_file_name(format!("{name}.json.broken"));
     match fs::rename(path, &broken) {
         Ok(()) => {
-            tracing::warn!(store = name, kept = %broken.display(), "the unusable store file is kept beside it")
+            tracing::warn!(store = name, kept = %broken.display(), "the unusable store file is kept beside it");
         }
         Err(err) => {
-            tracing::warn!(store = name, %err, "the unusable store file could not be set aside")
+            tracing::warn!(store = name, %err, "the unusable store file could not be set aside");
         }
     }
 }
@@ -377,6 +388,9 @@ pub(crate) enum Heard {
     Wrote { id: u64, error: Option<String> },
     /// A watched file changed.
     Watched { id: u64, kind: Kind, path: String },
+    /// A watch ended because its directory went away: its function is let
+    /// go. Told after the `removed` it was owed.
+    WatchEnded { id: u64 },
 }
 
 /// `sol.read`: read `path`, up to `max` bytes, and tell read `id`.
@@ -404,6 +418,23 @@ struct Job {
     /// Who is told: a `sol.write`'s id and the configuration it came from,
     /// or the store it saves.
     by: By,
+}
+
+/// One read, waiting or running, of the configuration of `generation`.
+#[derive(Debug)]
+struct ReadJob {
+    id: u64,
+    path: PathBuf,
+    max: usize,
+    generation: u64,
+}
+
+/// What waits on a path behind the write running there: a later write, or
+/// a read that must see what the writes before it wrote.
+#[derive(Debug)]
+enum Queued {
+    Write(Job),
+    Read(ReadJob),
 }
 
 #[derive(Clone, Debug)]
@@ -441,7 +472,22 @@ struct Watch {
     name: OsString,
     /// The path as the configuration wrote it, for its events.
     shown: String,
+    /// Whether the last thing it was told was `removed`, so the end of its
+    /// directory does not tell it twice.
+    removed: bool,
 }
+
+/// How many reads run at once. More wait, in the order they were asked
+/// for, so a configuration that reads in a loop cannot start a thread for
+/// each. Not a setting: it bounds the compositor's own threads, and four
+/// keep a slow file from holding the others up.
+const READS_AT_ONCE: usize = 4;
+
+/// How long the compositor's end waits for writes still under way, in all.
+/// Not a setting: it is how long a session's end may be held, and a write
+/// to a local disk takes far less. A write still pending then is named in
+/// the log and given up; the file it was replacing stays whole.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 /// The configuration's reads, writes, watches and stores.
 #[derive(Debug)]
@@ -451,11 +497,15 @@ pub(crate) struct Files {
     /// Counts reloads: what a read or a write of an older configuration
     /// comes to is told to nobody.
     generation: u64,
-    /// Paths with a write running, and the writes waiting behind it there.
-    writing: HashMap<PathBuf, VecDeque<Job>>,
+    /// Paths with a write running, and what waits behind it there.
+    writing: HashMap<PathBuf, VecDeque<Queued>>,
     /// The threads of the writes running, so the compositor can wait for
     /// them before it stops.
     threads: Vec<JoinHandle<()>>,
+    /// How many reads are running, at most [`READS_AT_ONCE`].
+    reading: usize,
+    /// Reads waiting for one of those to end, in order.
+    reads_waiting: VecDeque<ReadJob>,
     /// What could not reach a thread: a thread that could not start.
     heard: Vec<Heard>,
     /// One instance for every watch, made with the first.
@@ -479,6 +529,8 @@ impl Default for Files {
             generation: 0,
             writing: HashMap::new(),
             threads: Vec::new(),
+            reading: 0,
+            reads_waiting: VecDeque::new(),
             heard: Vec::new(),
             inotify: None,
             directories: HashMap::new(),
@@ -489,21 +541,49 @@ impl Default for Files {
     }
 }
 
-/// The watch mask: what happens to a name in a directory, and `ONLYDIR`,
-/// since a watch is always on its file's directory.
+/// The watch mask: what happens to a name in a directory, the directory
+/// itself going, and `ONLYDIR`, since a watch is always on its file's
+/// directory.
 const MASK: inotify::WatchMask = inotify::WatchMask::CLOSE_WRITE
     .union(inotify::WatchMask::MOVED_TO)
     .union(inotify::WatchMask::CREATE)
     .union(inotify::WatchMask::DELETE)
     .union(inotify::WatchMask::MOVED_FROM)
+    .union(inotify::WatchMask::DELETE_SELF)
     .union(inotify::WatchMask::ONLYDIR);
 
 impl Files {
-    /// Start a read, on a thread of its own.
+    /// Read a file: after the writes asked for before it on the same path,
+    /// so a configuration reads back what it wrote, and on a thread of its
+    /// own once fewer than [`READS_AT_ONCE`] are running.
+    /// `tests::a_read_after_a_write_sees_what_was_written`.
     pub(crate) fn read(&mut self, request: ReadRequest) {
         let ReadRequest { id, path, max } = request;
+        let job = ReadJob {
+            id,
+            path,
+            max,
+            generation: self.generation,
+        };
+        match self.writing.get_mut(&job.path) {
+            Some(waiting) => waiting.push_back(Queued::Read(job)),
+            None => self.read_when_free(job),
+        }
+    }
+
+    /// Start `job`, or wait it behind the reads running.
+    fn read_when_free(&mut self, job: ReadJob) {
+        if self.reading >= READS_AT_ONCE {
+            self.reads_waiting.push_back(job);
+            return;
+        }
+        let ReadJob {
+            id,
+            path,
+            max,
+            generation,
+        } = job;
         let sender = self.sender.clone();
-        let generation = self.generation;
         let started = std::thread::Builder::new()
             .name("solium-read".to_owned())
             .spawn(move || {
@@ -514,12 +594,27 @@ impl Files {
                     result,
                 });
             });
-        if let Err(err) = started {
-            tracing::warn!(%err, "could not start a thread to read a file");
-            self.heard.push(Heard::Read {
-                id,
-                result: Err(err.to_string()),
-            });
+        match started {
+            Ok(_) => self.reading += 1,
+            Err(err) => {
+                tracing::warn!(%err, "could not start a thread to read a file");
+                if generation == self.generation {
+                    self.heard.push(Heard::Read {
+                        id,
+                        result: Err(err.to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    /// A read ended: the next one waiting starts.
+    fn read_ended(&mut self) {
+        self.reading = self.reading.saturating_sub(1);
+        while self.reading < READS_AT_ONCE
+            && let Some(job) = self.reads_waiting.pop_front()
+        {
+            self.read_when_free(job);
         }
     }
 
@@ -540,7 +635,7 @@ impl Files {
     /// Start `job`, or wait it behind the write running on its path.
     fn queue(&mut self, job: Job) {
         if let Some(waiting) = self.writing.get_mut(&job.path) {
-            waiting.push_back(job);
+            waiting.push_back(Queued::Write(job));
             return;
         }
         self.writing.insert(job.path.clone(), VecDeque::new());
@@ -581,8 +676,8 @@ impl Files {
         }
     }
 
-    /// A write on `path` ended: tell whoever asked, and start the next one
-    /// waiting there.
+    /// A write on `path` ended: tell whoever asked, let the reads waiting
+    /// for it go, and start the next write waiting there.
     fn wrote(&mut self, path: PathBuf, by: By, text: &[u8], error: Option<String>) {
         match by {
             By::Lua {
@@ -607,11 +702,18 @@ impl Files {
                 }
             }
         }
-        let next = self.writing.get_mut(&path).and_then(VecDeque::pop_front);
-        match next {
-            Some(job) => self.start(job),
-            None => {
-                self.writing.remove(&path);
+        loop {
+            let next = self.writing.get_mut(&path).and_then(VecDeque::pop_front);
+            match next {
+                Some(Queued::Read(job)) => self.read_when_free(job),
+                Some(Queued::Write(job)) => {
+                    self.start(job);
+                    break;
+                }
+                None => {
+                    self.writing.remove(&path);
+                    break;
+                }
             }
         }
     }
@@ -651,6 +753,7 @@ impl Files {
                 directory: directory_watch,
                 name: name.to_owned(),
                 shown,
+                removed: false,
             },
         );
     }
@@ -706,12 +809,12 @@ impl Files {
     }
 
     /// Whether it is time to compare the stores, at `now`; and if it is,
-    /// the next time is a second on.
-    fn save_due(&mut self, now: Duration) -> bool {
+    /// the next time is `every` on (`files.store_interval`).
+    fn save_due(&mut self, now: Duration, every: Duration) -> bool {
         if now < self.next_save {
             return false;
         }
-        self.next_save = now.saturating_add(STORE_EVERY);
+        self.next_save = now.saturating_add(every);
         true
     }
 
@@ -725,29 +828,36 @@ impl Files {
         // Closing the instance ends every watch it holds.
         self.inotify = None;
         self.heard.clear();
+        self.reads_waiting.clear();
+    }
+
+    /// One thread's result.
+    fn finished(&mut self, finished: Finished) {
+        match finished {
+            Finished::Read {
+                id,
+                generation,
+                result,
+            } => {
+                if generation == self.generation {
+                    self.heard.push(Heard::Read { id, result });
+                }
+                self.read_ended();
+            }
+            Finished::Wrote {
+                path,
+                by,
+                text,
+                error,
+            } => self.wrote(path, by, &text, error),
+        }
     }
 
     /// What reads, writes and watches came to since the last call, in the
     /// order heard.
     pub(crate) fn pump(&mut self) -> Vec<Heard> {
         while let Ok(finished) = self.receiver.try_recv() {
-            match finished {
-                Finished::Read {
-                    id,
-                    generation,
-                    result,
-                } => {
-                    if generation == self.generation {
-                        self.heard.push(Heard::Read { id, result });
-                    }
-                }
-                Finished::Wrote {
-                    path,
-                    by,
-                    text,
-                    error,
-                } => self.wrote(path, by, &text, error),
-            }
+            self.finished(finished);
         }
         self.threads.retain(|thread| !thread.is_finished());
         self.watched();
@@ -760,79 +870,96 @@ impl Files {
             return;
         };
         let mut buffer = [0_u8; 4096];
-        let mut gone = Vec::new();
+        let mut seen = Vec::new();
         loop {
             let Ok(events) = inotify.read_events(&mut buffer) else {
                 break;
             };
-            let mut any = false;
-            for event in events {
-                any = true;
-                if event.mask.contains(inotify::EventMask::Q_OVERFLOW) {
-                    // What was lost cannot be known: every file may have
-                    // changed.
-                    tracing::warn!("too many file events at once; telling every watch it changed");
-                    let mut ids: Vec<u64> = self.watches.keys().copied().collect();
-                    ids.sort_unstable();
-                    for id in ids {
-                        if let Some(watch) = self.watches.get(&id) {
-                            self.heard.push(Heard::Watched {
-                                id,
-                                kind: Kind::Changed,
-                                path: watch.shown.clone(),
-                            });
-                        }
-                    }
-                    continue;
-                }
-                if event.mask.contains(inotify::EventMask::IGNORED) {
-                    gone.push(event.wd.clone());
-                    continue;
-                }
-                let kind = if event.mask.contains(inotify::EventMask::CREATE) {
-                    Kind::Created
-                } else if event
-                    .mask
-                    .intersects(inotify::EventMask::DELETE | inotify::EventMask::MOVED_FROM)
-                {
-                    Kind::Removed
-                } else {
-                    Kind::Changed
-                };
-                let Some(name) = event.name else {
-                    continue;
-                };
-                let Some(ids) = self.directories.get(&event.wd) else {
-                    continue;
-                };
-                for id in ids {
-                    if let Some(watch) = self.watches.get(id)
-                        && watch.name == name
-                    {
-                        self.heard.push(Heard::Watched {
-                            id: *id,
-                            kind,
-                            path: watch.shown.clone(),
-                        });
-                    }
-                }
-            }
-            if !any {
+            let before = seen.len();
+            seen.extend(
+                events.map(|event| (event.wd.clone(), event.mask, event.name.map(OsString::from))),
+            );
+            if seen.len() == before {
                 break;
             }
         }
-        // A directory removed or unmounted takes its watches with it.
-        for directory in gone {
-            if let Some(ids) = self.directories.remove(&directory) {
+        for (directory, mask, name) in seen {
+            if mask.contains(inotify::EventMask::Q_OVERFLOW) {
+                // What was lost cannot be known: every file may have
+                // changed.
+                tracing::warn!("too many file events at once; telling every watch it changed");
+                let mut ids: Vec<u64> = self.watches.keys().copied().collect();
+                ids.sort_unstable();
                 for id in ids {
-                    if let Some(watch) = self.watches.remove(&id) {
-                        tracing::warn!(
-                            path = watch.shown,
-                            "a watched file's directory went away; its watch ends"
-                        );
-                    }
+                    self.tell(id, Kind::Changed);
                 }
+                continue;
             }
+            if mask.intersects(inotify::EventMask::DELETE_SELF | inotify::EventMask::IGNORED) {
+                self.directory_gone(&directory);
+                continue;
+            }
+            let Some(name) = name else {
+                continue;
+            };
+            let kind = if mask.contains(inotify::EventMask::CREATE) {
+                Kind::Created
+            } else if mask.intersects(inotify::EventMask::DELETE | inotify::EventMask::MOVED_FROM) {
+                Kind::Removed
+            } else {
+                Kind::Changed
+            };
+            let ids: Vec<u64> = self
+                .directories
+                .get(&directory)
+                .map(|ids| {
+                    ids.iter()
+                        .copied()
+                        .filter(|id| self.watches.get(id).is_some_and(|watch| watch.name == name))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for id in ids {
+                self.tell(id, kind);
+            }
+        }
+    }
+
+    /// Tell watch `id` its file was `kind`.
+    fn tell(&mut self, id: u64, kind: Kind) {
+        if let Some(watch) = self.watches.get_mut(&id) {
+            watch.removed = kind == Kind::Removed;
+            self.heard.push(Heard::Watched {
+                id,
+                kind,
+                path: watch.shown.clone(),
+            });
+        }
+    }
+
+    /// A watched directory was removed or unmounted: each of its watches is
+    /// told its file is `removed`, unless that was the last thing it was
+    /// told, and ends. `tests::a_watch_ends_when_its_directory_goes`.
+    fn directory_gone(&mut self, directory: &inotify::WatchDescriptor) {
+        let Some(ids) = self.directories.remove(directory) else {
+            return;
+        };
+        for id in ids {
+            let Some(watch) = self.watches.remove(&id) else {
+                continue;
+            };
+            tracing::info!(
+                path = watch.shown,
+                "a watched file's directory went away; its watch ends"
+            );
+            if !watch.removed {
+                self.heard.push(Heard::Watched {
+                    id,
+                    kind: Kind::Removed,
+                    path: watch.shown,
+                });
+            }
+            self.heard.push(Heard::WatchEnded { id });
         }
     }
 
@@ -842,26 +969,45 @@ impl Files {
             && self.heard.is_empty()
             && self.inotify.is_none()
             && self.threads.is_empty()
+            && self.reading == 0
     }
 
-    /// Wait for every write asked for to land, the ones waiting behind
-    /// others too: for the compositor's end, after the last save.
+    /// Wait for the writes asked for to land, the ones waiting behind
+    /// others too, for [`SHUTDOWN_WAIT`] at most: for the compositor's end,
+    /// after the last save. A write still pending then is named in the log,
+    /// by its path, and given up.
+    /// `tests::the_end_waits_for_writes_but_not_for_ever`.
     pub(crate) fn wait_for_writes(&mut self) {
+        self.wait_for_writes_within(SHUTDOWN_WAIT);
+    }
+
+    fn wait_for_writes_within(&mut self, limit: Duration) {
+        let deadline = std::time::Instant::now() + limit;
         while !self.writing.is_empty() {
-            match self.receiver.recv() {
-                Ok(Finished::Wrote {
-                    path,
-                    by,
-                    text,
-                    error,
-                }) => self.wrote(path, by, &text, error),
-                Ok(Finished::Read { .. }) => {}
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.receiver.recv_timeout(left) {
+                Ok(finished) => self.finished(finished),
                 Err(_) => break,
             }
         }
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
+        for (path, waiting) in self.writing.drain() {
+            let writes = 1 + waiting
+                .iter()
+                .filter(|queued| matches!(queued, Queued::Write(_)))
+                .count();
+            for _ in 0..writes {
+                tracing::warn!(
+                    path = %path.display(),
+                    "a write had not landed when the compositor stopped; giving it up"
+                );
+            }
         }
+        // Whatever is still running is left to finish or die with the
+        // process.
+        self.threads.clear();
     }
 
     /// How many watches are set, for a test.
@@ -878,7 +1024,7 @@ impl Files {
 }
 
 /// Once a loop: tell the configuration what its reads, writes and watches
-/// came to, and once a second save the stores that changed.
+/// came to, and every `files.store_interval` save the stores that changed.
 pub(crate) fn settle(state: &mut Solium) {
     let now = state.clock.now();
     settle_at(state, now);
@@ -886,8 +1032,8 @@ pub(crate) fn settle(state: &mut Solium) {
 
 /// [`settle`], at `now` on the compositor's clock, which a test chooses.
 pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
-    if state.files.save_due(now)
-        && let Some(scripts) = state.scripts.as_ref()
+    if let Some(scripts) = state.scripts.as_ref()
+        && state.files.save_due(now, scripts.store_interval())
     {
         let stores = scripts.stores();
         state
@@ -910,8 +1056,8 @@ pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
     state.apply(outcome);
 }
 
-/// At the compositor's end: save the stores that changed, and wait for
-/// every write to land.
+/// At the compositor's end: save the stores that changed, and wait a
+/// bounded time for every write to land.
 pub(crate) fn finish(state: &mut Solium) {
     if let Some(scripts) = state.scripts.as_ref() {
         let stores = scripts.stores();
@@ -1210,7 +1356,15 @@ pub(crate) mod tests {
             ("big", big.as_str()),
         ] {
             fs::write(dir.join(format!("{name}.json")), text).expect("writing");
-            assert_eq!(load_store(name), None, "{name}");
+            assert!(
+                matches!(read_store(name, MAX_STORE), StoreFile::Broken { .. }),
+                "{name}"
+            );
+            assert!(
+                dir.join(format!("{name}.json")).exists(),
+                "reading changed {name}"
+            );
+            set_aside(name, &dir.join(format!("{name}.json")));
             assert!(
                 !dir.join(format!("{name}.json")).exists(),
                 "{name} was left in place"
@@ -1224,9 +1378,166 @@ pub(crate) mod tests {
             );
         }
         fs::write(dir.join("good.json"), r#"{"volume": 60}"#).expect("writing");
-        let good = load_store("good").expect("a good store");
+        let StoreFile::Found(good) = read_store("good", MAX_STORE) else {
+            panic!("a good store")
+        };
         assert_eq!(good.get("volume"), Some(&Json::Number(60.0)));
-        assert_eq!(load_store("missing"), None);
+        assert!(
+            matches!(read_store("good", 5), StoreFile::Broken { .. }),
+            "files.store_max"
+        );
+        assert_eq!(read_store("missing", MAX_STORE), StoreFile::Missing);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// **A read after a write sees what was written** (#473): a read of a
+    /// path waits for the writes asked for before it there, and a later
+    /// write does not wait for the read.
+    #[test]
+    fn a_read_after_a_write_sees_what_was_written() {
+        let dir = scratch("read-after-write");
+        let path = dir.join("f");
+        fs::write(&path, "old").expect("writing");
+        let mut files = Files::default();
+        for round in 0..20_u64 {
+            let text = format!("new {round}");
+            files.write(WriteRequest {
+                id: round * 2,
+                path: path.clone(),
+                data: text.clone().into_bytes(),
+                report: false,
+            });
+            files.read(ReadRequest {
+                id: round * 2 + 1,
+                path: path.clone(),
+                max: MAX_READ,
+            });
+            let heard = pump_until(&mut files, |heard| !heard.is_empty());
+            assert_eq!(
+                heard,
+                [Heard::Read {
+                    id: round * 2 + 1,
+                    result: Ok(text.into_bytes())
+                }]
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// **At most four reads run at once**, and the rest are started in the
+    /// order they were asked for as those end.
+    #[test]
+    fn at_most_four_reads_run_at_once() {
+        let mut files = Files::default();
+        for id in 1..=10 {
+            files.read(ReadRequest {
+                id,
+                path: PathBuf::from("/proc/self/status"),
+                max: MAX_READ,
+            });
+        }
+        assert_eq!(
+            (files.reading, files.reads_waiting.len()),
+            (READS_AT_ONCE, 6)
+        );
+        let heard = pump_until(&mut files, |heard| heard.len() == 10);
+        let mut ids: Vec<u64> = heard
+            .iter()
+            .map(|each| match each {
+                Heard::Read { id, result: Ok(_) } => *id,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=10).collect::<Vec<_>>());
+        assert_eq!((files.reading, files.reads_waiting.len()), (0, 0));
+    }
+
+    /// **A watch ends when its directory goes** (#473): told `removed` once,
+    /// even when its file was removed with the directory, and then ended.
+    #[test]
+    fn a_watch_ends_when_its_directory_goes() {
+        let dir = scratch("directory-gone");
+        let mut files = Files::default();
+        // One file that is there, and one that never was.
+        fs::write(dir.join("here"), "x").expect("writing");
+        files.watch(1, &dir.join("here"), "here".to_owned());
+        files.watch(2, &dir.join("never"), "never".to_owned());
+        fs::remove_dir_all(&dir).expect("removing the directory");
+        let heard = pump_until(&mut files, |heard| {
+            heard
+                .iter()
+                .filter(|each| matches!(each, Heard::WatchEnded { .. }))
+                .count()
+                == 2
+        });
+        let told = |id: u64| -> Vec<&Heard> {
+            heard
+                .iter()
+                .filter(|each| {
+                    matches!(each, Heard::Watched { id: each, .. } | Heard::WatchEnded { id: each } if *each == id)
+                })
+                .collect()
+        };
+        for id in [1, 2] {
+            let path = if id == 1 { "here" } else { "never" };
+            assert_eq!(
+                told(id),
+                [
+                    &Heard::Watched {
+                        id,
+                        kind: Kind::Removed,
+                        path: path.to_owned()
+                    },
+                    &Heard::WatchEnded { id }
+                ]
+            );
+        }
+        assert_eq!(files.watching(), 0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(files.pump(), []);
+    }
+
+    /// **The end waits for writes, but not for ever**: one that lands in
+    /// time is waited for, and past the bound the rest are given up.
+    #[test]
+    fn the_end_waits_for_writes_but_not_for_ever() {
+        let dir = scratch("end");
+        let mut files = Files::default();
+        files.write(WriteRequest {
+            id: 1,
+            path: dir.join("landed"),
+            data: b"yes".to_vec(),
+            report: false,
+        });
+        files.wait_for_writes_within(Duration::from_secs(10));
+        assert_eq!(
+            fs::read_to_string(dir.join("landed")).ok().as_deref(),
+            Some("yes")
+        );
+        // Its temporary file a FIFO with no reader, so the write's open
+        // waits for ever.
+        let held = dir.join("held");
+        let made = std::process::Command::new("mkfifo")
+            .arg(temporary(&held))
+            .status();
+        assert!(made.is_ok_and(|status| status.success()), "mkfifo");
+        let mut files = Files::default();
+        files.write(WriteRequest {
+            id: 2,
+            path: held.clone(),
+            data: b"x".to_vec(),
+            report: false,
+        });
+        let started = Instant::now();
+        files.wait_for_writes_within(Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited past the bound"
+        );
+        assert_eq!(files.writing(), 0, "a write that never landed was kept");
+        // Let the stuck thread go.
+        let _ = fs::OpenOptions::new().read(true).open(temporary(&held));
         let _ = fs::remove_dir_all(dir);
     }
 
