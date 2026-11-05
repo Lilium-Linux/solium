@@ -1724,15 +1724,42 @@ Login also sends the session's stderr, which carries the same lines, to
 `~/.local/share/plasmalogin/wayland-session.log`, and truncates that at each
 login (`O_TRUNC` in its `src/helper/UserSession.cpp`).
 
-### A Fedora package
+### Fedora packages from COPR
+
+Two packages are built in COPR (#486), so a Fedora machine installs Solium and
+updates it with `dnf upgrade`, and builds nothing:
+
+| Package | Built from | Version |
+|---|---|---|
+| `solium-stage` | every push to `stage` | `<version>^<date>.<count>.git<commit>`, newer with each push |
+| `solium` | every release (`release.yml`) | Cargo.toml's, which the release bumps |
+
+They conflict, so a machine has one of them:
+
+```sh
+sudo dnf copr enable <owner>/<project>    # the repository's COPR_PROJECT
+sudo dnf install solium-stage             # or solium
+```
+
+`.github/workflows/package.yml` makes the source package with
+`dev/rpm/srpm.sh stage|release`, which writes the commit, its date, the
+commit count and the version into `dev/rpm/solium.spec` and puts every crate
+`Cargo.lock` names beside the source, because COPR builds offline. It sends
+the package to COPR with `copr-cli` and waits, so a package that fails to
+build fails the run. Until the repository has the secret `COPR_CONFIG` (the
+API token file from https://copr.fedorainfracloud.org/api/) and the variable
+`COPR_PROJECT` (`owner/project`), the source package is only an artifact of
+the run. The COPR project builds for each Fedora release it has a chroot for.
+
+### A Fedora package from the checkout
 
 A development snapshot of the commit checked out, as an RPM that dnf installs
 and removes, for Fedora 44 machines that have neither Rust nor the build image:
 
 ```sh
 dev/rpm.sh                     # build, package, check unpacked, print the dnf line
-sudo dnf install ./target/rpm/RPMS/x86_64/solium-0.0.0~git<date>.<commit>-1.fc44.x86_64.rpm
-sudo dnf remove solium
+sudo dnf install ./target/rpm/RPMS/x86_64/solium-stage-<version>^<date>.<count>.git<commit>-1.fc44.x86_64.rpm
+sudo dnf remove solium-stage
 ```
 
 `dev/rpm.sh` builds the release binary with `dev/build-release.sh`, the same
@@ -1748,7 +1775,7 @@ to run on a host that is not Fedora. It takes the Qt version for the
 whole log is `target/rpm/rpmbuild.log`, and the unpacked package's `--check`
 log is `target/rpm/check.log`.
 It refuses uncommitted changes, because the package is named after its commit
-(`0.0.0~git<commit date>.<short hash>`), and a build image of another Fedora
+(`<version>^<commit date>.<commit count>.git<short hash>`), and a build image of another Fedora
 release than the host's. Then it checks the package without installing it:
 unpacked into `target/rpm/unpacked`, its `solium --check` has to pass with an
 empty configuration and log `shipped assets root=` that root's

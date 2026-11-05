@@ -439,10 +439,10 @@ echo "a system prefix: the layout a package installs"
 # --prefix /usr, as the Fedora package's %install runs it (dev/rpm/solium.spec):
 # everything under the prefix, where systemd, xdg-desktop-portal and the
 # display manager read system files, and nothing in the user's configuration.
-# Into a DESTDIR with a ~ in it, as rpmbuild's buildroot has (the version is
-# 0.0.0~git...), and with the broken configuration above as XDG_CONFIG_HOME:
+# Into a DESTDIR with a ~ and a ^ in it, as rpmbuild's buildroot has (a
+# snapshot version, #486), and with the broken configuration above as XDG_CONFIG_HOME:
 # what is checked is the configuration every user gets, not this user's.
-sys="$work/BUILDROOT-0.0.0~git"
+sys="$work/BUILDROOT-0.3.0~rc^20261105.1.gitabc1234"
 sys_share="$sys/usr/share/solium"
 XDG_CONFIG_HOME="$broken" DESTDIR="$sys" "$install_sh" --no-build --prefix /usr \
     >"$work/system.log" 2>&1
@@ -612,9 +612,19 @@ if command -v rpmspec >/dev/null; then
     rpmspec -q "$spec" >"$work/rpmspec-bare.log" 2>&1
     check "the spec refuses to parse without commit and commitdate" [ $? -ne 0 ]
     check "  saying what to define" grep -q "define commit" "$work/rpmspec-bare.log"
-    check "  and with them its version is 0.0.0~git<commitdate>.<commit>" \
-        [ "$(rpmspec -q --with prebuilt --define 'commit abc1234' --define 'commitdate 20261001' \
-            --qf '%{version}\n' "$spec" 2>/dev/null)" = "0.0.0~git20261001.abc1234" ]
+    q() { rpmspec -q --with prebuilt --define 'commit abc1234' --define 'commitdate 20261001' \
+        --define 'count 42' --define 'base 0.3.0' "$@" "$spec" 2>/dev/null; }
+    check "  and with them it is solium-stage, a snapshot after the version (#486)" \
+        [ "$(q --qf '%{name} %{version}\n')" = "solium-stage 0.3.0^20261001.42.gitabc1234" ]
+    check "  which conflicts with solium" [ "$(q --conflicts)" = "solium" ]
+    check "  and --without stage it is solium at the version" \
+        [ "$(q --without stage --qf '%{name} %{version}\n')" = "solium 0.3.0" ]
+    check "  which conflicts with solium-stage" [ "$(q --without stage --conflicts)" = "solium-stage" ]
+    check "  and a later snapshot, and the next version, are newer" \
+        python3 -c "import rpm, sys
+s = lambda v: ('0', v, '1')
+sys.exit(not (rpm.labelCompare(s('0.3.0^20261001.43.gitdef5678'), s('0.3.0^20261001.42.gitabc1234')) > 0
+              and rpm.labelCompare(s('0.3.1'), s('0.3.0^20261001.42.gitabc1234')) > 0))"
     # Qt's symbols are all versioned Qt_6, so rpm's own dependencies take any
     # Qt 6; dev/rpm.sh defines _qt6_version as the build image's.
     check "  and it Requires the Qt it was built against, or newer" \

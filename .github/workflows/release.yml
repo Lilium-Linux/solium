@@ -1,9 +1,10 @@
 name: Release
 
-# A merge to `release` builds, verifies, and attaches a source tarball to a
-# DRAFT GitHub Release. Nothing becomes public without a human pressing
-# publish -- a release people may already have fetched is unpleasant to
-# retract, and a draft costs one click.
+# A merge to `release` builds, verifies, bumps the version, publishes a GitHub
+# Release with the source tarball, and has package.yml build the `solium`
+# Fedora package of it in COPR (#486). The merge is the human step: nothing
+# reaches `release` but a merge the maintainer makes, so the release after it
+# is published rather than left as a draft for a second click.
 on:
   push:
     branches: [release]
@@ -33,7 +34,7 @@ jobs:
   # trusted a green run on some ancestor commit would be trusting a merge
   # nobody tested. It costs a few minutes.
   verify:
-    # A manual run can be started from any branch, and the draft job pushes the
+    # A manual run can be started from any branch, and the publish job pushes the
     # bump to `release`: from anywhere else that would fast-forward `release`
     # past the merge that is supposed to be the only way in.
     if: github.ref == 'refs/heads/release'
@@ -81,12 +82,14 @@ jobs:
       - name: Scripts
         run: ./target/debug/solium --check
 
-  draft:
+  publish:
     needs: verify
     if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      head: ${{ steps.head.outputs.head }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -197,6 +200,12 @@ jobs:
           git commit -m "release ${{ steps.version.outputs.tag }} (${{ steps.version.outputs.level }})"
           git push origin HEAD:release
 
+      # What package.yml packages: the bump commit, whose Cargo.toml says the
+      # version.
+      - name: The released commit
+        id: head
+        run: echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # The source tarball is the real artifact, and for a compositor that is
       # not a compromise. A vendored C dependency compiles against whatever
       # libc builds it, so a binary built here starts only on a matching
@@ -219,7 +228,7 @@ jobs:
           sha256sum "solium-${{ steps.version.outputs.version }}.tar.zst" \
             > "solium-${{ steps.version.outputs.version }}.tar.zst.sha256"
 
-      - name: Draft release
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -230,7 +239,6 @@ jobs:
           # merge the verify job tested.
           head="$(git rev-parse HEAD)"
           gh release create "$tag" \
-            --draft \
             --target "$head" \
             --title "$tag" \
             --notes "Source release of Solium $version.
@@ -238,8 +246,10 @@ jobs:
           Built from \`$head\`, the version bump on top of \`$GITHUB_SHA\`,
           which is the tree the checks ran on.
 
-          **Installing:** build from source — see the README's Building
-          section. An installed copy finds its QML and Lua wherever
+          **Installing on Fedora:** \`sudo dnf copr enable ${{ vars.COPR_PROJECT }}\`,
+          then \`sudo dnf install solium\`; \`dnf upgrade\` brings each
+          release after it. **Elsewhere:** build from source — see the
+          README's Building section. An installed copy finds its QML and Lua wherever
           \`SOLIUM_DATADIR\` pointed when it was built, under
           \`share/solium\` beside its \`bin\` directory, or in
           \`/usr/share/solium\`. Its lock screen checks a password with
@@ -256,3 +266,12 @@ jobs:
           \`\`\`" \
             "solium-$version.tar.zst" \
             "solium-$version.tar.zst.sha256"
+
+  # The Fedora package of the commit just released.
+  package:
+    needs: publish
+    uses: ./.github/workflows/package.yml
+    with:
+      kind: release
+      ref: ${{ needs.publish.outputs.head }}
+    secrets: inherit
