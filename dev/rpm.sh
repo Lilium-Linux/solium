@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build a Fedora package of this checkout's commit (#66): a development
-# snapshot, target/rpm/RPMS/<arch>/solium-0.0.0~git<date>.<commit>-1.fc<N>.<arch>.rpm.
+# Build a Fedora package of this checkout's commit (#66): solium-stage, a
+# development snapshot (#486),
+# target/rpm/RPMS/<arch>/solium-stage-<version>^<date>.<count>.git<commit>-1.fc<N>.<arch>.rpm.
 #
 # The release binary is built in the build container, through the shared lock
 # and capped, exactly as dev/install.sh builds it (dev/build-release.sh).
@@ -81,7 +82,9 @@ built="$root/target/install/release/solium"
 
 commit="$(git -C "$root" rev-parse --short=7 HEAD)"
 commitdate="$(TZ=UTC git -C "$root" show -s --format=%cd --date=format-local:%Y%m%d HEAD)"
-version="0.0.0~git$commitdate.$commit"
+count="$(git -C "$root" rev-list --count HEAD)"
+base="$(sed -n '0,/^version *= *"\(.*\)"/s//\1/p' "$root/Cargo.toml" | tail -1)"
+version="$base^$commitdate.$count.git$commit"
 
 topdir="$root/target/rpm"
 [[ ! -L "$topdir" ]] || die "$topdir is a link, and this script empties it: remove the link first"
@@ -98,6 +101,8 @@ if ! rpmbuild -bb --with prebuilt \
     --define "_topdir $topdir" \
     --define "commit $commit" \
     --define "commitdate $commitdate" \
+    --define "count $count" \
+    --define "base $base" \
     --define "_qt6_version $qt_version" \
     "$root/dev/rpm/solium.spec" >"$log" 2>&1; then
     tail -30 "$log" >&2
@@ -106,7 +111,7 @@ fi
 # rpmbuild's warnings, which a passing build buries in its log.
 warnings="$(sed -n '/^RPM build warnings:$/,$p' "$log")"
 shopt -s nullglob
-packages=("$topdir"/RPMS/*/solium-"$version"-*.rpm)
+packages=("$topdir"/RPMS/*/solium-stage-"$version"-*.rpm)
 shopt -u nullglob
 [[ ${#packages[@]} -eq 1 ]] || die "rpmbuild left ${#packages[@]} packages for $version in $topdir/RPMS"
 package="${packages[0]}"
@@ -179,5 +184,5 @@ Then log out and pick Solium from the session list, or log in on a text
 console (Ctrl+Alt+F3) and run \`solium --tty\`. \`solium --probe\`, safe inside
 a running desktop, says first what the hardware offers.
 
-To remove it: sudo dnf remove solium
+To remove it: sudo dnf remove solium-stage
 EOF

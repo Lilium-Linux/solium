@@ -188,7 +188,15 @@ There is no published package repository yet.
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/  # once
 dev/rpm.sh
-sudo dnf install ./target/rpm/RPMS/x86_64/solium-0.0.0~git*.rpm
+sudo dnf install ./target/rpm/RPMS/x86_64/solium-stage-*.rpm
+```
+
+Or without building anything, from COPR, where every push to `stage` and
+every release is built (dev/README.md, *Fedora packages from COPR*):
+
+```sh
+sudo dnf copr enable liliumlinux/solium
+sudo dnf install solium-stage    # or solium, the releases
 ```
 
 The script builds a development snapshot and needs `rpmbuild` on the host

@@ -1,0 +1,92 @@
+name: Package
+
+# The Fedora packages (#486), built in COPR so a machine installs and updates
+# Solium with dnf and never builds it:
+#
+# - every push to `stage` builds solium-stage, a snapshot of that commit whose
+#   version rises with each push (dev/rpm/solium.spec);
+# - release.yml calls this for every release, which builds solium at the
+#   version it bumped.
+#
+# Here only the source package is made (dev/rpm/srpm.sh), with every crate in
+# it; COPR compiles it, for each Fedora release its project names. The run
+# waits for COPR, so a package that fails to build fails this run.
+#
+# Until the repository has the secret COPR_CONFIG (the API token COPR shows at
+# https://copr.fedorainfracloud.org/api/, the whole file) and the variable
+# COPR_PROJECT (owner/project), the source package is kept as an artifact of
+# the run instead, and nothing is sent anywhere.
+on:
+  push:
+    branches: [stage]
+  workflow_call:
+    inputs:
+      kind:
+        description: "stage or release"
+        required: true
+        type: string
+      ref:
+        description: "The commit to package"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Which package"
+        required: true
+        default: stage
+        type: choice
+        options: [stage, release]
+
+permissions:
+  contents: read
+
+# One COPR submission per package at a time; a newer stage push replaces one
+# still waiting for its turn.
+concurrency:
+  group: package-${{ inputs.kind || 'stage' }}
+  cancel-in-progress: false
+
+jobs:
+  srpm:
+    runs-on: ubuntu-latest
+    # The Fedora the packages are for; keep in step with ci.yml.
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      # git before the checkout, for ci.yml's reason; cargo for `cargo
+      # vendor`, which only downloads, so Fedora's own is enough.
+      - name: Tools
+        run: dnf install -y --setopt=install_weak_deps=False git cargo rpm-build copr-cli
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # The whole history: the snapshot's version counts its commits.
+          fetch-depth: 0
+
+      - name: Source package
+        id: srpm
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          path="$(dev/rpm/srpm.sh "${{ inputs.kind || 'stage' }}" "$RUNNER_TEMP/srpm")"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "built ${path##*/}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: srpm-${{ inputs.kind || 'stage' }}
+          path: ${{ steps.srpm.outputs.path }}
+          retention-days: 14
+
+      - name: Build in COPR
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          COPR_PROJECT: ${{ vars.COPR_PROJECT }}
+        run: |
+          if [ -z "$COPR_CONFIG" ] || [ -z "$COPR_PROJECT" ]; then
+            echo "::notice::COPR is not set up (secret COPR_CONFIG, variable COPR_PROJECT): the source package is this run's artifact"
+            exit 0
+          fi
+          mkdir -p ~/.config
+          printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
+          copr-cli build "$COPR_PROJECT" "${{ steps.srpm.outputs.path }}"

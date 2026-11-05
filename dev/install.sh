@@ -121,12 +121,13 @@ config_home="${config_home%"${config_home##*[!/]}"}"
 [[ -n "$config_home" ]] || die "/ is not a usable XDG_CONFIG_HOME"
 destdir="${DESTDIR:-}"
 [[ -z "$destdir" || "$destdir" == /* ]] || die "DESTDIR must be an absolute path: $destdir"
-# And ~, which rpmbuild's buildroot has, the version being 0.0.0~git...
-# DESTDIR is never in the Exec line, and in the printed uninstall line a ~ that
-# does not start a word is only a ~. dev/install-check.sh's "a system prefix"
+# And ~ and ^, which rpmbuild's buildroot has, the version being a snapshot
+# such as 0.3.0^20261105.1562.gitabc1234 (#486). DESTDIR is never in the Exec
+# line, and in the printed uninstall line a ~ that does not start a word is
+# only a ~, and a ^ only a ^. dev/install-check.sh's "a system prefix"
 # installs into one.
-[[ -z "$destdir" || "$destdir" =~ ^[A-Za-z0-9._/+@~-]+$ ]] \
-    || die "DESTDIR may only contain letters, digits and ._/+@~-: $destdir"
+[[ -z "$destdir" || "$destdir" =~ ^[A-Za-z0-9._/+@~^-]+$ ]] \
+    || die "DESTDIR may only contain letters, digits and ._/+@~^-: $destdir"
 # Every trailing slash goes, so `/` and `//` come out empty and are refused
 # (as a prefix, they would put the binary at /bin/solium). dev/install-check.sh
 # asserts the refusal of `--prefix /` and of `--session-dir //`.
