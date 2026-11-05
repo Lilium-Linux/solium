@@ -728,8 +728,8 @@ metadata daemon, which nothing here can assume is running), so trust is kept
 the simplest durable way this repo already has instead -- a plain file of
 trusted absolute paths under `$XDG_DATA_HOME/solium/desktop-trust`
 (`crate::folder::Trust`), the same `fs::write` shape `session.rs` and
-`launch.rs` already use for small state. `sol.store` would be the natural
-fit once it exists. `done`'s `reason` here adds `"unknown-file"` (no such
+`launch.rs` already use for small state. It predates `sol.store` (#473),
+which now gives Lua the same durability. `done`'s `reason` here adds `"unknown-file"` (no such
 entry), `"no-handler"` (no default application for the MIME type) and
 `"untrusted"` (an un-trusted launcher) to the vocabulary above -- not yet
 listed there, the same gap `apps.launch`'s own `"unknown-app"` already left.
@@ -739,7 +739,7 @@ What is cut from this version: a subdirectory is one `isDir` row, not walked
 `/usr/share/mime/globs2`'s extension table, by hand, with no content
 sniffing; hidden follows only the leading-dot convention, not a `.hidden`
 list; `folder.open_with` (quick search as an app picker) and a durable,
-position-aware store once `sol.store` exists are both `Later`
+position-aware store, which `sol.store` (#473) can now hold, are both `Later`
 (`crates/solium/src/folder.rs`'s own module doc has the rest).
 
 **The keyboard, live.** `Keyboard`, written unqualified like `Theme`, is the

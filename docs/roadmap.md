@@ -28,7 +28,6 @@ Complete portal workflows and make failures diagnosable. This work gates a
 credible public preview more directly than adding another visual mode.
 
 Tracking: [daily-drive queue](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive),
-[#64](https://github.com/Lilium-Linux/solium/issues/64),
 [#65](https://github.com/Lilium-Linux/solium/issues/65),
 [#83](https://github.com/Lilium-Linux/solium/issues/83).
 
@@ -36,12 +35,14 @@ Tracking: [daily-drive queue](https://github.com/Lilium-Linux/solium/issues?q=is
 
 The preview already supplies a bar, dock, search and desktop icons. Complete
 service-backed UI, widgets and native locking while keeping the whole desktop
-replaceable configuration. Improve external-shell compatibility through the
-missing management protocols rather than requiring every shell to be hosted.
+replaceable configuration. A shell that is its own program can already
+manage windows, workspaces and monitors through Wayland protocols (#50, #60,
+#51); what it still lacks is a way to be trusted with the clipboard and
+per-window icons.
 
 Tracking: [hosted desktop](https://github.com/Lilium-Linux/solium/issues/169),
-[window management](https://github.com/Lilium-Linux/solium/issues/50),
-[workspaces](https://github.com/Lilium-Linux/solium/issues/60).
+[trusted clients](https://github.com/Lilium-Linux/solium/issues/68),
+[window icons](https://github.com/Lilium-Linux/solium/issues/73).
 
 ## Effects and presentation
 
@@ -60,7 +61,7 @@ Tracking: [effects](https://github.com/Lilium-Linux/solium/issues/87),
 
 ## Input, settings and form factors
 
-Extend touch from client surfaces to compositor UI, then add configurable
+Touch reaches client surfaces and compositor UI. Add configurable
 trackpad/touchscreen gestures that can drive animation progress. Complete
 input methods, on-screen keyboards and tablet tools. Build settings UI over
 declared configuration instead of introducing another source of truth.
@@ -78,7 +79,8 @@ Tracking: [touch/form factors](https://github.com/Lilium-Linux/solium/issues/7),
 
 Validate explicit sync on real sessions; add multi-GPU output and color
 management/HDR. Improve fullscreen
-presentation, shortcut inhibition, VR support and game-streaming workflows.
+presentation, VR support and game-streaming workflows; shortcut inhibition for
+games, VMs and remote desktops is in place (#245).
 These need real driver and device checks alongside automated coverage.
 
 Tracking: [explicit sync](https://github.com/Lilium-Linux/solium/issues/59),
@@ -88,8 +90,8 @@ Tracking: [explicit sync](https://github.com/Lilium-Linux/solium/issues/59),
 
 ## Distribution and extensibility
 
-Checkout installs and Fedora RPM builds exist. Publish installable, updatable
-packages and broaden distribution coverage once their session and runtime
+Fedora 44 and 45 packages are published in COPR and update with dnf (#486).
+Broaden distribution coverage, Arch first, once each one's session and runtime
 requirements are validated. WebAssembly components are a longer-term extension
 direction; Lua remains the current scripting API.
 
