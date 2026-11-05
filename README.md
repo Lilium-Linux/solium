@@ -2,6 +2,16 @@
   <img src="docs/brand/logotype.svg" width="320" alt="Solium">
 </p>
 
+<p align="center">
+  <a href="https://github.com/Lilium-Linux/solium/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Lilium-Linux/solium/actions/workflows/ci.yml/badge.svg?branch=stage"></a>
+  <a href="https://lilium-linux.github.io/solium/"><img alt="Documentation" src="https://github.com/Lilium-Linux/solium/actions/workflows/docs.yml/badge.svg?branch=stage"></a>
+  <a href="https://copr.fedorainfracloud.org/coprs/liliumlinux/solium/"><img alt="Fedora package (COPR)" src="https://copr.fedorainfracloud.org/coprs/liliumlinux/solium/package/solium-stage/status_image/last_build.png"></a>
+  <a href="https://github.com/Lilium-Linux/solium/releases"><img alt="Latest build" src="https://img.shields.io/github/v/release/Lilium-Linux/solium?include_prereleases&label=latest%20build"></a>
+  <a href="https://github.com/Lilium-Linux/solium/blob/stage/LICENSE"><img alt="Licence: GPL-3.0" src="https://img.shields.io/badge/licence-GPL--3.0-blue"></a>
+  <a href="https://github.com/Lilium-Linux/solium/blob/stage/rust-toolchain.toml"><img alt="Rust 1.99.1" src="https://img.shields.io/badge/rust-1.99.1-orange?logo=rust"></a>
+  <a href="https://discord.gg/ATQNfHHvFa"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white"></a>
+</p>
+
 # Solium
 
 A standalone Wayland compositor written in Rust on
@@ -12,7 +22,7 @@ Solium combines floating, tiling, scrolling and overview modes with a shared
 presentation and animation engine. Layout policy, desktop UI and effects are
 files you can change without rebuilding the compositor.
 
-[Documentation](https://lilium-linux.github.io/solium/) ·
+[Install on Fedora](#install) · [Documentation](https://lilium-linux.github.io/solium/) ·
 [Known limitations](docs/gaps.md) · [Roadmap](docs/roadmap.md) ·
 [Contributing](CONTRIBUTING.md) · [Discord](https://discord.gg/ATQNfHHvFa)
 
@@ -180,23 +190,27 @@ before testing on hardware.
 
 ## Install
 
-There are checkout-based installation tools and a Fedora 44 RPM build script.
-There is no published package repository yet.
+**Fedora 44 and 45, from [COPR](https://copr.fedorainfracloud.org/coprs/liliumlinux/solium/)**,
+with nothing to build:
 
-**Fedora 44 package:**
+```sh
+sudo dnf copr enable liliumlinux/solium
+sudo dnf install solium-stage
+```
+
+`solium-stage` is built from every push to `stage`, and `dnf upgrade` brings
+each one after it. `solium` will hold the releases; the two conflict, so a
+machine has one of them. Each stage build is also a
+[prerelease on GitHub](https://github.com/Lilium-Linux/solium/releases) with its RPM for each Fedora release, for
+`sudo dnf install ./<file>` without the repository. Log out and pick Solium at
+the login screen. `sudo dnf remove solium-stage` takes it out again.
+
+**A Fedora package from the checkout:**
 
 ```sh
 podman build -t solium-build:fc44 -f dev/Containerfile dev/  # once
 dev/rpm.sh
 sudo dnf install ./target/rpm/RPMS/x86_64/solium-stage-*.rpm
-```
-
-Or without building anything, from COPR, where every push to `stage` and
-every release is built (dev/README.md, *Fedora packages from COPR*):
-
-```sh
-sudo dnf copr enable liliumlinux/solium
-sudo dnf install solium-stage    # or solium, the releases
 ```
 
 The script builds a development snapshot and needs `rpmbuild` on the host
@@ -222,7 +236,8 @@ for other build options, upgrades and removal.
 
 The installed copy does not change when you rebuild the checkout. To remove a
 local install, run `dev/install.sh --uninstall` and follow its printed command
-for removing the session entry. Remove the RPM with `sudo dnf remove solium`.
+for removing the session entry. Remove the package with
+`sudo dnf remove solium-stage` (or `solium`).
 Your configuration and logs remain.
 
 The session wrapper starts graphical-session services and XDG autostart.
