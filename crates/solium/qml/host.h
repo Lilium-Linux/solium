@@ -333,6 +333,17 @@ int solium_qml_scene_watch_for_test(SoliumQmlScene *scene, int fd, const char *n
 int solium_qml_let_go_for_test(SoliumQmlScene *scene);
 
 /*
+ * Wait, up to `timeout_ms`, until Qt's worker-script thread has handled
+ * everything posted to it before the call: among it, the delete of each
+ * freed scene's `WorkerScript` engine, which must not run into the process's
+ * exit (#503, `qml/host.cpp`). 1 when it has, or when there is no such thread;
+ * 0 when the time ran out first. On the Qt thread. The test harness calls it
+ * after each piece of work it runs there:
+ * `qml::tests::the_qt_threads_work_ends_with_the_worker_scripts_it_freed_gone`.
+ */
+int solium_qml_settle_workers(int timeout_ms);
+
+/*
  * For tests: which `Solium.Theme` an engine given `import_path` the way the
  * compositor's own is given it resolves, read as the int property `mark` off
  * that singleton; INT_MIN when nothing resolves. A fresh engine of its own,
