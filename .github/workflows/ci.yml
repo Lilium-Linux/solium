@@ -5,6 +5,13 @@ on:
     branches: [stage, release]
   pull_request:
 
+# A new push to a pull request replaces its run still in progress: nobody reads
+# the result for a commit that is no longer the branch. A push to `stage` or
+# `release` always runs to the end, since each one is a merge to check (#479).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -46,8 +53,15 @@ jobs:
 
       - uses: actions/checkout@v5
 
+      # The version rust-toolchain.toml pins, so that file is the one place
+      # it is written (#479).
+      - name: Rust version
+        id: rust
+        run: echo "version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -101,9 +115,13 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - name: Rust version
+        id: rust
+        run: echo "version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.version }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 

@@ -1,8 +1,12 @@
-# The Rust toolchain, for rustup: the current stable, as CI builds with, and
-# the two components dev/gate.sh runs. rustup installs both on the first cargo
-# command in this checkout. The oldest Rust that builds Solium is
-# Cargo.toml's `rust-version`.
+# The Rust toolchain, for rustup: one exact version, the one the gate and CI
+# both build with (CI's workflows read it from this line), and the two
+# components dev/gate.sh runs. rustup installs both on the first cargo command
+# in this checkout. Not "stable": that is whatever each machine last
+# installed, and every machine that differs rebuilds every dependency and
+# runs a different clippy (#479). Moving to a newer Rust is a pull request
+# that changes this line. The oldest Rust that builds Solium is Cargo.toml's
+# `rust-version`.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
