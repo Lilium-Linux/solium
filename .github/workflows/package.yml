@@ -58,7 +58,7 @@ jobs:
       - name: Tools
         run: dnf install -y --setopt=install_weak_deps=False git cargo rpm-build copr-cli
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
           # The whole history: the snapshot's version counts its commits.
@@ -72,7 +72,7 @@ jobs:
           echo "path=$path" >> "$GITHUB_OUTPUT"
           echo "built ${path##*/}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: srpm-${{ inputs.kind || 'stage' }}
           path: ${{ steps.srpm.outputs.path }}
