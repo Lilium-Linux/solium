@@ -328,10 +328,15 @@
 ---@class sol.RunOptions
 ---@field cwd? string The directory it runs in. Default: Solium's.
 ---@field env? table<string, string|false> Variables set on top of the environment every program Solium starts gets, or removed from it with `false`.
----@field timeout? number Milliseconds before it is killed, with every process it started. Default 30000.
----@field max_output? integer Bytes kept of each of stdout and stderr; past it the stream is closed and `truncated` is true. Default 1048576 (1 MiB).
+---@field timeout? number Milliseconds before it is killed, with every process it started. Default `run.timeout` in `config.lua`, 30000.
+---@field max_output? integer Bytes kept of each of stdout and stderr; past it the stream is closed and `truncated` is true. Default `run.max_output` in `config.lua`, 1048576 (1 MiB).
 ---@field lines? fun(line: string, stream: "stdout"|"stderr") Called with each line as it arrives.
 ---@field done? fun(result: sol.RunResult) Called once, when it has ended.
+
+---`config.lua`'s `run`: what a `sol.run{}` takes when it does not say (#472).
+---@class sol.RunDefaults
+---@field timeout? number Milliseconds before a command is killed, above 0. Default 30000.
+---@field max_output? integer Bytes kept of each stream, 0 or more. Default 1048576 (1 MiB).
 
 ---How a program `sol.run` started ended (#472).
 ---@class sol.RunResult
@@ -1747,8 +1752,12 @@ function sol.spawn(program, ...) end
 ---more at the end for a last line with no newline; `done` once, after the
 ---last line, with a `sol.RunResult`. At `timeout` the child is killed with
 ---every process it started, and `timed_out` is true. Past `max_output` bytes
----a stream is closed: what was read is kept, `truncated` is true, and a child
----that writes on gets `SIGPIPE`, as one piped into `head` would. Lines and
+---a stream is closed: what was read is kept and `truncated` is true. Because
+---the pipe is closed, a child still writing ends with `SIGPIPE` (`signal`
+---13), as one piped into `head` would. Output a process the child started
+---writes after the child itself has exited is not read. The defaults for
+---`timeout` and `max_output` are `config.lua`'s `run` (`sol.run_defaults`).
+---Lines and
 ---`done` are dispatched like any event, each under the handler deadline. A
 ---reload kills every child this form started, and none of their functions is
 ---called again.
@@ -1757,6 +1766,13 @@ function sol.spawn(program, ...) end
 ---@param ... string
 ---@return nil
 function sol.run(program, ...) end
+
+---The defaults for what a `sol.run{}` leaves out: `config.run`, which the
+---shipped `init.lua` hands over (#472). A key left out, or one of the wrong
+---kind, keeps the built-in default, and a call's own option wins over either.
+---@param options? sol.RunDefaults
+---@return nil
+function sol.run_defaults(options) end
 
 ---Call `fn` once, `ms` milliseconds from now, on the compositor's clock: the
 ---one animations and QML run on. Checked once each time round the event loop,

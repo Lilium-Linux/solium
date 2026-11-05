@@ -1991,7 +1991,17 @@ Nothing waits for the command: Solium reads it each time round its loop and
 goes on drawing meanwhile. Each run is bounded, by `timeout` (milliseconds,
 default 30000), after which the command is killed with everything it
 started, and `max_output` (bytes of each stream, default 1 MiB), past which
-Solium stops reading and the result says `truncated`. `cwd` and `env` (a
+Solium stops reading and the result says `truncated`. Solium stops by closing
+the pipe, so a command still writing then ends with `SIGPIPE` (`signal` 13).
+Only the command itself is waited for: output that something it started
+writes after the command has exited is not read. The two defaults are
+`config.lua`'s `run`, and a call's own options win over them:
+
+```lua
+return { run = { timeout = 10000, max_output = 65536 } }
+```
+
+`cwd` and `env` (a
 variable to set, or `false` to remove one) are the rest of the options. The
 command starts as every program Solium starts does: the environment Solium
 was started with, no file descriptors of Solium's, a session of its own, and

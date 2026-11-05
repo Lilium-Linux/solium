@@ -7170,6 +7170,54 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // `config.run`, handed over by `init.lua` (#472): the timeout and the
+    // output cap a `sol.run{}` takes when its own options leave them out.
+    // Either left out, or of the wrong kind, keeps the default, named in the
+    // log, as every other `sol.<setting>` here does. Kept in this Lua state,
+    // where `run_read` builds each request, so a reload starts from the
+    // defaults until the new configuration hands them over again.
+    // `tests::sol_run_takes_the_configured_defaults_and_a_call_overrides_them`.
+    sol.set(
+        "run_defaults",
+        lua.create_function(|lua, options: Option<Table>| {
+            let mut defaults = RunDefaults::default();
+            if let Some(options) = options {
+                match options.get::<Value>("timeout") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value)
+                        .filter(|ms| *ms > 0.0)
+                        .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+                    {
+                        Some(timeout) => defaults.timeout = timeout,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "run.timeout is a number of milliseconds above 0; keeping the \
+                             default, 30000"
+                        ),
+                    },
+                }
+                match options.get::<Value>("max_output") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "checked to be a whole number from 0, and saturating past usize"
+                        )]
+                        Some(bytes) => defaults.max_output = bytes as usize,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "run.max_output is a whole number of bytes, 0 or more; keeping the \
+                             default, 1048576"
+                        ),
+                    },
+                }
+            }
+            lua.set_app_data(defaults);
+            Ok(())
+        })?,
+    )?;
+
     // `sol.after(ms, fn)` and `sol.every(ms, fn)` (#472): `fn` on the
     // compositor's clock, once or every `ms`, until the handle's `cancel`.
     // See `crate::timers`.
@@ -7528,6 +7576,23 @@ fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspac
 static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TIMERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// What a `sol.run{}` takes when its options leave a key out: `config.run`,
+/// through `sol.run_defaults`, or `crate::runs`'s own.
+#[derive(Debug, Clone, Copy)]
+struct RunDefaults {
+    timeout: Duration,
+    max_output: usize,
+}
+
+impl Default for RunDefaults {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_millis(crate::runs::TIMEOUT_MS),
+            max_output: crate::runs::MAX_OUTPUT,
+        }
+    }
+}
+
 /// The options `sol.run{}` reads, for its error about any other.
 const RUN_OPTIONS: [&str; 6] = ["cwd", "env", "timeout", "max_output", "lines", "done"];
 
@@ -7576,8 +7641,14 @@ fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Result<()
         }
         env.sort();
     }
+    let defaults = lua
+        .try_app_data_ref::<RunDefaults>()
+        .ok()
+        .flatten()
+        .map(|defaults| *defaults)
+        .unwrap_or_default();
     let timeout = match options.get::<Option<f64>>("timeout")? {
-        None => Duration::from_millis(crate::runs::TIMEOUT_MS),
+        None => defaults.timeout,
         Some(ms) if ms > 0.0 => Duration::try_from_secs_f64(ms / 1000.0)
             .map_err(|_| mlua::Error::runtime("sol.run's timeout is too long"))?,
         Some(_) => {
@@ -7587,7 +7658,7 @@ fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Result<()
         }
     };
     let max_output = match options.get::<Option<f64>>("max_output")? {
-        None => crate::runs::MAX_OUTPUT,
+        None => defaults.max_output,
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -15291,6 +15362,37 @@ mod tests {
         assert_eq!(
             statuses.last().map(String::as_str),
             Some("stdout:a,stderr:c,stdout:b|a\nb")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.run` takes the configured defaults, and a call overrides them**
+    /// (#472): `config.run`'s `timeout` and `max_output`, through
+    /// `sol.run_defaults`, are what a call that names neither gets; a value
+    /// of the wrong kind keeps the built-in default.
+    #[test]
+    fn sol_run_takes_the_configured_defaults_and_a_call_overrides_them() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-run-defaults",
+            r#"sol.run({ "true" })
+               sol.run_defaults({ timeout = 5000, max_output = 10 })
+               sol.run({ "true" })
+               sol.run({ "true" }, { timeout = 7000, max_output = 20 })
+               sol.run_defaults({ timeout = 0, max_output = "lots" })
+               sol.run({ "true" })"#,
+        );
+        let taken: Vec<(Duration, usize)> = run_requests(&scripts.startup())
+            .iter()
+            .map(|request| (request.timeout, request.max_output))
+            .collect();
+        assert_eq!(
+            taken,
+            [
+                (Duration::from_secs(30), 1 << 20),
+                (Duration::from_secs(5), 10),
+                (Duration::from_secs(7), 20),
+                (Duration::from_secs(30), 1 << 20),
+            ]
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
