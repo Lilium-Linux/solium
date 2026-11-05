@@ -7,6 +7,6 @@
 # that changes this line. The oldest Rust that builds Solium is Cargo.toml's
 # `rust-version`.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
