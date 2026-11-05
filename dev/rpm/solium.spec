@@ -36,6 +36,10 @@
 # No %changelog: a snapshot's history is its commit's. rpmbuild would warn that
 # it has no date to take from one, and dev/rpm.sh repeats any warning.
 %global source_date_epoch_from_changelog 0
+# Fedora's build flags make C and C++ objects LTO bytecode (-flto=auto). The
+# Qt host's C++ (build.rs) is linked by rustc, whose link step does not run
+# that LTO, so every Qt symbol it uses came out undefined. Ordinary objects.
+%global _lto_cflags %{nil}
 
 %if %{with stage}
 Name:           solium-stage
