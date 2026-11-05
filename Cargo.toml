@@ -43,6 +43,12 @@ todo        = "deny"
 # Dependencies are optimised even in dev builds. Smithay's tree is large and a
 # compositor that stutters under a debugger teaches nothing about smoothness.
 opt-level = 1
+# Line tables, not full debug information: a backtrace still names the file
+# and line, in our code and in every dependency, while the dev binary is a
+# third of the size (166 MB, not 471) and each edit links faster (#484). A
+# debugger that needs local variables gets them for one build with
+# CARGO_PROFILE_DEV_DEBUG=full.
+debug = "line-tables-only"
 
 # A panic stops the compositor where it happened (#283): see `main.rs`'s
 # `log_panics`, which aborts in every build once it has logged the panic. Only
