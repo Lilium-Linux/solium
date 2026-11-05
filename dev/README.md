@@ -1738,7 +1738,7 @@ updates it with `dnf upgrade`, and builds nothing:
 They conflict, so a machine has one of them:
 
 ```sh
-sudo dnf copr enable <owner>/<project>    # the repository's COPR_PROJECT
+sudo dnf copr enable liliumlinux/solium
 sudo dnf install solium-stage             # or solium
 ```
 

@@ -195,7 +195,7 @@ Or without building anything, from COPR, where every push to `stage` and
 every release is built (dev/README.md, *Fedora packages from COPR*):
 
 ```sh
-sudo dnf copr enable <owner>/<project>
+sudo dnf copr enable liliumlinux/solium
 sudo dnf install solium-stage    # or solium, the releases
 ```
 
