@@ -51,7 +51,7 @@ jobs:
             pipewire-devel clang-devel \
             pam
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The version rust-toolchain.toml pins, so that file is the one place
       # it is written (#479).
@@ -113,17 +113,17 @@ jobs:
             pipewire-devel clang-devel \
             pam python3
 
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Rust version
         id: rust
         run: echo "version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.rust.outputs.version }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Build the site
         run: SOLIUM_DOCS_TOOLS="${CARGO_HOME:-$HOME/.cargo}" dev/docs.sh

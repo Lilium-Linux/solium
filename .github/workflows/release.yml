@@ -55,7 +55,7 @@ jobs:
             qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel \
             pipewire-devel clang-devel
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Rust version
         id: rust
@@ -93,7 +93,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Full history: `git archive` below is fine shallow, but a shallow
           # clone has no tags, and the duplicate-tag guard needs to see them.
