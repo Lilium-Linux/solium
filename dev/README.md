@@ -273,7 +273,8 @@ reads one that file does not list.
 | `SOLIUM_TRIGGER_AT=<ms>:<combo>,...` | Run what these combinations are bound to, at these moments: `5200:super+space,6200:super+space`. Not a keypress: the binding is looked up by the name written, so it fires while the screen is locked, cannot press Ctrl+Alt+Backspace, and cannot show whether a binding works under another keyboard layout. | yes |
 | `SOLIUM_KEY_AT=<ms>:<key>,...` | Press real keys, by keysym name, through the real input path: `1500:caps_lock,3000:shift+alt_l`. Caps Lock locks, an xkb layout switch switches, and a bound combination runs its binding. See *Keys by name*. | yes |
 | `SOLIUM_TOUCH_AT=<ms>:<kind>:<slot>:<x>,<y>;…` | Replay down/motion/up/cancel samples through real touch routing at scheduled backend times. Coordinates are global logical pixels; use `0,0` placeholders for up/cancel. Invalid streams are rejected. Scripted input does not validate hardware. | yes |
-| `SOLIUM_DRAG_AT=<ms>:[<keys>@]<x1>,<y1>><x2>,<y2>;...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. Keys before an `@` are held for it: `super@` is the drag modifier's move. | yes |
+| `SOLIUM_DRAG_AT=<ms>:[<keys>@][<x1>,<y1>]><x2>,<y2>[~<ms>][#<button>];...` | Drag the pointer through the real input path: the real grab, hit-testing and layout scripts. A drag from a point to itself is a click. Keys before an `@` are held for it: `super@` is the drag modifier's move. `~<ms>` spreads it over that long, a step each frame; no start starts it where the pointer is; `#right` or `#middle` presses that button. | yes |
+| `SOLIUM_MOVE_AT=<ms>:[<keys>@][<x1>,<y1>]><x2>,<y2>[~<ms>];...` | Move the pointer as a drag does, pressing nothing: hover, enter and leave, and the cursor's shapes see it travel. | yes |
 | `SOLIUM_CLICK_AT=<ms>:<x>,<y>;...` | Hand a press to the mode holding the pointer, such as overview. It never touches the input path; see *Driving it without a keyboard*. | yes |
 | `SOLIUM_OUTPUTS=<n>` | Give the nested backend `n` monitors, 1 to 4, side by side in its one window. See *Two monitors, without a second monitor*. | yes |
 | `SOLIUM_OUTPUTS_AT=<ms>:<n>,...` | Change how many nested monitors there are at these moments: hotplug without a cable. | yes |
@@ -360,6 +361,18 @@ the real hit-testing, the real layout scripts:
 
 ```sh
 SOLIUM_DRAG_AT="8000:400,25>1200,500"    # at 8s, drag from (400,25) to (1200,500)
+```
+
+That drag happens inside one frame: twelve steps of motion between two
+passes, which is all a grab needs and a jump to anyone watching. For a
+capture, give it a duration after a `~`, and the pointer travels on an
+`inOutCubic` path, a step each frame, the way a hand moves a mouse (#498).
+`SOLIUM_MOVE_AT` is the same without a button, for hovering; leave out a
+route's start and it starts where the last one left the pointer:
+
+```sh
+SOLIUM_MOVE_AT="6000:200,400>620,40~500"            # over to a titlebar, in 500 ms
+SOLIUM_DRAG_AT="7000:>1100,420~800"                 # then drag it from there, in 800 ms
 ```
 
 Aim the *start* at a titlebar. A press in a client's own area does not begin a

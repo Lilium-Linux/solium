@@ -225,11 +225,23 @@ SOLIUM_TOUCH_AT=<ms>:<kind>:<slot>:<x>,<y>;...
     Up and cancel still require placeholder coordinates, for example
     `1000:up:0:0,0` or `1000:cancel:0:0,0`; those coordinates are ignored.
 
-SOLIUM_DRAG_AT=<ms>:[<keys>@]<x1>,<y1>><x2>,<y2>;...
+SOLIUM_DRAG_AT=<ms>:[<keys>@][<x1>,<y1>]><x2>,<y2>[~<ms>][#<button>];...
     **Nested only.** Drag the pointer from one place to another, through the
     real input path, the real grab and the real layout scripts. Keys named
     before an `@`, as `SOLIUM_KEY_AT` names them, are held down for the drag:
-    `4000:super@300,200>1200,600` is the drag modifier's move.
+    `4000:super@300,200>1200,600` is the drag modifier's move. With `~<ms>`
+    the pointer takes that long, on an eased path a step each frame, as a hand
+    moves it: `4000:300,200>1200,600~700`. Without, the drag happens inside
+    one frame. With no start, it starts wherever the pointer is. `#right` or
+    `#middle` presses that button instead of the left: `5000:400,25>400,25#right`
+    is a right click.
+
+SOLIUM_MOVE_AT=<ms>:[<keys>@][<x1>,<y1>]><x2>,<y2>[~<ms>];...
+    **Nested only.** Move the pointer as `SOLIUM_DRAG_AT` drags it, pressing
+    no button: through the real input path, so hovering, entering and leaving
+    a window, the cursor's shape and a frame that follows the pointer all see
+    it travel. `2000:400,300>900,320~600;3000:>900,600~400` goes on from
+    where the first move ended.
 
 SOLIUM_LOADING_AT=<ms>:<program>,...
     **Nested only.** Open a window for an application that will never arrive,

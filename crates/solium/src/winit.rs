@@ -559,6 +559,9 @@ pub(crate) fn run() -> Result<()> {
     let mut triggers = dev::triggers();
     let mut clicks = dev::clicks();
     let mut drags = dev::drags();
+    let mut moves = dev::moves();
+    // Drags and moves under way, a step each pass until they arrive (#498).
+    let mut journeys: Vec<synth::Journey> = Vec::new();
     let mut touches = dev::touches();
     let mut keys = dev::keys();
     let mut screen_changes = dev::outputs_at();
@@ -572,6 +575,7 @@ pub(crate) fn run() -> Result<()> {
     clicks.reverse();
     loadings.reverse();
     drags.reverse();
+    moves.reverse();
     touches.reverse();
     keys.reverse();
     screen_changes.reverse();
@@ -773,13 +777,30 @@ pub(crate) fn run() -> Result<()> {
                 synth::touch_frame(&mut state, region);
             }
         }
-        while drags.last().is_some_and(|(at, _, _, _)| now >= *at) {
-            if let Some((_, from, to, held)) = drags.pop() {
-                tracing::info!(?from, ?to, held, "scripted drag");
+        while drags.last().is_some_and(|drag| now >= drag.at) {
+            if let Some(drag) = drags.pop() {
+                tracing::info!(?drag, "scripted drag");
                 let region = crate::monitor::union(&state.space)
                     .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
-                synth::drag_holding(&mut state, region, from.into(), to.into(), 12, &held);
+                if drag.over.is_zero() {
+                    synth::drag_holding(&mut state, region, &drag, 12);
+                } else {
+                    journeys.push(synth::Journey::begin(&mut state, region, now, &drag, true));
+                }
             }
+        }
+        while moves.last().is_some_and(|step| now >= step.at) {
+            if let Some(step) = moves.pop() {
+                tracing::info!(?step, "scripted pointer move");
+                let region = crate::monitor::union(&state.space)
+                    .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+                journeys.push(synth::Journey::begin(&mut state, region, now, &step, false));
+            }
+        }
+        if !journeys.is_empty() {
+            let region = crate::monitor::union(&state.space)
+                .unwrap_or_else(|| Rectangle::from_size(size.to_logical(1)));
+            journeys.retain(|journey| !journey.step(&mut state, region, now));
         }
         while keys.last().is_some_and(|(at, _)| now >= *at) {
             if let Some((at, combo)) = keys.pop() {
