@@ -1,7 +1,7 @@
 # Known limitations
 
 Solium is alpha. This page describes compatibility gaps and known risks in the
-current implementation, checked against `stage` and the tracker on 2026-10-30.
+current implementation, checked against `stage` and the tracker on 2026-11-05.
 It is a guide to affected workflows, not an exhaustive protocol inventory or a
 promise about priority.
 
@@ -26,12 +26,15 @@ features. See
 ## External shells and desktop tools
 
 Hosted QML scenes can read `Windows`, `Workspaces`, `Monitors`, `Apps` and
-`Folder`. Separate clients need Wayland protocols for equivalent access, and
-several are missing:
+`Folder`. A shell that is its own program reaches the same through Wayland
+protocols: it can list and manage windows (foreign-toplevel,
+[#50](https://github.com/Lilium-Linux/solium/issues/50)), see and switch workspaces (ext-workspace, [#60](https://github.com/Lilium-Linux/solium/issues/60)),
+arrange monitors (output management, [#51](https://github.com/Lilium-Linux/solium/issues/51)), capture one window for a
+screen share ([#47](https://github.com/Lilium-Linux/solium/issues/47)) and have what is behind its surface blurred
+(ext-background-effect, [#78](https://github.com/Lilium-Linux/solium/issues/78)). What is still missing:
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| Window and workspace management | External taskbars and workspace switchers lack foreign-toplevel and workspace-management interfaces. | [#50](https://github.com/Lilium-Linux/solium/issues/50), [#60](https://github.com/Lilium-Linux/solium/issues/60) |
 | Clipboard managers | Data-control (wlr and ext) works, but every client is offered it, so any client can read every copy without focus. Limiting it to trusted clients needs security-context. | [#68](https://github.com/Lilium-Linux/solium/issues/68) |
 | Client-supplied window icons | Application icons resolve through desktop files; per-toplevel icons through xdg-toplevel-icon are unavailable. | [#73](https://github.com/Lilium-Linux/solium/issues/73) |
 | Portals | Screencopy and session portal configuration exist. Region screenshots keep hosted scenes and layers, recording clients get DMA-BUF feedback and upright buffers, and layer-shell choosers such as slurp get the keyboard; screen sharing through xdg-desktop-portal-wlr streams in a nested session (`dev/screencast-check.sh`) and through a browser. A run on hardware remains, a browser sharing a rotated output receives its frames upside down, and file-chooser grants and parenting are untested. | [#83](https://github.com/Lilium-Linux/solium/issues/83) |
@@ -42,7 +45,7 @@ several are missing:
 
 | Limitation | Impact | Tracking |
 |---|---|---|
-| Explicit sync | linux-drm-syncobj-v1 is conditional on dmabuf and DRM syncobj-eventfd support. Vulkan/NVIDIA session, scanout and resume validation remains a hardware check; use `dev/explicit-sync-tty.sh`. | [#59](https://github.com/Lilium-Linux/solium/issues/59) |
+| Explicit sync | linux-drm-syncobj-v1 is implemented ([#59](https://github.com/Lilium-Linux/solium/issues/59)), offered when dmabuf and DRM syncobj-eventfd are supported. Vulkan/NVIDIA session, scanout and resume validation remains a hardware check; use `dev/explicit-sync-tty.sh`. | [#65](https://github.com/Lilium-Linux/solium/issues/65) |
 | Multiple GPUs | Outputs on another GPU are not supported by the current single-GPU path. | [#63](https://github.com/Lilium-Linux/solium/issues/63) |
 | Monitor identity and mirroring | Configuration matches connectors; stable panel identity and mirrored outputs remain open. | [#44](https://github.com/Lilium-Linux/solium/issues/44), [#45](https://github.com/Lilium-Linux/solium/issues/45) |
 | Runtime rotation | Output transform is applied when an output is added; automatic/runtime rotation is incomplete. | [#80](https://github.com/Lilium-Linux/solium/issues/80) |
@@ -59,7 +62,7 @@ several are missing:
 | Window rules | There is no general declarative rule system for placing or sizing applications by identity. | [#56](https://github.com/Lilium-Linux/solium/issues/56) |
 | Close confirmation | An application asking for confirmation can disappear during close grace and return afterward. | [#231](https://github.com/Lilium-Linux/solium/issues/231) |
 | Focus policy | Focus-stealing prevention and related correctness follow-ups remain open. | [#136](https://github.com/Lilium-Linux/solium/issues/136), [#258](https://github.com/Lilium-Linux/solium/issues/258) |
-| Frame styles | Per-window style selection, style-switch stalls and individual frame input problems remain tracked. | [#234](https://github.com/Lilium-Linux/solium/issues/234), [#226](https://github.com/Lilium-Linux/solium/issues/226), [#158](https://github.com/Lilium-Linux/solium/issues/158) |
+| Frame styles | Per-window style selection and individual frame input problems remain tracked. | [#234](https://github.com/Lilium-Linux/solium/issues/234), [#158](https://github.com/Lilium-Linux/solium/issues/158) |
 | User QML overrides | The shipped Solium module can win over user QML; do not assume a user Theme.qml will override it. | [#88](https://github.com/Lilium-Linux/solium/issues/88) |
 | Live effect tuning | Effect files and shipped effects exist; schema-driven live tuning and presets remain planned. | [#259](https://github.com/Lilium-Linux/solium/issues/259) |
 | Fast-resize glass | Backdrop quality during very fast resize still needs work. | [#262](https://github.com/Lilium-Linux/solium/issues/262) |
@@ -74,7 +77,7 @@ several are missing:
 | X11 launch placeholders | An X11 application may fail to replace its loading pane. | [#180](https://github.com/Lilium-Linux/solium/issues/180) |
 | XWayland selections | The selection-flush workaround still needs upstream follow-up. | [#40](https://github.com/Lilium-Linux/solium/issues/40) |
 | Crash recovery | A compositor crash ends the graphical session; applications are not recovered into a replacement compositor. | [#82](https://github.com/Lilium-Linux/solium/issues/82) |
-| Distribution packages | Checkout installation and Fedora RPM builds exist; a published package repository and Arch packaging remain open. | [#66](https://github.com/Lilium-Linux/solium/issues/66) |
+| Distribution packages | Fedora 44 and 45 packages are built in [COPR](https://copr.fedorainfracloud.org/coprs/liliumlinux/solium/) from every push to `stage` (`solium-stage`) and every release (`solium`), and update with `dnf upgrade` ([#486](https://github.com/Lilium-Linux/solium/issues/486)). Other distributions, Arch first, have no package yet. | [#66](https://github.com/Lilium-Linux/solium/issues/66) |
 | Test reliability | Parallel test crashes and timing-sensitive scenarios can undermine gate confidence and need investigation. | [#241](https://github.com/Lilium-Linux/solium/issues/241), [#256](https://github.com/Lilium-Linux/solium/issues/256) |
 
 Logind lock/sleep handling is implemented, as is the input-startup fix. logind's

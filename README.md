@@ -38,8 +38,9 @@ with quick settings, window snapping, a stage-manager strip, quick search,
 Alt+Tab cards and an editable desktop. It is configuration built on Solium's
 public API, copied into `~/.config/solium` on install, and yours to change. Solium has its own
 lock screen, takes touch on its own UI as on windows, and serves notifications
-and audio to scenes and Lua. Media, power, network and Bluetooth services,
-gestures and input methods are still unfinished.
+and audio to scenes and Lua, follows media players and hosts the tray. Power,
+network and Bluetooth services, gestures and input methods are still
+unfinished.
 
 ![An earlier nested Solium session with QML window frames](docs/desktop.png)
 

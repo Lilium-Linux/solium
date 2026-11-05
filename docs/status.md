@@ -4,7 +4,7 @@
 The planned v0.1.0 is a public preview, with readiness determined by testing
 and the remaining daily-use issues rather than a release date.
 
-This documentation snapshot was checked against `stage` on 2026-10-30.
+This documentation snapshot was checked against `stage` on 2026-11-05.
 Use the [project board](https://github.com/orgs/Lilium-Linux/projects/2) for
 work in progress and the
 [`daily-drive` queue](https://github.com/Lilium-Linux/solium/issues?q=is%3Aissue%20is%3Aopen%20label%3Adaily-drive)
@@ -28,9 +28,20 @@ for current daily-use priorities.
   installed-session integration with systemd and XDG autostart.
 - Touch on windows and on compositor UI (frames and hosted scenes), with a
   touchscreen bound to its monitor by `input.touchscreen.output`.
-- A notification server and PipeWire audio, with every application's stream
-  matched to its window, published to QML scenes and Lua.
-- Checkout installation and a Fedora 44 RPM build script.
+- A notification server, PipeWire audio with every application's stream
+  matched to its window, media players over MPRIS and a tray, published to QML
+  scenes and Lua.
+- Protocols for shells that are their own programs: listing and managing
+  windows, seeing and switching workspaces, arranging monitors, capturing one
+  window for a screen share and blurring what is behind a surface (#50, #60,
+  #51, #47, #78).
+- Lua that reads, writes and watches files without blocking, keeps settings
+  across restarts in `sol.store` (#473), reads a program's output back and
+  sets timers (#472).
+- Fedora 44 and 45 packages in
+  [COPR](https://copr.fedorainfracloud.org/coprs/liliumlinux/solium/),
+  `solium-stage` from every push to `stage` (#486); checkout installation and
+  a local RPM build script.
 
 Implemented features can still have correctness and compatibility issues.
 [Known limitations](gaps.md) names affected workflows, including IMEs,

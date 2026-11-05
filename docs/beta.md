@@ -13,8 +13,9 @@ source of work status. This page defines what release readiness means;
 
 The window-management modes, QML frames and scene hosting, reloadable
 configuration and user effect folders are implemented. The default configuration
-is a whole desktop: taskbar, titlebar, snapping, search and desktop. Checkout installation and
-Fedora RPM build tooling exist. Logind lock/sleep handling and per-device
+is a whole desktop: taskbar, titlebar, snapping, search and desktop. Fedora
+packages are built in COPR from every push to `stage`, beside checkout
+installation. Logind lock/sleep handling and per-device
 input settings are implemented too.
 
 These capabilities still need testing as one installed desktop. Their presence
