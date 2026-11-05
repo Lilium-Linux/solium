@@ -60,8 +60,12 @@ git -C "$root" archive --format=tar.gz --prefix="solium-$version/" \
 vendor="$out/vendor-work"
 rm -rf "$vendor"
 mkdir -p "$vendor"
-(cd "$root" && cargo vendor --locked --quiet "$vendor/vendor") >"$vendor/vendor-config.toml" \
-    || die "cargo vendor failed"
+# Not --quiet: that drops the configuration from stdout as well as the
+# progress from stderr, and the package then looks for crates.io offline.
+(cd "$root" && cargo vendor --locked "$vendor/vendor") >"$vendor/vendor-config.toml" \
+    2>"$out/vendor.log" || { cat "$out/vendor.log" >&2; die "cargo vendor failed"; }
+grep -q '^replace-with = "vendored-sources"$' "$vendor/vendor-config.toml" \
+    || die "cargo vendor printed no source replacement (see $out/vendor.log)"
 tar -C "$vendor" -czf "$topdir/SOURCES/solium-vendor.tar.gz" vendor vendor-config.toml
 rm -rf "$vendor"
 
