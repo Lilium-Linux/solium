@@ -10,7 +10,9 @@ name: Package
 #
 # Here only the source package is made (dev/rpm/srpm.sh), with every crate in
 # it; COPR compiles it, for each Fedora release its project names. The run
-# waits for COPR, so a package that fails to build fails this run.
+# waits for COPR, so a package that fails to build fails this run. Then the
+# RPMs COPR built go to GitHub (#491): a stage build is a prerelease of its
+# own, v<version>-stage.<count>, and a release gets them attached.
 #
 # Until the repository has the secret COPR_CONFIG (the API token COPR shows at
 # https://copr.fedorainfracloud.org/api/, the whole file) and the variable
@@ -50,13 +52,16 @@ concurrency:
 jobs:
   srpm:
     runs-on: ubuntu-latest
+    # Writing a release is the one write this job makes.
+    permissions:
+      contents: write
     # The Fedora the packages are for; keep in step with ci.yml.
     container: registry.fedoraproject.org/fedora:44
     steps:
       # git before the checkout, for ci.yml's reason; cargo for `cargo
       # vendor`, which only downloads, so Fedora's own is enough.
       - name: Tools
-        run: dnf install -y --setopt=install_weak_deps=False git cargo rpm-build copr-cli
+        run: dnf install -y --setopt=install_weak_deps=False git cargo rpm-build copr-cli gh
 
       - uses: actions/checkout@v7
         with:
@@ -70,6 +75,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           path="$(dev/rpm/srpm.sh "${{ inputs.kind || 'stage' }}" "$RUNNER_TEMP/srpm")"
           echo "path=$path" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/srpm/package.env" >> "$GITHUB_OUTPUT"
           echo "built ${path##*/}"
 
       - uses: actions/upload-artifact@v7
@@ -79,6 +85,7 @@ jobs:
           retention-days: 14
 
       - name: Build in COPR
+        id: copr
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
           COPR_PROJECT: ${{ vars.COPR_PROJECT }}
@@ -89,4 +96,55 @@ jobs:
           fi
           mkdir -p ~/.config
           printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
-          copr-cli build "$COPR_PROJECT" "${{ steps.srpm.outputs.path }}"
+          copr-cli build "$COPR_PROJECT" "${{ steps.srpm.outputs.path }}" | tee "$RUNNER_TEMP/copr.log"
+          build="$(sed -n 's/^Created builds: \([0-9]*\)$/\1/p' "$RUNNER_TEMP/copr.log")"
+          [ -n "$build" ] || { echo "copr-cli named no build" >&2; exit 1; }
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      # The RPMs COPR built, one per Fedora release, on GitHub too: a stage
+      # build as a prerelease of its own, which never becomes "Latest", and a
+      # release's attached to the release release.yml published. `^`, which a
+      # snapshot's version has, becomes `.` in the file names GitHub serves.
+      - name: GitHub release
+        if: steps.copr.outputs.build != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KIND: ${{ inputs.kind || 'stage' }}
+          BUILD: ${{ steps.copr.outputs.build }}
+          VERSION: ${{ steps.srpm.outputs.version }}
+          BASE: ${{ steps.srpm.outputs.base }}
+          COUNT: ${{ steps.srpm.outputs.count }}
+          PROJECT: ${{ vars.COPR_PROJECT }}
+        run: |
+          set -o pipefail
+          dir="$RUNNER_TEMP/rpms"
+          copr-cli download-build --dest "$dir" "$BUILD"
+          mkdir -p "$RUNNER_TEMP/assets"
+          for rpm in "$dir"/*/*.rpm; do
+            case "$rpm" in *.src.rpm) continue ;; esac
+            name="${rpm##*/}"
+            cp "$rpm" "$RUNNER_TEMP/assets/${name//^/.}"
+          done
+          ls "$RUNNER_TEMP"/assets/*.rpm || { echo "COPR build $BUILD has no RPMs" >&2; exit 1; }
+          sha="$(git rev-parse HEAD)"
+          if [ "$KIND" = release ]; then
+            gh release upload "v$BASE" "$RUNNER_TEMP"/assets/*.rpm --clobber
+            exit 0
+          fi
+          tag="v$BASE-stage.$COUNT"
+          previous="$(git tag --list 'v*-stage.*' --sort=-version:refname --merged HEAD | grep -vx "$tag" | head -1 || true)"
+          notes="$RUNNER_TEMP/notes.md"
+          printf '%s\n' "solium-stage $VERSION, a snapshot of \`$sha\` on \`stage\`." "" \
+            "**Installing on Fedora 44 or 45:**" "" '```sh' \
+            "sudo dnf copr enable $PROJECT" "sudo dnf install solium-stage" '```' "" \
+            "\`dnf upgrade\` then brings each stage build after this one. Or download the RPM for your Fedora release below and \`sudo dnf install ./<file>\`." "" \
+            "**Merged since ${previous:-the first stage build}:**" "" > "$notes"
+          if [ -n "$previous" ]; then
+            git log --first-parent --format='- %s' "$previous..$sha" >> "$notes"
+          else
+            git log --first-parent --format='- %s' -20 "$sha" >> "$notes"
+          fi
+          gh release create "$tag" --prerelease --target "$sha" \
+            --title "solium-stage $VERSION" --notes-file "$notes" \
+            "$RUNNER_TEMP"/assets/*.rpm

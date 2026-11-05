@@ -281,6 +281,9 @@ jobs:
   # The Fedora package of the commit just released.
   package:
     needs: publish
+    # package.yml attaches the RPMs to the release.
+    permissions:
+      contents: write
     uses: ./.github/workflows/package.yml
     with:
       kind: release
