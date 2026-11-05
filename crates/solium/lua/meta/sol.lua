@@ -324,6 +324,17 @@
 ---@field decorated? boolean Whether its frame is drawn while it waits.
 ---@field fade? integer Milliseconds the scene takes to fade off the application.
 
+---`config.lua`'s `files`: how much a `sol.read` reads, and how the stores are kept (#473).
+---@class sol.FilesOptions
+---@field max_read? integer The most bytes a read takes, 0 or more; a longer file's function gets `nil, "longer than files.max_read"`. Default 4194304 (4 MiB).
+---@field store_interval? number Milliseconds between the comparisons of each store with what was last saved, above 0. Default 1000.
+---@field store_max? integer The most bytes of a store's file that are read, 0 or more; a larger file is broken. Default 1048576 (1 MiB).
+
+---What a `sol.watch` function is told (#473).
+---@class sol.WatchEvent
+---@field kind "changed"|"created"|"removed" `"changed"`: written and closed, or another file renamed onto it. `"created"`: it appeared. `"removed"`: deleted, or renamed away.
+---@field path string The path the watch was given, as it was written.
+
 ---What the table form of `sol.run` takes (#472). Any other key is an error.
 ---@class sol.RunOptions
 ---@field cwd? string The directory it runs in. Default: Solium's.
@@ -1796,6 +1807,90 @@ function sol.after(ms, fn) end
 ---@return sol.Timer
 function sol.every(ms, fn) end
 
+---Read a file without holding the compositor (#473): it is read on a thread
+---of its own, to its end rather than to the size it reports, so `/proc` and
+---`/sys` files work, and `fn` is called with what it holds, or with `nil`
+---and why it could not be read, the error as the system words it (`"No such
+---file or directory (os error 2)"`). A file longer than `files.max_read` in
+---`config.lua` (`sol.files`), 4 MiB by default, is not read: `fn` gets `nil,
+---"longer than files.max_read"`. `fn` is dispatched like any event, under the
+---handler deadline, at most a frame after the read ends. A read of a path
+---waits for the `sol.write`s to it asked for before it, so a configuration
+---reads back what it wrote. At most four reads run at once; the rest wait,
+---in the order they were asked for. A reload drops `fn`, and it is not
+---called.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param fn fun(data: string?, err: string?)
+---@return nil
+function sol.read(path, fn) end
+
+---Write a file atomically, without holding the compositor (#473): `data` is
+---written beside it, as `<path>.solium-tmp-<pid>`, synced, renamed over it,
+---and the directory synced, on a thread of its own. Whatever happens
+---half-way, `path` is the old file, whole, or the new one. Writes to one
+---path land in the order they were asked for. A symbolic link is followed,
+---and an existing file keeps its permissions. The directory must exist; it
+---is not made. `fn`, when given, is called with `nil` once the file is
+---written, or with why it was not. A reload drops `fn`, but the write still
+---lands.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param data string
+---@param fn? fun(err: string?)
+---@return nil
+function sol.write(path, data, fn) end
+
+---Follow a file (#473): `fn` is called with a `sol.WatchEvent` each time it
+---is written and closed, created, removed, or another file is renamed onto
+---or off its name. The watch is on its directory, so a file replaced by a
+---rename, as editors and `sol.write` replace one, is still followed, and one
+---that does not exist yet is allowed and told `"created"` when it appears.
+---Writing a new file is told as `"created"`, then `"changed"`. Its
+---directory must exist: watching a file in a missing directory is an error.
+---When the directory is removed, the watch is told `"removed"`, once, and
+---ends, and `fn` is let go. Events are read once each
+---time round the event loop and dispatched like any event. The watch ends
+---with the handle's `cancel` or a reload, or when `fn` has been stopped at the
+---handler deadline three times.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param fn fun(event: sol.WatchEvent)
+---@return sol.Watch
+function sol.watch(path, fn) end
+
+---A table that survives a restart (#473): `sol.keep`'s, also saved to
+---`$XDG_STATE_HOME/solium/state/<name>.json` (`~/.local/state/...` without
+---it). The file is read the first time the store is asked for in a
+---session, here, at the call: a key in it wins over the one in `defaults`,
+---and a default it lacks is filled in, inside nested tables too; a list is
+---taken whole. Mutate the table in place. Every `files.store_interval`
+---(a second) it is compared with what was last saved and, when it differs,
+---saved as `sol.write` writes; and before a reload, and when the compositor
+---stops, which waits two seconds at most for it. Only strings, finite
+---numbers, booleans, and tables of them (lists, and tables with string
+---keys) are saved; anything else is left out and named in the log once. A
+---missing file gives the defaults; one that is not a JSON object or list,
+---or is larger than `files.store_max` (1 MiB), gives the defaults, is named
+---in the log and is moved to `<name>.json.broken`, never written over.
+---`solium --check` reads the file and changes nothing: a broken one is a
+---warning in its output, left where it is.
+---
+---After that first read, the store lives in the compositor for the rest of
+---the session: a reload hands the table back from memory, as the plain data
+---it saves, without reading the file again, and a store the new
+---configuration does not ask for is kept too, for a later one that does.
+---Asked for twice under one name, it is the same table.
+---@param name string Letters, digits, `_` and `-`; anything else is an error.
+---@param defaults? table
+---@return table
+function sol.store(name, defaults) end
+
+---How much a `sol.read` reads, how often the stores are saved and how large
+---a store file is read: `config.files`, which the shipped `init.lua` hands
+---over (#473), before any `sol.store` of the configuration's. A key left
+---out, or one of the wrong kind, keeps the default.
+---@param options? sol.FilesOptions
+---@return nil
+function sol.files(options) end
+
 ---Whether a program can be found on `PATH`. A name with a `/` in it is
 ---checked as a path. Nothing is run.
 ---@param program string
@@ -1963,6 +2058,23 @@ sol._runs = {}
 ---@private
 ---@type table<integer, fun()>
 sol._timers = {}
+
+---Internal: each `sol.read`'s function, and each `sol.write`'s that was
+---given one, by id, until it is told (#473). Use `sol.read` and `sol.write`.
+---@private
+---@type table<integer, function>
+sol._files = {}
+
+---Internal: each watch's function, by id, until it is cancelled (#473). Use
+---`sol.watch`.
+---@private
+---@type table<integer, fun(event: sol.WatchEvent)>
+sol._watches = {}
+
+---Internal: each store's table, by name (#473). Use `sol.store`.
+---@private
+---@type table<string, table>
+sol._stores = {}
 
 ---Internal: the action functions of `sol.notify`'s own notifications, by the
 ---token their command carries, until one runs (#346).
@@ -2258,3 +2370,14 @@ local Timer = {}
 ---was cancelled already does nothing.
 ---@return nil
 function Timer:cancel() end
+
+-- Watches -------------------------------------------------------------------
+
+---A file `sol.watch` follows (#473).
+---@class sol.Watch
+local Watch = {}
+
+---Stop following it: its function is not called again, even for an event
+---already on its way. Cancelling one that has ended already does nothing.
+---@return nil
+function Watch:cancel() end

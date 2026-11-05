@@ -919,6 +919,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
             crate::runs::settle(&mut state.solium);
             crate::timers::settle(&mut state.solium);
+            // What its reads, writes and watches came to, and its stores
+            // saved when they changed (#473): `files.rs`.
+            crate::files::settle(&mut state.solium);
             // The native lock's password check: the one place its yes unlocks.
             crate::lock_auth::settle(&mut state.solium);
             // And the end of its exit, at `lock.exit_ms` whatever the scene
@@ -948,9 +951,15 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         })
         // The totals however the loop ended: a session that died is the one
         // whose numbers are wanted. This needs a session, and no test
-        // reaches it.
-        .inspect_err(|_| crate::pacing::summary())
+        // reaches it. And the stores saved, the same way (#473).
+        .inspect_err(|_| {
+            crate::files::finish(&mut state.solium);
+            crate::pacing::summary();
+        })
         .map_err(|err| anyhow!("running the event loop: {err}"))?;
+    // The configuration's stores saved, and every write it asked for
+    // landed, before the session goes (#473).
+    crate::files::finish(&mut state.solium);
     crate::pacing::summary();
     state.solium.session.end();
     Ok(())

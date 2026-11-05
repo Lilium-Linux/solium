@@ -860,6 +860,27 @@ pub(crate) enum Command {
     },
     /// A timer's `cancel`, or one whose function is gone.
     TimerCancel(u64),
+    /// `sol.read` (#473): read a file on a thread of its own, for the
+    /// function kept under its id in `sol._files`. See `crate::files`.
+    FileRead(crate::files::ReadRequest),
+    /// `sol.write` (#473): write a file atomically, in order with the other
+    /// writes to its path.
+    FileWrite(crate::files::WriteRequest),
+    /// `sol.watch` (#473): follow the file at `path`, whose function is kept
+    /// under `id` in `sol._watches`; `shown` is the path as Lua wrote it.
+    Watch {
+        id: u64,
+        path: std::path::PathBuf,
+        shown: String,
+    },
+    /// A watch's `cancel`, or one whose function is gone.
+    WatchCancel(u64),
+    /// `sol.store` read store `name`'s file, which held `text`: not saved
+    /// again until it differs (#473).
+    StoreLoaded {
+        name: String,
+        text: String,
+    },
     /// `folder.trust { uri }`, validated and resolved to an absolute path by
     /// `Solium::act` (04-ui.md §4.9): mark a desktop launcher trusted,
     /// durably, so `folder.open` will run it. Its own command, rather than a
@@ -1065,6 +1086,11 @@ impl Command {
             | Self::RunRead(_)
             | Self::Timer { .. }
             | Self::TimerCancel(_)
+            | Self::FileRead(_)
+            | Self::FileWrite(_)
+            | Self::Watch { .. }
+            | Self::WatchCancel(_)
+            | Self::StoreLoaded { .. }
             | Self::FolderTrust { .. }
             | Self::Loading(_)
             | Self::ClientSizes(_)
@@ -1374,8 +1400,24 @@ pub(crate) enum Kept {
     Strip(solium_layout::scroller::Scroller),
 }
 
-/// Everything kept, under the names the scripts gave it.
-pub(crate) type Keep = std::collections::HashMap<String, Kept>;
+/// Everything kept, under the names the scripts gave it: `sol.keep`'s
+/// tables, and `sol.store`'s as the plain data each saves (#473).
+#[derive(Debug, Default)]
+pub(crate) struct Keep {
+    keeps: std::collections::HashMap<String, Kept>,
+    stores: std::collections::HashMap<String, crate::json::Json>,
+}
+
+impl Keep {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The stores, by name, as they are saved.
+    pub(crate) fn stores(&self) -> impl Iterator<Item = (&String, &crate::json::Json)> {
+        self.stores.iter()
+    }
+}
 
 /// How deep a kept table is followed.
 ///
@@ -2439,11 +2481,90 @@ impl Scripts {
         let Ok(keeps) = sol.get::<Table>("_keeps") else {
             return Keep::new();
         };
-        keeps
+        let keeps = keeps
             .pairs::<String, Value>()
             .filter_map(Result::ok)
             .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
-            .collect()
+            .collect();
+        // A store is carried as the plain data it saves, so a reload gives
+        // back what a restart would (#473).
+        let stores = self.stores().into_iter().collect();
+        Keep { keeps, stores }
+    }
+
+    /// Every store, as the plain data it saves (#473): the ones this
+    /// configuration asked for, and the ones an earlier configuration did
+    /// and this one has not, which are kept for as long as the compositor
+    /// runs. What cannot be saved is left out, named in the log once per
+    /// key path; a store of more than 65536 values is not saved at all.
+    /// Rust only, so it runs between dispatches: no Lua is called.
+    /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
+    pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
+        let mut out = Vec::new();
+        // A check saves nothing.
+        if self.lua.app_data_ref::<CheckOnly>().is_some() {
+            return out;
+        }
+        if let Ok(stores) = self
+            .lua
+            .globals()
+            .get::<Table>("sol")
+            .and_then(|sol| sol.get::<Table>("_stores"))
+        {
+            let mut warned = self
+                .lua
+                .remove_app_data::<StoreWarnings>()
+                .unwrap_or_default();
+            for (name, value) in stores.pairs::<String, Value>().filter_map(Result::ok) {
+                let mut left = 65_536;
+                match crate::files::plain(&value, &name, 0, &mut left, &mut warned.0) {
+                    Ok(Some(json)) => out.push((name, json)),
+                    Ok(None) => {}
+                    Err(why) => {
+                        if warned.0.insert(name.clone()) {
+                            tracing::warn!(store = name, why, "a store is too big to save");
+                        }
+                    }
+                }
+            }
+            self.lua.set_app_data(warned);
+        }
+        if let Some(carried) = self.lua.app_data_ref::<Carried>() {
+            for (name, json) in &carried.0.stores {
+                if !out.iter().any(|(each, _)| each == name) {
+                    out.push((name.clone(), json.clone()));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// How often the stores are saved: `files.store_interval` (#473).
+    pub(crate) fn store_interval(&self) -> Duration {
+        self.lua
+            .try_app_data_ref::<FileSettings>()
+            .ok()
+            .flatten()
+            .map_or(crate::files::STORE_INTERVAL, |settings| {
+                settings.store_interval
+            })
+    }
+
+    /// Load the configuration for `solium --check`: as [`Self::load`] does,
+    /// except that nothing of the user's is changed, so a store's broken
+    /// file stays where it is and is said in [`Self::check_notes`] (#473).
+    pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
+        Self::load_as(config, Keep::new(), true)
+    }
+
+    /// What a check found that a session would act on: a store's broken
+    /// file, left where it is.
+    pub(crate) fn check_notes(&self) -> Vec<String> {
+        self.lua
+            .app_data_ref::<CheckOnly>()
+            .map(|check| check.0.clone())
+            .unwrap_or_default()
     }
 
     /// Load the configuration again, handing back what the last one kept.
@@ -2468,7 +2589,15 @@ impl Scripts {
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
     pub(crate) fn load_carrying(config: &Path, carried: Keep) -> Result<Self> {
+        Self::load_as(config, carried, false)
+    }
+
+    /// [`Self::load_carrying`], or for `--check` (`checking`).
+    fn load_as(config: &Path, carried: Keep, checking: bool) -> Result<Self> {
         let lua = Lua::new();
+        if checking {
+            lua.set_app_data(CheckOnly::default());
+        }
         lua.set_app_data(Pending::default());
         lua.set_app_data(Snapshot::default());
         lua.set_app_data(Carried(carried));
@@ -3293,6 +3422,86 @@ impl Scripts {
         })
     }
 
+    /// What the configuration's reads, writes and watches came to (#473),
+    /// in the order heard, in one dispatch: each read's function with
+    /// `(data, nil)` or `(nil, err)`, each write's with `err` or `nil`, after
+    /// which they are let go, and each watch's with its event. Each call has
+    /// the whole handler deadline; a watch whose function was stopped three
+    /// times, and one with no function left, is cancelled.
+    /// `tests::sol_read_hands_the_file_to_its_function`,
+    /// `tests::a_cancelled_watch_is_not_told`.
+    pub(crate) fn files_heard(
+        &mut self,
+        heard: &[crate::files::Heard],
+        snapshot: Snapshot,
+    ) -> Outcome {
+        use crate::files::Heard;
+        self.dispatch(snapshot, move |lua, sol| {
+            let files: Table = sol.get("_files")?;
+            let watches: Table = sol.get("_watches")?;
+            let strikes: Table = sol.get("_strikes")?;
+            let mut gone = Vec::new();
+            for each in heard {
+                match each {
+                    Heard::Read { id, result } => {
+                        let Some(done) = files.get::<Option<mlua::Function>>(*id)? else {
+                            continue;
+                        };
+                        files.set(*id, Value::Nil)?;
+                        match result {
+                            Ok(data) => {
+                                let data = lua.create_string(data)?;
+                                call_struck(lua, &strikes, &done, (data, Value::Nil), "read")?;
+                            }
+                            Err(err) => {
+                                call_struck(
+                                    lua,
+                                    &strikes,
+                                    &done,
+                                    (Value::Nil, err.as_str()),
+                                    "read",
+                                )?;
+                            }
+                        }
+                    }
+                    Heard::Wrote { id, error } => {
+                        let Some(done) = files.get::<Option<mlua::Function>>(*id)? else {
+                            continue;
+                        };
+                        files.set(*id, Value::Nil)?;
+                        call_struck(lua, &strikes, &done, error.as_deref(), "write")?;
+                    }
+                    Heard::WatchEnded { id } => {
+                        watches.set(*id, Value::Nil)?;
+                    }
+                    Heard::Watched { id, kind, path } => {
+                        let Some(run) = watches.get::<Option<mlua::Function>>(*id)? else {
+                            gone.push(*id);
+                            continue;
+                        };
+                        let event = lua.create_table()?;
+                        event.set("kind", kind.name())?;
+                        event.set("path", path.as_str())?;
+                        if call_struck(lua, &strikes, &run, event, "watch")? {
+                            watches.set(*id, Value::Nil)?;
+                            gone.push(*id);
+                        }
+                    }
+                }
+            }
+            if !gone.is_empty() {
+                gone.sort_unstable();
+                gone.dedup();
+                with_pending(lua, |pending| {
+                    pending
+                        .commands
+                        .extend(gone.into_iter().map(Command::WatchCancel));
+                })?;
+            }
+            Ok(true)
+        })
+    }
+
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
         self.dispatch(snapshot, move |lua, _| call_listeners(lua, "layout", ()))
     }
@@ -4039,6 +4248,14 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // function of the old configuration runs into the new one.
     sol.set("_runs", lua.create_table()?)?;
     sol.set("_timers", lua.create_table()?)?;
+    // Each `sol.read`'s and `sol.write`'s function, by id, until it is
+    // told; each watch's, by id, until it is cancelled; and each store's
+    // table, by name (#473). A reload starts with none of the functions, so
+    // none of the old configuration's runs into the new one; the stores
+    // come back through the keep.
+    sol.set("_files", lua.create_table()?)?;
+    sol.set("_watches", lua.create_table()?)?;
+    sol.set("_stores", lua.create_table()?)?;
     sol.set("_keeps", lua.create_table()?)?;
     // How many times each listener or `done` was stopped at the deadline, by
     // function. `tests::a_listener_stopped_three_times_is_taken_out`,
@@ -4098,7 +4315,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             // table is built: `into_value` calls back into Lua.
             let carried = lua
                 .app_data_ref::<Carried>()
-                .and_then(|carried| carried.0.get(&name).cloned());
+                .and_then(|carried| carried.0.keeps.get(&name).cloned());
             let table = match carried {
                 // Only a table is claimable. A keep that came back as a number
                 // would mean the script changed shape between reloads, and the
@@ -7232,6 +7449,234 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, (ms, run): (f64, mlua::Function)| set_timer(lua, ms, run, true))?,
     )?;
 
+    // `sol.read(path, fn(data, err))` (#473): the whole file, read on a
+    // thread of its own up to `files.max_read`, to `fn`. See `crate::files`.
+    sol.set(
+        "read",
+        lua.create_function(|lua, (path, done): (String, mlua::Function)| {
+            let absolute = crate::files::expand(&path)
+                .map_err(|why| mlua::Error::runtime(format!("sol.read: {why}")))?;
+            let max = lua
+                .try_app_data_ref::<FileSettings>()
+                .ok()
+                .flatten()
+                .map_or(crate::files::MAX_READ, |settings| settings.max_read);
+            let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            with_pending(lua, |pending| {
+                pending
+                    .commands
+                    .push(Command::FileRead(crate::files::ReadRequest {
+                        id,
+                        path: absolute,
+                        max,
+                    }));
+            })?;
+            let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
+            files.set(id, done)?;
+            Ok(())
+        })?,
+    )?;
+
+    // `sol.write(path, data, fn(err))` (#473): atomic, on a thread of its
+    // own, in order with the other writes to `path`. See `crate::files`.
+    sol.set(
+        "write",
+        lua.create_function(
+            |lua, (path, data, done): (String, mlua::LuaString, Option<mlua::Function>)| {
+                let absolute = crate::files::expand(&path)
+                    .map_err(|why| mlua::Error::runtime(format!("sol.write: {why}")))?;
+                let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                with_pending(lua, |pending| {
+                    pending
+                        .commands
+                        .push(Command::FileWrite(crate::files::WriteRequest {
+                            id,
+                            path: absolute,
+                            data: data.as_bytes().to_vec(),
+                            report: done.is_some(),
+                        }));
+                })?;
+                if let Some(done) = done {
+                    let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
+                    files.set(id, done)?;
+                }
+                Ok(())
+            },
+        )?,
+    )?;
+
+    // `sol.watch(path, fn(event))` (#473): the file followed through its
+    // directory, which must exist, until the handle's `cancel` or a reload.
+    // See `crate::files`.
+    sol.set(
+        "watch",
+        lua.create_function(|lua, (path, run): (String, mlua::Function)| {
+            let absolute = crate::files::expand(&path)
+                .map_err(|why| mlua::Error::runtime(format!("sol.watch: {why}")))?;
+            let (Some(directory), Some(_)) = (absolute.parent(), absolute.file_name()) else {
+                return Err(mlua::Error::runtime(format!(
+                    "sol.watch: {path} names no file in a directory"
+                )));
+            };
+            if !directory.is_dir() {
+                return Err(mlua::Error::runtime(format!(
+                    "sol.watch: {} is not a directory, so {path} cannot be watched",
+                    directory.display()
+                )));
+            }
+            let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::Watch {
+                    id,
+                    path: absolute,
+                    shown: path,
+                });
+            })?;
+            let watches: Table = lua.globals().get::<Table>("sol")?.get("_watches")?;
+            watches.set(id, run)?;
+            Ok(WatchHandle(id))
+        })?,
+    )?;
+
+    // `sol.store(name, defaults)` (#473): `sol.keep`'s table, also saved to
+    // `$XDG_STATE_HOME/solium/state/<name>.json`. Loaded here, at the call,
+    // because the configuration needs its values at once and the file is
+    // small and local; saved by the compositor. See `crate::files`.
+    sol.set(
+        "store",
+        lua.create_function(|lua, (name, defaults): (String, Option<Table>)| {
+            if !crate::files::store_name_ok(&name) {
+                return Err(mlua::Error::runtime(format!(
+                    "sol.store: {name:?} is not a store's name, which is letters, digits, `_` \
+                     and `-`"
+                )));
+            }
+            let stores: Table = lua.globals().get::<Table>("sol")?.get("_stores")?;
+            // Asked for twice, the same table, as `sol.keep` answers.
+            if let Value::Table(already) = stores.get::<Value>(name.as_str())? {
+                return Ok(already);
+            }
+            let table = match defaults {
+                Some(defaults) => defaults,
+                None => lua.create_table()?,
+            };
+            // Within one session the store a reload carried is the truth;
+            // the file is read the first time it is asked for.
+            let carried = lua
+                .app_data_ref::<Carried>()
+                .and_then(|carried| carried.0.stores.get(&name).cloned());
+            let found = match carried {
+                Some(carried) => Some(carried),
+                None => {
+                    let max = lua
+                        .try_app_data_ref::<FileSettings>()
+                        .ok()
+                        .flatten()
+                        .map_or(crate::files::MAX_STORE, |settings| settings.store_max);
+                    match crate::files::read_store(&name, max) {
+                        crate::files::StoreFile::Missing => {
+                            tracing::info!(store = name, "no store file yet; starting from the defaults");
+                            None
+                        }
+                        crate::files::StoreFile::Found(loaded) => {
+                            let text = loaded.render();
+                            let name = name.clone();
+                            with_pending(lua, |pending| {
+                                pending.commands.push(Command::StoreLoaded { name, text });
+                            })?;
+                            Some(loaded)
+                        }
+                        crate::files::StoreFile::Broken { path, why } => {
+                            tracing::warn!(store = name, path = %path.display(), why, "the store file cannot be used; starting from the defaults");
+                            // `--check` changes nothing of the user's: it
+                            // says so instead, and the session sets the
+                            // file aside. `check::tests::a_check_leaves_a_broken_store_file_as_it_was`.
+                            match lua.app_data_mut::<CheckOnly>() {
+                                Some(mut check) => check.0.push(format!(
+                                    "store `{name}`: {} is {why}; a session would start from the \
+                                     defaults and move it to {name}.json.broken",
+                                    path.display()
+                                )),
+                                None => crate::files::set_aside(&name, &path),
+                            }
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some(found) = found {
+                fill_store(lua, &table, &found)?;
+            }
+            stores.set(name, &table)?;
+            Ok(table)
+        })?,
+    )?;
+
+    // `config.files`, handed over by `init.lua` (#473): how much a
+    // `sol.read` reads, how often the stores are saved, and how large a
+    // store file is read. Left out, or of the wrong kind, keeps the default,
+    // named in the log, as `sol.run_defaults` does; kept in this Lua state,
+    // where `sol.read` and `sol.store` read them and the settle asks
+    // `Scripts::store_interval`.
+    // `tests::sol_read_stops_at_files_max_read`,
+    // `tests::sol_files_reads_the_store_settings`.
+    sol.set(
+        "files",
+        lua.create_function(|lua, options: Option<Table>| {
+            let mut settings = FileSettings::default();
+            if let Some(options) = options {
+                match options.get::<Value>("max_read") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "checked to be a whole number from 0, and saturating past usize"
+                        )]
+                        Some(bytes) => settings.max_read = bytes as usize,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "files.max_read is a whole number of bytes, 0 or more; keeping the \
+                             default, 4194304"
+                        ),
+                    },
+                }
+                match options.get::<Value>("store_interval") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value)
+                        .filter(|ms| *ms > 0.0)
+                        .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+                    {
+                        Some(every) => settings.store_interval = every,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "files.store_interval is a number of milliseconds above 0; keeping \
+                             the default, 1000"
+                        ),
+                    },
+                }
+                match options.get::<Value>("store_max") {
+                    Ok(Value::Nil) | Err(_) => {}
+                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "checked to be a whole number from 0, and saturating past u64"
+                        )]
+                        Some(bytes) => settings.store_max = bytes as u64,
+                        None => tracing::warn!(
+                            value = describe(&value),
+                            "files.store_max is a whole number of bytes, 0 or more; keeping the \
+                             default, 1048576"
+                        ),
+                    },
+                }
+            }
+            lua.set_app_data(settings);
+            Ok(())
+        })?,
+    )?;
+
     // Whether a program exists to be run. A desktop cannot assume any
     // particular terminal, editor or browser is installed, and a script that
     // picks the first one that *is* there beats one that fails silently on a
@@ -7742,6 +8187,98 @@ impl mlua::UserData for TimerHandle {
             timers.set(this.0, Value::Nil)?;
             let _ = with_pending(lua, |pending| {
                 pending.commands.push(Command::TimerCancel(this.0));
+            });
+            Ok(())
+        });
+    }
+}
+
+/// Ids for reads, writes and watches (#473), counting up across reloads as
+/// `RUNS` and `TIMERS` do.
+static FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `config.files`, through `sol.files` (#473).
+#[derive(Debug, Clone, Copy)]
+struct FileSettings {
+    /// The most a `sol.read` reads, in bytes.
+    max_read: usize,
+    /// How often the stores are compared with what was last saved.
+    store_interval: Duration,
+    /// The largest store file that is read, in bytes.
+    store_max: u64,
+}
+
+impl Default for FileSettings {
+    fn default() -> Self {
+        Self {
+            max_read: crate::files::MAX_READ,
+            store_interval: crate::files::STORE_INTERVAL,
+            store_max: crate::files::MAX_STORE,
+        }
+    }
+}
+
+/// Set in a Lua state `solium --check` loads (#473): `sol.store` then
+/// reads its file and changes nothing, and collects here what it would
+/// have set aside, for the check to say. Present means checking.
+#[derive(Debug, Default)]
+struct CheckOnly(Vec<String>);
+
+/// The key paths of stores already named in the log for holding what
+/// cannot be saved, so each is named once (#473).
+#[derive(Debug, Default)]
+struct StoreWarnings(std::collections::HashSet<String>);
+
+/// Put what a store's file or a reload held into its table (#473): a key
+/// there wins over the default, and a table of defaults with no list part is
+/// filled key by key, so a default added since the file was saved is
+/// still there. A list is taken whole.
+/// `tests::a_store_takes_the_files_keys_and_keeps_the_defaults_it_lacks`.
+fn fill_store(lua: &Lua, table: &Table, found: &crate::json::Json) -> mlua::Result<()> {
+    use crate::json::Json;
+    match found {
+        Json::Object(fields) => {
+            for (key, value) in fields {
+                match (table.raw_get::<Value>(key.as_str())?, value) {
+                    (Value::Table(inner), Json::Object(_)) if inner.raw_len() == 0 => {
+                        fill_store(lua, &inner, value)?;
+                    }
+                    _ => table.raw_set(key.as_str(), value.to_lua(lua)?)?,
+                }
+            }
+        }
+        Json::List(items) => {
+            for index in (1..=table.raw_len()).rev() {
+                table.raw_set(index, Value::Nil)?;
+            }
+            for (index, item) in items.iter().enumerate() {
+                table.raw_set(index + 1, item.to_lua(lua)?)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// What `sol.watch` hands back: the watch, to cancel (#473).
+#[derive(Debug, Clone, Copy)]
+struct WatchHandle(u64);
+
+impl mlua::UserData for WatchHandle {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // As a timer's `cancel`: its function is let go here, so it is not
+        // called again whatever events are on their way, and the compositor
+        // is told when it can be, or forgets the watch the next time it
+        // fires and finds no function.
+        // `tests::a_cancelled_watch_is_not_told`.
+        methods.add_method("cancel", |lua, this, ()| {
+            let watches: Table = lua.globals().get::<Table>("sol")?.get("_watches")?;
+            if watches.get::<Value>(this.0)?.is_nil() {
+                return Ok(());
+            }
+            watches.set(this.0, Value::Nil)?;
+            let _ = with_pending(lua, |pending| {
+                pending.commands.push(Command::WatchCancel(this.0));
             });
             Ok(())
         });
@@ -15544,6 +16081,399 @@ mod tests {
         assert_eq!(cancelled, [false, false, true]);
         assert_eq!(timers.len(), 0);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Play `outcome`'s file commands into `files`, as the compositor does.
+    fn play_files(files: &mut crate::files::Files, outcome: &Outcome) {
+        for command in &outcome.commands {
+            match command.clone() {
+                Command::FileRead(request) => files.read(request),
+                Command::FileWrite(request) => files.write(request),
+                Command::Watch { id, path, shown } => files.watch(id, &path, shown),
+                Command::WatchCancel(id) => files.cancel_watch(id),
+                Command::StoreLoaded { name, text } => files.loaded_store(name, text),
+                _ => {}
+            }
+        }
+    }
+
+    /// Pump `files`, telling `scripts` what was heard and playing back what
+    /// that asks for, until the script's global `seen` holds `count`
+    /// entries: those, sorted.
+    fn pump_files(
+        scripts: &mut Scripts,
+        files: &mut crate::files::Files,
+        count: usize,
+    ) -> Vec<String> {
+        let started = std::time::Instant::now();
+        let seen = |scripts: &Scripts| -> Vec<String> {
+            let mut seen: Vec<String> = scripts
+                .evaluate("return table.concat(seen, '\\n')")
+                .split('\n')
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+            seen.sort();
+            seen
+        };
+        while seen(scripts).len() < count {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "only {:?}",
+                seen(scripts)
+            );
+            let heard = files.pump();
+            if !heard.is_empty() {
+                let outcome = scripts.files_heard(&heard, one_screen(&[]));
+                play_files(files, &outcome);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        seen(scripts)
+    }
+
+    /// **`sol.read` hands the file to its function** (#473): a `/proc` file,
+    /// whose size says 0, whole; a missing one, `nil` and the system's
+    /// words; and the function is let go once told.
+    #[test]
+    fn sol_read_hands_the_file_to_its_function() {
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-read",
+            r#"seen = {}
+               sol.read("/proc/self/status", function(data, err)
+                   seen[#seen + 1] = "proc " .. tostring(data:sub(1, 5)) .. " " .. tostring(err)
+               end)
+               sol.read("/nonexistent-solium-file", function(data, err)
+                   seen[#seen + 1] = "missing " .. tostring(data) .. " " .. err
+               end)"#,
+        );
+        let mut files = crate::files::Files::default();
+        let outcome = scripts.startup();
+        assert!(
+            outcome.commands.iter().any(|command| matches!(
+                command,
+                Command::FileRead(request) if request.max == crate::files::MAX_READ
+            )),
+            "the default cap: {:?}",
+            outcome.commands
+        );
+        play_files(&mut files, &outcome);
+        assert_eq!(
+            pump_files(&mut scripts, &mut files, 2),
+            [
+                "missing nil No such file or directory (os error 2)",
+                "proc Name: nil"
+            ]
+        );
+        assert_eq!(scripts.evaluate("return tostring(next(sol._files))"), "nil");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.read` stops at `files.max_read`** (#473): the setting
+    /// `sol.files` hands over is the cap, and past it the function is told
+    /// so; a value of the wrong kind keeps the default.
+    #[test]
+    fn sol_read_stops_at_files_max_read() {
+        let directory = std::env::temp_dir().join("solium-script-test-read-cap");
+        let _ = std::fs::create_dir_all(&directory);
+        std::fs::write(directory.join("ten"), "0123456789").expect("writing");
+        let ten = directory.join("ten");
+        let (_, mut scripts) = loaded(
+            "solium-script-test-read-cap",
+            &format!(
+                r#"seen = {{}}
+                   local function note(data, err) seen[#seen + 1] = tostring(data) .. " " .. tostring(err) end
+                   sol.files({{ max_read = 4 }})
+                   sol.read("{ten}", note)
+                   sol.files({{ max_read = 10 }})
+                   sol.read("{ten}", note)
+                   sol.files({{ max_read = "lots" }})
+                   sol.read("{ten}", function() end)"#,
+                ten = ten.display()
+            ),
+        );
+        let outcome = scripts.startup();
+        let caps: Vec<usize> = outcome
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::FileRead(request) => Some(request.max),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(caps, [4, 10, crate::files::MAX_READ]);
+        let mut files = crate::files::Files::default();
+        play_files(&mut files, &outcome);
+        assert_eq!(
+            pump_files(&mut scripts, &mut files, 2),
+            ["0123456789 nil", "nil longer than files.max_read"]
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **`sol.write` writes, and tells its function**: `nil` when the file
+    /// is written, the error when its directory is missing; one without a
+    /// function is still written, and kept nowhere.
+    #[test]
+    fn sol_write_writes_and_tells_its_function() {
+        let directory = std::env::temp_dir().join("solium-script-test-write");
+        let _ = std::fs::remove_dir_all(&directory);
+        let (_, mut scripts) = loaded(
+            "solium-script-test-write",
+            &format!(
+                r#"seen = {{}}
+                   sol.write("{dir}/a", "first", function(err) seen[#seen + 1] = "a " .. tostring(err) end)
+                   sol.write("{dir}/b", "quiet")
+                   sol.write("{dir}/no/c", "x", function(err) seen[#seen + 1] = "c " .. tostring(err) end)"#,
+                dir = directory.display()
+            ),
+        );
+        let outcome = scripts.startup();
+        assert_eq!(
+            scripts.evaluate(
+                "local n = 0 for _ in pairs(sol._files) do n = n + 1 end return tostring(n)"
+            ),
+            "2",
+            "a write with no function was kept"
+        );
+        let mut files = crate::files::Files::default();
+        play_files(&mut files, &outcome);
+        assert_eq!(
+            pump_files(&mut scripts, &mut files, 2),
+            ["a nil", "c No such file or directory (os error 2)"]
+        );
+        let started = std::time::Instant::now();
+        while files.writing() > 0 {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            files.pump();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.join("a")).ok().as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("b")).ok().as_deref(),
+            Some("quiet")
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **The file functions refuse what they cannot do** (#473): a relative
+    /// path, a watch on a missing directory, a store's bad name.
+    #[test]
+    fn the_file_functions_refuse_what_they_cannot_do() {
+        let (directory, scripts) = loaded("solium-script-test-files-refuse", "");
+        for (chunk, says) in [
+            (
+                r#"sol.read("relative", function() end)"#,
+                "neither absolute",
+            ),
+            (r#"sol.write("./x", "y")"#, "neither absolute"),
+            (r#"sol.watch("x", function() end)"#, "neither absolute"),
+            (
+                r#"sol.watch("/nonexistent-solium-dir/x", function() end)"#,
+                "is not a directory",
+            ),
+            (r#"sol.store("../up", {})"#, "not a store's name"),
+            (r#"sol.store("", {})"#, "not a store's name"),
+        ] {
+            let answer = scripts.evaluate(&format!(
+                "local ok, err = pcall(function() {chunk} end) return tostring(ok) .. ' ' .. tostring(err)"
+            ));
+            assert!(
+                answer.starts_with("false ") && answer.contains(says),
+                "{chunk}: {answer}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A watch tells its function, and a cancelled one is not told**
+    /// (#473): its event carries the kind and the path as it was given, and
+    /// after `cancel` the compositor is told to forget it.
+    #[test]
+    fn a_cancelled_watch_is_not_told() {
+        let directory = std::env::temp_dir().join("solium-script-test-watch");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a directory");
+        let (_, mut scripts) = loaded(
+            "solium-script-test-watch-config",
+            &format!(
+                r#"seen = {{}}
+                   watch = sol.watch("{dir}/f", function(event)
+                       seen[#seen + 1] = event.kind .. " " .. event.path
+                   end)
+                   sol.on("surface", function() watch:cancel() watch:cancel() end)"#,
+                dir = directory.display()
+            ),
+        );
+        let mut files = crate::files::Files::default();
+        play_files(&mut files, &scripts.startup());
+        assert_eq!(files.watching(), 1);
+        std::fs::write(directory.join("f"), "1").expect("writing");
+        pump_files(&mut scripts, &mut files, 2);
+        assert_eq!(
+            scripts.evaluate("return table.concat(seen, ',')"),
+            format!("created {dir}/f,changed {dir}/f", dir = directory.display())
+        );
+        let outcome =
+            scripts.surface_action("shell", "go", &crate::json::Json::Null, one_screen(&[]));
+        assert!(
+            matches!(&outcome.commands[..], [Command::WatchCancel(_)]),
+            "{:?}",
+            outcome.commands
+        );
+        play_files(&mut files, &outcome);
+        assert_eq!(files.watching(), 0);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **A watch whose directory goes is told `removed` and let go at once**
+    /// (#473): its function leaves `sol._watches` without waiting for a
+    /// reload.
+    #[test]
+    fn a_watch_whose_directory_goes_is_told_removed_and_let_go() {
+        let directory = std::env::temp_dir().join("solium-script-test-watch-gone");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a directory");
+        let (config, mut scripts) = loaded(
+            "solium-script-test-watch-gone-config",
+            &format!(
+                r#"seen = {{}}
+                   sol.watch("{dir}/f", function(event) seen[#seen + 1] = event.kind end)"#,
+                dir = directory.display()
+            ),
+        );
+        let mut files = crate::files::Files::default();
+        play_files(&mut files, &scripts.startup());
+        std::fs::remove_dir_all(&directory).expect("removing the directory");
+        assert_eq!(pump_files(&mut scripts, &mut files, 1), ["removed"]);
+        let started = std::time::Instant::now();
+        while scripts.evaluate("return tostring(next(sol._watches))") != "nil" {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the function was kept"
+            );
+            let heard = files.pump();
+            if !heard.is_empty() {
+                play_files(&mut files, &scripts.files_heard(&heard, one_screen(&[])));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(files.watching(), 0);
+        assert_eq!(
+            scripts.evaluate("return table.concat(seen, ',')"),
+            "removed"
+        );
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// **`sol.files` reads the store settings** (#473): `store_interval` is
+    /// what the settle asks for, and `store_max` caps a store file; values
+    /// of the wrong kind keep the defaults.
+    #[test]
+    fn sol_files_reads_the_store_settings() {
+        let state = crate::files::tests::scratch("script-store-settings");
+        crate::files::tests::use_state_dir(&state);
+        std::fs::write(state.join("big.json"), r#"{"a": "0123456789"}"#).expect("writing");
+        let (directory, scripts) = loaded(
+            "solium-script-test-store-settings",
+            r#"sol.files({ store_interval = 5000, store_max = 10 })
+               big = sol.store("big", { a = "default" })"#,
+        );
+        assert_eq!(scripts.store_interval(), Duration::from_secs(5));
+        assert_eq!(scripts.evaluate("return big.a"), "default");
+        assert!(
+            state.join("big.json.broken").exists(),
+            "past store_max was read"
+        );
+        scripts.evaluate("sol.files({ store_interval = 0, store_max = -1 }) return ''");
+        assert_eq!(scripts.store_interval(), crate::files::STORE_INTERVAL);
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// **A store takes the file's keys and keeps the defaults it lacks**
+    /// (#473), inside nested tables too, takes a list whole, and is the same
+    /// table when asked for twice; the text it loaded is handed over so it
+    /// is not saved again unchanged.
+    #[test]
+    fn a_store_takes_the_files_keys_and_keeps_the_defaults_it_lacks() {
+        let state = crate::files::tests::scratch("script-store-fill");
+        crate::files::tests::use_state_dir(&state);
+        std::fs::write(
+            state.join("prefs.json"),
+            r#"{"volume": 70, "ui": {"dark": true}, "recent": ["a"], "gone": 1}"#,
+        )
+        .expect("writing");
+        let (directory, mut scripts) = loaded(
+            "solium-script-test-store-fill",
+            r#"local s = sol.store("prefs", { volume = 50, muted = false,
+                   ui = { dark = false, scale = 2 }, recent = { "x", "y", "z" } })
+               same = sol.store("prefs") == s
+               shown = string.format("%d %s %s %d %d %s %d", s.volume, tostring(s.muted),
+                   tostring(s.ui.dark), s.ui.scale, #s.recent, s.recent[1], s.gone)"#,
+        );
+        assert_eq!(scripts.evaluate("return tostring(same)"), "true");
+        assert_eq!(scripts.evaluate("return shown"), "70 false true 2 1 a 1");
+        let outcome = scripts.startup();
+        assert!(
+            outcome.commands.iter().any(|command| matches!(
+                command,
+                Command::StoreLoaded { name, text }
+                    if name == "prefs" && text == r#"{"gone":1,"recent":["a"],"ui":{"dark":true},"volume":70}"#
+            )),
+            "{:?}",
+            outcome.commands
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// **A store survives a reload as the data it saves** (#473): carried
+    /// as its plain data, not read from the file again, with a function in
+    /// it left out; and one the new configuration does not ask for is still
+    /// carried, for a later one that does.
+    #[test]
+    fn a_store_survives_a_reload_as_the_data_it_saves() {
+        let state = crate::files::tests::scratch("script-store-reload");
+        crate::files::tests::use_state_dir(&state);
+        let (directory, scripts) = loaded(
+            "solium-script-test-store-reload",
+            r#"local s = sol.store("prefs", { volume = 50 })
+               s.volume = 65
+               s.run = function() end
+               sol.store("other", {}).kept = "yes""#,
+        );
+        assert_eq!(
+            scripts
+                .stores()
+                .iter()
+                .map(|(name, json)| format!("{name}={}", json.render()))
+                .collect::<Vec<_>>(),
+            [r#"other={"kept":"yes"}"#, r#"prefs={"volume":65}"#]
+        );
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"local s = sol.store("prefs", { volume = 50 })
+               shown = tostring(s.volume) .. " " .. tostring(s.run)"#,
+        )
+        .expect("writing");
+        let scripts = Scripts::load_carrying(&config, scripts.kept()).expect("reloading");
+        assert_eq!(scripts.evaluate("return shown"), "65 nil");
+        std::fs::write(&config, r#"shown = sol.store("other", {}).kept"#).expect("writing");
+        let scripts = Scripts::load_carrying(&config, scripts.kept()).expect("reloading");
+        assert_eq!(scripts.evaluate("return shown"), "yes");
+        assert!(
+            std::fs::read_dir(&state)
+                .map(|mut dir| dir.next().is_none())
+                .unwrap_or(true),
+            "a reload read or wrote the state directory itself"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// **`sol.workspaces` declares groups and windows**, every field as Lua

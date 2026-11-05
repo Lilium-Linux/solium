@@ -30,6 +30,7 @@ mod edge;
 mod effect;
 mod explicit_sync;
 mod ext_workspace;
+mod files;
 mod focus;
 mod folder;
 mod framing;

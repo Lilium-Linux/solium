@@ -73,7 +73,8 @@ impl<'a> Report<'a> {
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
 pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
     report.line(&format!("checking {}", path.display()));
-    match crate::script::Scripts::load(path) {
+    // Read only: a check changes none of the user's files (#473).
+    match crate::script::Scripts::load_for_check(path) {
         Err(err) => {
             // Printed rather than only returned: this is a command someone
             // runs to read the answer, and the chain is where the answer is.
@@ -156,6 +157,13 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 report
                     .fail("  sol.effects is refused -- neither its settings nor its rules apply:");
                 report.line(&format!("    {error}"));
+            }
+
+            // A store's file a session would set aside: said, not failed,
+            // and left as it is (#473).
+            // `tests::a_check_leaves_a_broken_store_file_as_it_was`.
+            for note in scripts.check_notes() {
+                report.line(&format!("  warning: {note}"));
             }
 
             let unknown = scripts.unknown_settings();
@@ -944,11 +952,12 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
             // Under the configuration's `effects.sandbox`, as the session
             // loads the folder; the defaults when it does not load
             // (`cli::check_of_a_folder_reads_the_configured_sandbox`).
-            let caps = crate::script::Scripts::load(&crate::script::Scripts::config_path())
-                .map_or_else(
-                    |_| crate::effect::settings::Caps::default(),
-                    |scripts| configured_caps(&scripts),
-                );
+            let caps =
+                crate::script::Scripts::load_for_check(&crate::script::Scripts::config_path())
+                    .map_or_else(
+                        |_| crate::effect::settings::Caps::default(),
+                        |scripts| configured_caps(&scripts),
+                    );
             let mut gpu = render_node();
             let formats = gpu.as_mut().map(crate::pool::probe_formats);
             let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
@@ -1301,6 +1310,46 @@ mod tests {
         assert!(!loaded);
         assert!(!passed, "{text}");
         assert!(text.contains("failed:"), "{text}");
+    }
+
+    /// **A check leaves a broken store file as it was** (#473): `sol.store`
+    /// under `--check` reads, warns in the check's output, and neither
+    /// renames the file to `.broken` nor writes anything.
+    #[test]
+    fn a_check_leaves_a_broken_store_file_as_it_was() {
+        let state = crate::files::tests::scratch("check-broken-store");
+        crate::files::tests::use_state_dir(&state);
+        let broken = state.join("prefs.json");
+        std::fs::write(&broken, "{ not json").expect("the store file");
+        let directory = std::env::temp_dir().join("solium-check-test-broken-store");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("init.lua");
+        std::fs::write(&path, r#"prefs = sol.store("prefs", { volume = 50 })"#).expect("the file");
+        let (passed, text) = reported(|report| {
+            let scripts = config(&path, report).expect("it loads");
+            assert!(scripts.stores().is_empty(), "a check would save");
+        });
+        assert!(passed, "{text}");
+        assert!(
+            text.contains("warning: store `prefs`") && text.contains("not JSON"),
+            "{text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&broken).ok().as_deref(),
+            Some("{ not json")
+        );
+        let names: Vec<_> = std::fs::read_dir(&state)
+            .expect("listing")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["prefs.json"],
+            "the check changed the state directory"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// A key nothing reads fails, as `config`'s doc comment argues. Set up as

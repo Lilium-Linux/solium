@@ -740,6 +740,24 @@ local defaults = {
         max_output = 1048576,
     },
 
+    -- Files a configuration reads, and the state it keeps (#473):
+    -- `sol.read(path, function(data, err) ... end)`, which reads on a thread
+    -- of its own, never on the compositor's, and to the end, so `/proc` and
+    -- `/sys` files work; and `sol.store(name, defaults)`, a table saved to
+    -- `$XDG_STATE_HOME/solium/state/<name>.json`.
+    files = {
+        -- How many bytes a read takes at most. A longer file is not read:
+        -- its function gets `nil, "longer than files.max_read"`. 0 or more.
+        max_read = 4194304,
+        -- How often, in milliseconds, each store is compared with what was
+        -- last saved, and saved when it changed. Above 0.
+        store_interval = 1000,
+        -- How many bytes of a store's file are read. A larger file is taken
+        -- for a broken one: the store starts from its defaults, and the file
+        -- is moved to `<name>.json.broken`. 0 or more.
+        store_max = 1048576,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.

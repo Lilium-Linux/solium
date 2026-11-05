@@ -275,6 +275,8 @@ pub(crate) struct Solium {
     pub(crate) runs: crate::runs::Runs,
     /// When each of the configuration's timers is next due (#472).
     pub(crate) timers: crate::timers::Timers,
+    /// The configuration's reads, writes, watches and stores (#473).
+    pub(crate) files: crate::files::Files,
     /// Registers `zwlr_output_power_manager_v1`. See `power.rs`.
     #[expect(dead_code, reason = "holds the global; dropping it would remove it")]
     pub(crate) power_state: crate::power::PowerState,
@@ -1511,6 +1513,7 @@ impl Solium {
             services: crate::services::Services::new(),
             runs: crate::runs::Runs::default(),
             timers: crate::timers::Timers::default(),
+            files: crate::files::Files::default(),
             power_state: crate::power::PowerState::new::<Self>(&display_handle),
             power: crate::power::Power::default(),
             surfaces: crate::scripted::Surfaces::default(),

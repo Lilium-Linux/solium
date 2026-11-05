@@ -2026,6 +2026,95 @@ Reloading the configuration kills every command a `sol.run{}` started and
 cancels every timer, so nothing the old configuration set going calls into
 the new one.
 
+### Files, and settings that survive a restart
+
+Lua's own `io.open` reads on the compositor's thread, so a slow disk holds
+every window while it waits. `sol.read`, `sol.write` and `sol.watch` do the
+same work on threads of their own and call your function when it is done:
+
+```lua
+sol.read("/sys/class/power_supply/BAT0/capacity", function(data, err)
+    if data then
+        sol.log("battery " .. data:gsub("%s+$", ""))
+    else
+        sol.log("no battery: " .. err)
+    end
+end)
+
+sol.write("~/.cache/my-bar/last-theme", "dark", function(err)
+    if err then sol.log("could not save the theme: " .. err) end
+end)
+```
+
+A path is absolute or starts with `~/`; anything else is an error. A read
+goes to the end of the file rather than trusting its size, so `/proc` and
+`/sys` files, which say they are empty, are read whole. It stops at
+`files.max_read` bytes (4 MiB), and a longer file gives `nil, "longer than
+files.max_read"`; a missing one gives `nil` and the system's own words for
+it. Change the cap in your configuration:
+
+```lua
+return { files = { max_read = 65536 } }
+```
+
+A write is atomic: the data goes to a temporary file beside the target, is
+synced to disk, and is renamed over it, so a crash half-way leaves the old
+file whole and a reader never sees half of the new one. Writes to one file
+land in the order you asked for them, and a read of a file waits for the
+writes to it you asked for first, so you read back what you wrote. The
+directory must already exist, and a symbolic link is followed. At most four
+reads run at once; the rest wait their turn.
+
+`sol.watch(path, fn)` calls `fn` with `{ kind = ..., path = path }` whenever
+the file changes: `"changed"` when it is written and closed or another file
+is renamed onto it, `"created"` when it appears, `"removed"` when it is
+deleted or renamed away. The watch is on the file's directory, which must
+exist, so a file an editor replaces by renaming a new one over it is still
+followed, and a file that does not exist yet can be watched for. If the
+directory itself is removed, the watch is told `"removed"` once and ends.
+The handle it returns has `cancel()`:
+
+```lua
+local theme = sol.watch("~/.config/my-bar/theme.json", function(event)
+    if event.kind ~= "removed" then
+        sol.read(event.path, function(data) --[[ apply it ]] end)
+    end
+end)
+```
+
+`sol.store(name, defaults)` is `sol.keep` that also survives a restart. It
+hands back a table you change in place, and Solium saves it to
+`$XDG_STATE_HOME/solium/state/<name>.json` (`~/.local/state/solium/state/`
+by default) when it changed, at most once every `files.store_interval`
+milliseconds (1000), before a reload, and when Solium stops:
+
+```lua
+local prefs = sol.store("prefs", { volume = 50, recent = {} })
+prefs.volume = 65 -- saved within a second, and there after a restart
+```
+
+The file is read when the store is first asked for. A key in it wins over
+the default, and a default the file lacks, such as one added in a later
+version of your configuration, is filled in. Only strings, numbers,
+booleans, and tables of them are saved: a function in a store is named in
+the log and left out. A file that is not JSON, or is larger than
+`files.store_max` bytes (1 MiB), gives the defaults, is named in the log, and
+is moved aside to `<name>.json.broken` rather than written over;
+`solium --check` only warns about it and leaves it where it is. The name is
+letters, digits, `_` and `-`.
+
+```lua
+return { files = { store_interval = 5000, store_max = 65536 } }
+```
+
+Reloading ends every watch and drops the functions of reads and writes still
+under way, though the writes themselves still land. The file is read only the
+first time a store is asked for in a session: after that the store lives in
+the compositor, and a reload hands it back from memory as the data it saves,
+even when the configuration in between did not use it. When Solium stops it
+waits two seconds at most for the last saves; one still unwritten then is
+named in the log, and its file is left as it was.
+
 ### Bars, docks and wallpapers
 
 A shell — bar, dock and launcher together — can be hosted inside the

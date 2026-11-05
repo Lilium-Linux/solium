@@ -1349,6 +1349,9 @@ pub(crate) fn run() -> Result<()> {
         // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
         crate::runs::settle(&mut state);
         crate::timers::settle(&mut state);
+        // What its reads, writes and watches came to, and its stores saved
+        // when they changed (#473): `files.rs`.
+        crate::files::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.
@@ -1396,6 +1399,9 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
+    // The configuration's stores saved, and every write it asked for
+    // landed, before the compositor goes (#473).
+    crate::files::finish(&mut state);
     crate::pacing::summary();
     state.session.end();
     Ok(())
