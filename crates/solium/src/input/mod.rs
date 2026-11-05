@@ -63,9 +63,15 @@ enum Action {
     /// A key combination a script has claimed, and whether the key that
     /// pressed it is one that repeats while held, which is what decides
     /// whether a binding that asked to repeat can. See [`key_repeats`].
-    Bound { combo: String, repeats: bool },
+    Bound {
+        combo: String,
+        repeats: bool,
+    },
     /// A backend request: switch VT, or stop.
     Backend(Request),
+    TakeShortcutsBack {
+        binding: Option<String>,
+    },
     /// A key for the scene holding the keyboard.
     /// `tests::while_the_shell_holds_the_keyboard_russian_letters_reach_it_as_cyrillic`.
     Scene(crate::qml::hosted::SceneKey),
@@ -168,6 +174,7 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
         return;
     };
 
+    state.refresh_inhibitors();
     let pressed = key_state == KeyState::Pressed;
     // Any key, pressed or let go, ends a held binding's repeat: its own key
     // coming up, and any other, because the newest key is the one that would
@@ -246,6 +253,13 @@ pub(crate) fn key(state: &mut Solium, code: Keycode, key_state: KeyState, time: 
         Some(Some(Action::Bound { combo, repeats })) => {
             if state.trigger(&combo) && repeats {
                 state.hold_binding(combo);
+            }
+        }
+        Some(Some(Action::TakeShortcutsBack { binding })) => {
+            state.take_shortcuts_back();
+            state.release_pointer();
+            if let Some(combo) = binding {
+                state.trigger(&combo);
             }
         }
         Some(Some(Action::Backend(request))) => {
@@ -430,6 +444,19 @@ fn press(
     // names, as at the lock, so it is the same key on Russian.
     // `state::tests::real_client::lock_focus::shortcuts_inhibit`.
     if !state.script_grab && state.inhibitors.active() {
+        let combos = combos_for(
+            modifiers,
+            handle.modified_sym(),
+            handle.raw_latin_sym_or_raw_current_sym(),
+        );
+        if combos
+            .iter()
+            .any(|combo| combo == &state.inhibitors.settings.escape)
+        {
+            return FilterResult::Intercept(Some(Action::TakeShortcutsBack {
+                binding: allowed_by(state, modifiers, &handle, |asked| asked.inhibited),
+            }));
+        }
         if let Some(combo) = allowed_by(state, modifiers, &handle, |asked| asked.inhibited) {
             return FilterResult::Intercept(Some(Action::Bound {
                 combo,

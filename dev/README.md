@@ -1555,6 +1555,33 @@ effect chains, timed as one region a run phase) and `gpu_out_us`. A flip
 record carries `flip` (the pass), `monitor`, `seq`, `at_ns`, `queued_ns` and
 `late`, the vblanks it missed. `dev/pacing-summary.py` reads them.
 
+## Shortcut inhibition through XWayland
+
+After building `solium` and `x11-probe`, run `dev/shortcuts-check.sh` with an
+explicit host `WAYLAND_DISPLAY`. It starts disposable nested sessions, reads
+each child's Wayland socket and XWayland display from its log, and runs
+`x11-probe keyboard-grab` inside that child. Configuration and state are
+isolated and session integration is disabled.
+
+All passes use `us,ru` with Russian active. The probe must receive
+Super+Q and Alt+Tab press/release pairs while its XGrabKeyboard is active;
+neither compositor binding may fire then. Moving focus to its spare window
+must restore bindings, and moving back must inhibit them again without a new
+grab. Super+Escape must reach no client and reclaim shortcuts; subsequent
+bindings must fire. The script checks exact delivery and binding counts. The
+first compositor survives at least 61 seconds. A third pass denies the
+probe by its X11 WM_CLASS and checks both shortcuts stay with Solium.
+`SOLIUM_CHECK_DIR` chooses where logs remain, and `SOLIUM_SHORTCUTS_HOLD` overrides that first survival
+interval. Run under the machine's nested-run lock and resource guard where
+those are configured.
+
+Policy denial, fullscreen changes without refocus, identity changes, reload,
+lock/unlock, request destruction, ordinary-client global filtering and the
+QML ownership model are checked by `cargo test -p solium shortcuts_inhibit`.
+Physical keyboard behavior and VT switching on hardware remain human-run
+checks; the real-client tests exercise the same key-routing path without
+switching the host's console.
+
 ## Installing it
 
 For picking Solium at the login screen rather than starting it from a TTY.

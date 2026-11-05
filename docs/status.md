@@ -20,8 +20,9 @@ for current daily-use priorities.
   titlebar with quick settings, snapping, a stage-manager strip, quick search
   and an editable desktop. It is copied on install and can be changed.
 - Multiple outputs, hotplug, scaling and screen power; keyboard layouts,
-  per-device libinput settings and cursor themes; keyboard-shortcuts-inhibit,
-  so a VM or remote desktop can have `super`.
+  per-device libinput settings and cursor themes; focus-scoped shortcut
+  inhibition for Wayland and XWayland, with configurable permission and reclaim
+  keys, so games, VMs and remote desktops can have `super`.
 - Solium's own lock screen, with an optional PIN, and session-lock with
   external lockers; idle inhibition, logind lock/sleep handling and
   installed-session integration with systemd and XDG autostart.

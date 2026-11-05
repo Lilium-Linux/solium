@@ -2810,6 +2810,9 @@ fn start_socket(event_loop: &mut EventLoop<State>, display: Display<Solium>) -> 
                 #[expect(unsafe_code, reason = "smithay requires this to be unsafe")]
                 let dispatched = unsafe { display.get_mut().dispatch_clients(&mut state.solium) };
                 dispatched?;
+                // XWayland grab destruction has no handler callback in Smithay.
+                // Reconcile before deciding whether an idle output needs a frame.
+                state.solium.refresh_inhibitors();
                 Ok(smithay::reexports::calloop::PostAction::Continue)
             },
         )

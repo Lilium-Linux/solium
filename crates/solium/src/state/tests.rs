@@ -3056,6 +3056,7 @@ mod real_client {
         /// [`Self::bind_toplevels`], so no other test hears of every window
         /// it opens twice over (#50).
         toplevel_globals: Vec<(String, u32)>,
+        xwayland_grab_global: bool,
         /// `ext_foreign_toplevel_image_capture_source_manager_v1`'s global,
         /// as the registry announced it: bound only by a test that captures
         /// a window (#47).
@@ -3280,6 +3281,10 @@ mod real_client {
         shortcuts:
             Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
         shortcuts_held: Vec<bool>,
+        shortcuts_request: Option<(
+            zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+            wl_surface::WlSurface,
+        )>,
         /// For `power`: what `swayidle` asks with, and every `idled` (true)
         /// and `resumed` (false) its notifications have been told.
         idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
@@ -3691,6 +3696,7 @@ mod real_client {
             };
             state.registry = Some(registry.clone());
             match interface.as_str() {
+                "zwp_xwayland_keyboard_grab_manager_v1" => state.xwayland_grab_global = true,
                 "ext_workspace_manager_v1" => state.workspace_global = Some(name),
                 "zwlr_foreign_toplevel_manager_v1" | "ext_foreign_toplevel_list_v1" => {
                     state.toplevel_globals.push((interface.clone(), name));
@@ -26251,7 +26257,8 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     .clone()
                     .expect("zwp_keyboard_shortcuts_inhibit_manager_v1 is advertised");
                 let seat = session.app.client.seat.clone().expect("wl_seat bound");
-                let _inhibitor = manager.inhibit_shortcuts(&surface, &seat, &session.app.qh, ());
+                let inhibitor = manager.inhibit_shortcuts(&surface, &seat, &session.app.qh, ());
+                session.app.client.shortcuts_request = Some((inhibitor, surface));
                 session.app.pump(&mut session.display, &mut session.state);
                 let _ = heard(&mut session);
                 (session, first, second)
@@ -26263,6 +26270,271 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     smithay::utils::SERIAL_COUNTER.next_serial(),
                     crate::script::FocusSource::Script,
                 );
+            }
+
+            #[test]
+            fn configured_escape_still_runs_an_explicit_inhibited_binding() {
+                let (mut session, ..) = asking("inhibit-escape-binding");
+                configured(
+                    &mut session.state,
+                    "inhibit-escape-binding-config",
+                    "sol.bind('super+Escape', function() sol.status('reclaimed') end, {inhibited=true})",
+                );
+                assert_eq!(tap(&mut session, &[SUPER, ESCAPE]), "reclaimed");
+                assert_eq!(held(&mut session), Some(false));
+            }
+
+            #[test]
+            fn replacing_a_request_does_not_undo_reclaim_and_destruction_clears_state() {
+                let (mut session, first, second) = asking("inhibit-lifetime");
+                let _ = tap(&mut session, &[SUPER, ESCAPE]);
+                assert_eq!(held(&mut session), Some(false));
+                let (inhibitor, surface) = session
+                    .app
+                    .client
+                    .shortcuts_request
+                    .take()
+                    .expect("request");
+                inhibitor.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                let manager = session.app.client.shortcuts.clone().expect("manager");
+                let seat = session.app.client.seat.clone().expect("seat");
+                let request = manager.inhibit_shortcuts(&surface, &seat, &session.app.qh, ());
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    !session.state.inhibitors.active(),
+                    "new request evaded reclaim"
+                );
+                focus(&mut session, &first);
+                focus(&mut session, &second);
+                assert!(session.state.inhibitors.active());
+                request.destroy();
+                session.app.pump(&mut session.display, &mut session.state);
+                assert!(
+                    !session.state.inhibitors.active(),
+                    "destroyed request stayed active"
+                );
+            }
+
+            #[test]
+            fn ordinary_wayland_clients_cannot_see_the_xwayland_grab_global() {
+                let session = Session::new();
+                assert!(!session.app.client.xwayland_grab_global);
+            }
+
+            #[test]
+            fn configured_escape_works_without_a_script_binding_in_both_layouts() {
+                for group in 0..2 {
+                    let (mut session, first, second) = asking(&format!("inhibit-escape-{group}"));
+                    set_us_ru(&mut session.state, group);
+                    configured(
+                        &mut session.state,
+                        &format!("inhibit-escape-config-{group}"),
+                        &format!(
+                            "{SCRIPT}\nsol.input{{ shortcuts_inhibit = {{ escape = 'super+x' }} }}"
+                        ),
+                    );
+                    assert_eq!(tap(&mut session, &[SUPER, 53]), "");
+                    assert!(
+                        !heard(&mut session).contains(&53),
+                        "escape key went to client"
+                    );
+                    assert_eq!(held(&mut session), Some(false));
+                    // Reconfiguring cannot restore a request explicitly taken back.
+                    configured(
+                        &mut session.state,
+                        &format!("inhibit-escape-reload-{group}"),
+                        SCRIPT,
+                    );
+                    assert_eq!(held(&mut session), Some(false));
+                    focus(&mut session, &first);
+                    focus(&mut session, &second);
+                    assert_eq!(held(&mut session), Some(true));
+                }
+            }
+
+            #[test]
+            fn inhibited_alt_tab_reaches_the_client_without_its_binding_or_warp() {
+                let (mut session, ..) = asking("inhibit-alt-tab");
+                configured(
+                    &mut session.state,
+                    "inhibit-alt-tab-config",
+                    &format!(
+                        "{SCRIPT}\nsol.bind('alt+Tab', function() sol.status('tab'); sol.warp{{ x = 500, y = 400 }} end)"
+                    ),
+                );
+                for group in 0..2 {
+                    set_us_ru(&mut session.state, group);
+                    let before = session
+                        .state
+                        .seat
+                        .get_pointer()
+                        .expect("pointer")
+                        .current_location();
+                    assert_eq!(tap(&mut session, &[ALT, 23]), "");
+                    assert!(heard(&mut session).contains(&23));
+                    assert_eq!(
+                        session
+                            .state
+                            .seat
+                            .get_pointer()
+                            .expect("pointer")
+                            .current_location(),
+                        before
+                    );
+                }
+            }
+
+            #[test]
+            fn lua_keyboard_reports_the_same_owner_as_the_protocol() {
+                let (mut session, first, second) = asking("inhibit-lua-owner");
+                configured(
+                    &mut session.state,
+                    "inhibit-lua-owner-config",
+                    &format!(
+                        r#"{SCRIPT}
+                    sol.bind('super+i', function()
+                        local keyboard = sol.keyboard()
+                        sol.status(tostring(keyboard.shortcuts_inhibited) .. ':' .. tostring(keyboard.shortcuts_owner))
+                    end, {{inhibited=true}})
+                "#
+                    ),
+                );
+                assert_eq!(
+                    tap(&mut session, &[SUPER, 31]),
+                    format!("true:{}", session.state.window_id(&second))
+                );
+                focus(&mut session, &first);
+                assert_eq!(tap(&mut session, &[SUPER, 31]), "false:nil");
+            }
+
+            #[test]
+            fn keyboard_model_reports_inhibition_and_owner_then_clears_them() {
+                crate::qml::qt_test::on_the_qt_thread(|| {
+                    let (directory, mut scene) = crate::qml::hosted::tests::hosted(
+                        "solium-models-inhibit",
+                        r#"
+                        import QtQuick
+                        import Solium
+                        Item {
+                            readonly property int active: Keyboard.shortcutsInhibited ? 1 : 0
+                            readonly property int owner: Keyboard.shortcutsOwner
+                            property int changes: 0
+                            Connections {
+                                target: Keyboard
+                                function onShortcutsChanged() { changes++ }
+                            }
+                        }
+                        "#,
+                        "inhibit-model-1",
+                    );
+                    let (mut session, first, second) = asking("inhibit-model");
+                    session.state.publish_models();
+                    assert_eq!(scene.get_int("active"), 1);
+                    assert_eq!(
+                        u64::try_from(scene.get_int("owner")).ok(),
+                        Some(session.state.window_id(&second))
+                    );
+                    focus(&mut session, &first);
+                    session.state.publish_models();
+                    assert_eq!(scene.get_int("active"), 0);
+                    assert_eq!(scene.get_int("owner"), 0);
+                    assert_eq!(scene.get_int("changes"), 2);
+                    session.state.publish_models();
+                    assert_eq!(
+                        scene.get_int("changes"),
+                        2,
+                        "unchanged state was notified again"
+                    );
+                    focus(&mut session, &second);
+                    let lock = session.lock();
+                    session.state.publish_models();
+                    assert_eq!(scene.get_int("active"), 0);
+                    assert_eq!(scene.get_int("owner"), 0);
+                    session.assert_unlocks(lock);
+                    session.state.publish_models();
+                    assert_eq!(scene.get_int("active"), 1);
+                    drop(scene);
+                    let _ = std::fs::remove_dir_all(directory);
+                });
+            }
+
+            #[test]
+            fn policy_reload_revokes_and_restores_a_focused_request() {
+                let (mut session, ..) = asking("inhibit-policy");
+                configured(
+                    &mut session.state,
+                    "inhibit-denied",
+                    &format!("{SCRIPT}\nsol.input{{ shortcuts_inhibit = {{ allow = false }} }}"),
+                );
+                assert_eq!(held(&mut session), Some(false));
+                assert_eq!(tap(&mut session, &[SUPER, Q]), "q");
+                configured(
+                    &mut session.state,
+                    "inhibit-allowed",
+                    &format!("{SCRIPT}\nsol.input{{ shortcuts_inhibit = {{ allow = true }} }}"),
+                );
+                assert_eq!(held(&mut session), Some(true));
+                assert_eq!(tap(&mut session, &[SUPER, Q]), "");
+                assert!(heard(&mut session).contains(&Q));
+            }
+
+            #[test]
+            fn fullscreen_only_tracks_fullscreen_without_a_focus_change() {
+                let (mut session, _, second) = asking("inhibit-fullscreen");
+                configured(
+                    &mut session.state,
+                    "inhibit-fullscreen-policy",
+                    &format!(
+                        "{SCRIPT}\nsol.input{{ shortcuts_inhibit = {{ allow = 'fullscreen' }} }}"
+                    ),
+                );
+                assert_eq!(held(&mut session), Some(false));
+                session.state.fullscreen(&second, None);
+                assert_eq!(held(&mut session), Some(true));
+                assert_eq!(tap(&mut session, &[SUPER, Q]), "");
+                session.state.unfullscreen(&second);
+                assert_eq!(held(&mut session), Some(false));
+                assert_eq!(tap(&mut session, &[SUPER, Q]), "q");
+            }
+
+            #[test]
+            fn clearing_focus_makes_the_request_inactive() {
+                let (mut session, ..) = asking("inhibit-no-focus");
+                assert_eq!(held(&mut session), Some(true));
+                session
+                    .state
+                    .clear_focus(smithay::utils::SERIAL_COUNTER.next_serial());
+                assert_eq!(held(&mut session), Some(false));
+            }
+
+            #[test]
+            fn deny_matches_app_id_and_rechecks_when_it_changes() {
+                let (mut session, _, second) = asking("inhibit-app-deny");
+                configured(
+                    &mut session.state,
+                    "inhibit-app-policy",
+                    &format!(
+                        "{SCRIPT}\nsol.input{{ shortcuts_inhibit = {{ apps = {{ deny = {{ 'blocked*' }} }} }} }}"
+                    ),
+                );
+                assert_eq!(held(&mut session), Some(true));
+                // The client changes its identity while retaining focus.
+                let surface = second.toplevel().expect("xdg window").clone();
+                smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+                    states
+                        .data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .expect("toplevel data")
+                        .lock()
+                        .expect("data lock")
+                        .app_id = Some("blocked.viewer".into());
+                });
+                smithay::wayland::shell::xdg::XdgShellHandler::app_id_changed(
+                    &mut session.state,
+                    surface,
+                );
+                assert_eq!(held(&mut session), Some(false));
             }
 
             /// **The window with the keyboard gets `super`, and the escapes

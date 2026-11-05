@@ -17,7 +17,6 @@ for daily-use priorities. [Status](status.md) describes what is implemented;
 | Input methods | `text-input-v3` supplies focus and caret information, but there is no input-method integration for IMEs or an on-screen keyboard. | [#26](https://github.com/Lilium-Linux/solium/issues/26), [#55](https://github.com/Lilium-Linux/solium/issues/55) |
 | Gestures | Client pinch/swipe protocols and configurable compositor gestures remain incomplete. | [#70](https://github.com/Lilium-Linux/solium/issues/70), [#252](https://github.com/Lilium-Linux/solium/issues/252), [#7](https://github.com/Lilium-Linux/solium/issues/7) |
 | Tablet tools | No tablet-v2 support for pen pressure and stylus tools. | [#62](https://github.com/Lilium-Linux/solium/issues/62) |
-| Shortcut inhibition | VMs, remote desktops and nested compositors can take the compositor's shortcuts through keyboard-shortcuts-inhibit, and `super+Escape` takes them back. Any client may ask, with no per-application policy, no indicator, and no XWayland keyboard grab for X11 games. | [#245](https://github.com/Lilium-Linux/solium/issues/245) |
 
 Keyboard layouts, repeat, tap-to-click, per-device libinput settings and
 binding a touchscreen to its monitor are implemented; they are not missing

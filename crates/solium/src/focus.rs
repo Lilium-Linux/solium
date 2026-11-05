@@ -422,6 +422,7 @@ impl Solium {
             let focused = keyboard.current_focus();
             self.remember_layer_focus(focused.as_ref());
             self.text_input_focus(focused.as_ref());
+            self.settle_inhibitors(focused.as_ref());
         }
         let client = surface.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, &self.seat, client.clone());

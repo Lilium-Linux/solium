@@ -38,6 +38,12 @@
 //! window is blue and the popup red, so a capture shows whether the popup is
 //! where the window is drawn.
 //!
+//!     DISPLAY=:1 cargo run -p x11-probe -- keyboard-grab
+//!
+//! `keyboard-grab` opens a spare and a grabbed window, keeps one XGrabKeyboard
+//! alive for `X11_PROBE_HOLD` times ten even across focus changes, and prints
+//! actual key presses/releases. `dev/shortcuts-check.sh` drives this mode.
+//!
 //!     DISPLAY=:1 cargo run -p x11-probe -- grab
 //!
 //! `grab` maps a 960x540 window and takes the pointer and the keyboard the way
@@ -267,6 +273,10 @@ fn main() {
             let failed = popup(&conn, root, monitor, Duration::from_millis(hold));
             std::process::exit(i32::from(failed));
         }
+        "keyboard-grab" => {
+            keyboard_grab(&conn, root, monitor, Duration::from_millis(hold));
+            std::process::exit(0);
+        }
         "grab" => {
             grab(&conn, root, monitor, Duration::from_millis(hold));
             std::process::exit(0);
@@ -292,7 +302,7 @@ fn main() {
             std::process::exit(i32::from(failed));
         }
         other => panic!(
-            "no such mode {other:?}: `request`, `mapped`, `focus`, `popup`, `grab`, `cursor`, \
+            "no such mode {other:?}: `request`, `mapped`, `focus`, `popup`, `grab`, `keyboard-grab`, `cursor`, \
              `maximized-before-map`, `maximized-at-map` or `ask-maximized`"
         ),
     };
@@ -655,6 +665,64 @@ fn popup(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) -> 
     !ok
 }
 
+/// Keep one XGrabKeyboard alive across compositor focus changes. The spare
+/// window lets an external harness move focus away and back without creating
+/// a replacement grab, unlike `grab`'s Wine-style FocusOut handling.
+fn keyboard_grab(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) {
+    use x11rb::protocol::xproto::{ChangeWindowAttributesAux, GrabMode, GrabStatus};
+    let rect = Rect {
+        x: monitor.x + 100,
+        y: monitor.y + 100,
+        w: 640,
+        h: 480,
+    };
+    let spare = window(conn, root, rect, 0x0033_9933, "spare", false);
+    let game = window(conn, root, rect, 0x0033_66cc, "grab", false);
+    conn.change_window_attributes(
+        game,
+        &ChangeWindowAttributesAux::new().event_mask(
+            EventMask::STRUCTURE_NOTIFY
+                | EventMask::FOCUS_CHANGE
+                | EventMask::KEY_PRESS
+                | EventMask::KEY_RELEASE,
+        ),
+    )
+    .expect("selecting keyboard events");
+    conn.flush().expect("flushing");
+    std::thread::sleep(hold);
+    let status = conn
+        .grab_keyboard(
+            false,
+            game,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
+        .expect("requesting keyboard grab")
+        .reply()
+        .expect("keyboard grab reply")
+        .status;
+    println!("keyboard {status:?}");
+    assert_eq!(status, GrabStatus::SUCCESS, "XGrabKeyboard failed");
+    let started = std::time::Instant::now();
+    while started.elapsed() < hold * 10 {
+        while let Some(event) = conn.poll_for_event().expect("reading keyboard events") {
+            match event {
+                x11rb::protocol::Event::KeyPress(key) => println!("key press: {}", key.detail),
+                x11rb::protocol::Event::KeyRelease(key) => println!("key release: {}", key.detail),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    conn.ungrab_keyboard(x11rb::CURRENT_TIME)
+        .expect("releasing keyboard grab");
+    conn.destroy_window(game).expect("closing grabbed window");
+    conn.destroy_window(spare).expect("closing spare window");
+    conn.flush().expect("flushing release");
+    println!("keyboard released");
+}
+
 /// `grab`: see the module header.
 fn grab(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) {
     use x11rb::protocol::xproto::{GrabMode, GrabStatus};
@@ -671,6 +739,16 @@ fn grab(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) {
         "grab",
         false,
     );
+    conn.change_window_attributes(
+        game,
+        &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(
+            EventMask::STRUCTURE_NOTIFY
+                | EventMask::FOCUS_CHANGE
+                | EventMask::KEY_PRESS
+                | EventMask::KEY_RELEASE,
+        ),
+    )
+    .expect("selecting keyboard events");
     std::thread::sleep(hold);
     // A blank cursor, as a game hides the pointer: a one-pixel pixmap with
     // nothing in its mask.
@@ -729,6 +807,12 @@ fn grab(conn: &RustConnection, root: Window, monitor: Rect, hold: Duration) {
                 x11rb::protocol::Event::FocusIn(into) if !grabbed && !grab_made(into.mode) => {
                     println!("     focus in: taking the grabs again");
                     take(&mut grabbed);
+                }
+                x11rb::protocol::Event::KeyPress(key) => {
+                    println!("     key press: {}", key.detail);
+                }
+                x11rb::protocol::Event::KeyRelease(key) => {
+                    println!("     key release: {}", key.detail);
                 }
                 _ => {}
             }

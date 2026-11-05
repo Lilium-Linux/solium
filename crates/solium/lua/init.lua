@@ -294,7 +294,7 @@ sol.bind("shift+Print", run("sh", "-c", SHOT .. 'area="$(slurp)" && grim -g "$ar
 -- loses the keyboard, which is what makes it let go of its own X grabs.
 -- Moving the keyboard to another window or monitor lets go of the pointer
 -- too, without this key.
-sol.bind("super+Escape", function()
+sol.bind(config.input.shortcuts_inhibit.escape, function()
     sol.take_shortcuts_back()
     sol.release_pointer()
 end, { note = "shortcuts and pointer", inhibited = true })

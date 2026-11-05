@@ -368,6 +368,7 @@ pub(crate) struct Snapshot {
     /// The keyboard, for `sol.keyboard()` and for a shell that wants to draw
     /// a layout indicator.
     pub(crate) keyboard: crate::keymap::State,
+    pub(crate) shortcuts_owner: Option<u64>,
     /// The active monitor's work area — what `sol.monitor()` answers.
     ///
     /// Kept as its own field rather than found in `monitors` every time,
@@ -585,6 +586,64 @@ fn press_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard::Keysym>> {
     }
     keysyms.push(keysym);
     Some(keysyms)
+}
+
+/// Validate protocol policy before emitting any commands from `sol.input`.
+fn shortcuts_settings(table: &Table) -> mlua::Result<crate::shortcuts_inhibit::Settings> {
+    use crate::shortcuts_inhibit::{Allow, Settings};
+    let refused = |why: &str| mlua::Error::runtime(format!("input.shortcuts_inhibit: {why}"));
+    let allow = match table.get::<Value>("allow")? {
+        Value::Nil | Value::Boolean(true) => Allow::Always,
+        Value::Boolean(false) => Allow::Never,
+        Value::String(value) if value.to_str()?.as_ref() == "fullscreen" => Allow::Fullscreen,
+        _ => return Err(refused("allow must be true, false or 'fullscreen'")),
+    };
+    let mut settings = Settings {
+        allow,
+        ..Settings::default()
+    };
+    if let Some(escape) = table.get::<Option<String>>("escape")? {
+        let normal = normalise_combo(&escape);
+        // Validate the original components: normalization intentionally keeps
+        // only the last non-modifier, which would turn `typo+q` into `q`.
+        let modifiers = escape.rsplit_once('+').map(|(modifiers, _)| modifiers);
+        if press_keysyms(&escape).is_none()
+            || modifiers.is_some_and(|modifiers| {
+                modifiers.split('+').any(|name| {
+                    !matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "ctrl"
+                            | "control"
+                            | "alt"
+                            | "meta"
+                            | "shift"
+                            | "super"
+                            | "logo"
+                            | "win"
+                            | "cmd"
+                    )
+                })
+            })
+        {
+            return Err(refused("escape must name a key combination"));
+        }
+        settings.escape = normal;
+    }
+    if let Some(apps) = table.get::<Option<Table>>("apps")?
+        && let Some(deny) = apps.get::<Option<Vec<String>>>("deny")?
+    {
+        for pattern in deny {
+            if pattern.is_empty() || pattern.strip_suffix('*').unwrap_or(&pattern).contains('*') {
+                return Err(refused(
+                    "apps.deny entries must be exact names, '*' or trailing-star prefixes",
+                ));
+            }
+            settings
+                .deny
+                .push(crate::effect::rules::Glob::parse(&pattern));
+        }
+    }
+    Ok(settings)
 }
 
 /// Something a script asked the compositor to do.
@@ -875,6 +934,7 @@ pub(crate) enum Command {
     /// libinput device settings: a default per device type, and overrides
     /// matched by name or by vendor/product. See `crate::input::devices`.
     Input(crate::input::devices::InputConfig),
+    ShortcutsInhibit(crate::shortcuts_inhibit::Settings),
     /// logind's `Lock` and sleep signals: the locker to run, and whether to
     /// hold sleep for it. See `crate::logind::Settings`.
     Lock(crate::logind::Settings),
@@ -1056,6 +1116,7 @@ impl Command {
             | Self::Idle(_)
             | Self::AutoReload(_)
             | Self::Input(_)
+            | Self::ShortcutsInhibit(_)
             | Self::Lock(_)
             | Self::LockAuth(_)
             | Self::LockScene(_)
@@ -4410,8 +4471,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "keyboard",
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let Some(options) = options else {
-                let keyboard = snapshot(lua)?.keyboard;
+                let snapshot = snapshot(lua)?;
+                let keyboard = snapshot.keyboard;
                 let table = lua.create_table()?;
+                table.set("shortcuts_inhibited", snapshot.shortcuts_owner.is_some())?;
+                table.set("shortcuts_owner", snapshot.shortcuts_owner)?;
                 let layouts = lua.create_table()?;
                 for (index, name) in keyboard.layouts.iter().enumerate() {
                     layouts.set(index + 1, name.clone())?;
@@ -5206,7 +5270,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         "input",
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let mut config = InputConfig::default();
+            let mut shortcuts = crate::shortcuts_inhibit::Settings::default();
             if let Some(options) = options {
+                if let Some(table) = options.get::<Option<mlua::Table>>("shortcuts_inhibit")? {
+                    shortcuts = shortcuts_settings(&table)?;
+                }
                 for (kind, key) in DeviceKind::CONFIGURABLE {
                     if let Some(table) = options.get::<Option<mlua::Table>>(key)? {
                         config.set_default(kind, settings_from_table(&table, key)?);
@@ -5231,6 +5299,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
             }
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Input(config));
+                pending.commands.push(Command::ShortcutsInhibit(shortcuts));
             })
         })?,
     )?;
@@ -8913,6 +8982,7 @@ mod tests {
             tray: Default::default(),
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
+            shortcuts_owner: None,
             windows: vec![WindowInfo {
                 icon: None,
                 client_side: false,
@@ -10361,6 +10431,78 @@ mod tests {
             crate::idle::Settings::default().lock_after,
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn shortcuts_policy_and_escape_from_user_lua_reach_the_shipped_configuration() {
+        let (directory, mut scripts) = shipped_init_with_user(
+            "solium-script-test-shortcuts-user",
+            r#"return { input = { shortcuts_inhibit = {
+                allow = "fullscreen", escape = "super+x", apps = { deny = { "blocked*" } }
+            } } }"#,
+        )
+        .expect("shipped configuration");
+        assert!(
+            scripts
+                .bindings()
+                .iter()
+                .any(|binding| binding.combo == "super+x" && binding.inhibited)
+        );
+        let settings = scripts
+            .startup()
+            .commands
+            .into_iter()
+            .find_map(|command| match command {
+                Command::ShortcutsInhibit(settings) => Some(settings),
+                _ => None,
+            })
+            .expect("shipped init hands over shortcut policy");
+        assert_eq!(settings.allow, crate::shortcuts_inhibit::Allow::Fullscreen);
+        assert_eq!(settings.escape, "super+x");
+        assert!(
+            settings
+                .deny
+                .iter()
+                .any(|pattern| pattern.matches("blocked.viewer"))
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn shortcuts_policy_validates_permission_escape_and_application_patterns() {
+        use crate::shortcuts_inhibit::Allow;
+        let lua = Lua::new();
+        for (value, allowed) in [
+            ("true", Allow::Always),
+            ("false", Allow::Never),
+            ("'fullscreen'", Allow::Fullscreen),
+        ] {
+            let table: Table = lua
+                .load(format!(
+                    "return {{allow={value}, escape='Super+X', apps={{deny={{'blocked*'}}}}}}"
+                ))
+                .eval()
+                .expect("table");
+            let settings = shortcuts_settings(&table).expect("valid policy");
+            assert_eq!(settings.allow, allowed);
+            assert_eq!(settings.escape, "super+x");
+            assert!(settings.deny[0].matches("blocked.viewer"));
+            assert!(!settings.deny[0].matches("trusted.viewer"));
+        }
+        for spec in [
+            "{allow='always'}",
+            "{escape=''}",
+            "{escape='bogus+q'}",
+            "{escape='super+no_such_key'}",
+            "{apps={deny={'a*b'}}}",
+            "{apps={deny={''}}}",
+        ] {
+            let table: Table = lua.load(format!("return {spec}")).eval().expect("table");
+            assert!(
+                shortcuts_settings(&table).is_err(),
+                "accepted invalid policy {spec}"
+            );
+        }
     }
 
     fn input_config(outcome: Outcome) -> Option<InputConfig> {
@@ -12591,6 +12733,7 @@ mod tests {
             tray: Default::default(),
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
+            shortcuts_owner: None,
             windows: Vec::new(),
             monitors: Vec::new(),
             work_area: Rect::default(),
@@ -13080,6 +13223,7 @@ mod tests {
             tray: Default::default(),
             media: Default::default(),
             keyboard: crate::keymap::State::initial(),
+            shortcuts_owner: None,
             windows: windows
                 .iter()
                 .map(|id| WindowInfo {

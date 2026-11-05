@@ -129,6 +129,7 @@ impl Solium {
             }
         }
         self.settling_scenes = false;
+        self.refresh_inhibitors();
     }
 
     /// Settle the scenes after a declaration: now, outside any dispatch, and
