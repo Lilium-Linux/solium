@@ -481,8 +481,9 @@ check "exactly those files ($sys_expected)" [ "$(count_files "$sys")" -eq "$sys_
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
 check "--check passed, using the staged /usr/share/solium" \
     grep -qF -- "--check passed (ok: " "$work/system.log"
+# A fixed string: the path has a ^ in it, which a pattern reads as an anchor.
 check "  as the asset root the binary logged" \
-    grep -qE -- "--check passed .*, using $(realpath "$sys_share")\$" "$work/system.log"
+    grep -qF -- ", using $(realpath "$sys_share")" <(grep -F -- "--check passed " "$work/system.log")
 DESTDIR="$work/system-local" "$install_sh" --no-build --prefix /usr/local >"$work/system-local.log" 2>&1
 check "--prefix /usr/local is a system prefix too" [ $? -eq 0 ]
 check "  its units in /usr/local/lib/systemd/user" \
