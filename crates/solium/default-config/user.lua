@@ -26,6 +26,11 @@ local screenshot = require("screenshot")
 -- Screens off on a key, or from outside (screens.lua).
 local screens = require("screens")
 
+-- This directory, found as Solium finds it: $XDG_CONFIG_HOME/solium when
+-- that is set, ~/.config/solium otherwise. The scenes below are named from
+-- it, so they are this copy's own and not whatever ~/.config holds.
+local here = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/solium"
+
 return {
     -- Monitors: Solium places them itself. To arrange them, name each by its
     -- connector (`solium --probe` lists them), for example:
@@ -52,8 +57,8 @@ return {
         rows = 4,
     },
 
-    -- The pointer: ~/.config/solium/cursor/Cursor.qml, violet like the rest.
-    cursor = { scene = "~/.config/solium/cursor/Cursor.qml", size = 24 },
+    -- The pointer: cursor/Cursor.qml beside this file, violet like the rest.
+    cursor = { scene = here .. "/cursor/Cursor.qml", size = 24 },
 
     -- Solium's own picture, by its path where Solium is installed: the bare
     -- name "solium" would be looked for beside qml/wallpaper.qml here, not
@@ -92,8 +97,7 @@ return {
     -- The shell: pop-ups, banners, quick search and the screenshot tool
     -- (shell/Shell.qml; the taskbar itself is bar.lua and shell/Bar.qml).
     shell = {
-        scene = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))
-            .. "/solium/shell/Shell.qml",
+        scene = here .. "/shell/Shell.qml",
     },
 
     -- Screenshots and the lock key.
