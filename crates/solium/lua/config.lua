@@ -740,6 +740,15 @@ local defaults = {
         max_output = 1048576,
     },
 
+    -- Files a configuration reads (#473): `sol.read(path, function(data,
+    -- err) ... end)`, which reads on a thread of its own, never on the
+    -- compositor's, and to the end, so `/proc` and `/sys` files work.
+    files = {
+        -- How many bytes a read takes at most. A longer file is not read:
+        -- its function gets `nil, "longer than files.max_read"`. 0 or more.
+        max_read = 4194304,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.

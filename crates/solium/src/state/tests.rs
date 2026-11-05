@@ -629,6 +629,107 @@ fn a_reload_kills_the_runs_and_cancels_the_timers() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// Settle the files at `now` until no write is running.
+fn files_written(state: &mut Solium, now: std::time::Duration) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    crate::files::settle_at(state, now);
+    while state.files.writing() > 0 {
+        assert!(std::time::Instant::now() < deadline, "a write never ended");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        crate::files::settle_at(state, now);
+    }
+}
+
+/// Run `chunk` in `state`'s configuration, between dispatches.
+fn lua(state: &Solium, chunk: &str) -> String {
+    state.scripts.as_ref().expect("the scripts").evaluate(chunk)
+}
+
+/// **A store is saved at most once a second, and survives a fresh start**
+/// (#473): the first look saves it, a change within the second waits for
+/// the second to pass, an unchanged store is not saved again, the
+/// compositor's end saves the last change, and a fresh `Scripts` reads it
+/// back. Driven by the clock the loop passes, not by waiting.
+#[test]
+fn a_store_is_saved_at_most_once_a_second_and_survives_a_fresh_start() {
+    use std::time::Duration;
+    let stored = crate::files::tests::scratch("state-store-throttle");
+    crate::files::tests::use_state_dir(&stored);
+    let source = r#"prefs = sol.store("prefs", { volume = 50 })"#;
+    let (_display, mut state, directory) = state_running("state-store-throttle", source);
+    let file = stored.join("prefs.json");
+    let saved = || std::fs::read_to_string(&file).unwrap_or_default();
+    files_written(&mut state, Duration::ZERO);
+    assert_eq!(
+        saved(),
+        "{\"volume\":50}\n",
+        "the first look saves the defaults"
+    );
+    lua(&state, "prefs.volume = 60 return ''");
+    files_written(&mut state, Duration::from_millis(999));
+    assert_eq!(saved(), "{\"volume\":50}\n", "saved within the second");
+    crate::files::settle_at(&mut state, Duration::from_millis(1000));
+    assert_eq!(state.files.writing(), 1, "not saved once the second passed");
+    files_written(&mut state, Duration::from_millis(1000));
+    assert_eq!(saved(), "{\"volume\":60}\n");
+    crate::files::settle_at(&mut state, Duration::from_millis(2000));
+    assert_eq!(state.files.writing(), 0, "saved again unchanged");
+    lua(&state, "prefs.volume = 70 return ''");
+    crate::files::finish(&mut state);
+    assert_eq!(saved(), "{\"volume\":70}\n", "the end did not save it");
+    let fresh = crate::script::Scripts::load(&directory.join("init.lua")).expect("loading again");
+    assert_eq!(fresh.evaluate("return tostring(prefs.volume)"), "70");
+    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(stored);
+}
+
+/// **A reload ends the watches and keeps the store** (#473): the store is
+/// saved before the reload and handed to the new configuration as it was,
+/// and the old watch's function is not called again.
+#[test]
+fn a_reload_ends_the_watches_and_keeps_the_store() {
+    use std::time::Duration;
+    let stored = crate::files::tests::scratch("state-reload-files");
+    crate::files::tests::use_state_dir(&stored);
+    let watched = crate::files::tests::scratch("state-reload-watched");
+    let (_display, mut state, directory) = state_running(
+        "state-reload-files",
+        &format!(
+            r#"prefs = sol.store("prefs", {{ n = 1 }})
+               prefs.n = 2
+               sol.watch("{dir}/w", function(event) sol.status("old " .. event.kind) end)"#,
+            dir = watched.display()
+        ),
+    );
+    assert_eq!(state.files.watching(), 1, "the premise: a watch");
+    let entry = directory.join("init.lua");
+    std::fs::write(
+        &entry,
+        r#"prefs = sol.store("prefs", { n = 1 }) sol.status("new " .. prefs.n)"#,
+    )
+    .expect("writing");
+    state.reload_from(&entry);
+    assert_eq!(state.files.watching(), 0);
+    assert_eq!(state.status, "new 2");
+    files_written(&mut state, Duration::ZERO);
+    assert_eq!(
+        std::fs::read_to_string(stored.join("prefs.json"))
+            .ok()
+            .as_deref(),
+        Some("{\"n\":2}\n"),
+        "not saved before the reload"
+    );
+    std::fs::write(watched.join("w"), "x").expect("writing the watched file");
+    for _ in 0..20 {
+        crate::files::settle_at(&mut state, Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(state.status, "new 2", "the old watch's function ran");
+    let _ = std::fs::remove_dir_all(directory);
+    let _ = std::fs::remove_dir_all(stored);
+    let _ = std::fs::remove_dir_all(watched);
+}
+
 /// **A `client_blur` that cannot bind costs only its own slots** (#78): with
 /// no `blur` anywhere, a rule of the user's still binds and runs, and the one
 /// problem listed is `client_blur`'s.

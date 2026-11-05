@@ -915,6 +915,11 @@ impl Solium {
                     self.timers.add(id, self.clock.now(), after, period);
                 }
                 Command::TimerCancel(id) => self.timers.cancel(id),
+                Command::FileRead(request) => self.files.read(request),
+                Command::FileWrite(request) => self.files.write(request),
+                Command::Watch { id, path, shown } => self.files.watch(id, &path, shown),
+                Command::WatchCancel(id) => self.files.cancel_watch(id),
+                Command::StoreLoaded { name, text } => self.files.loaded_store(name, text),
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
                     // Copied only when an entry changes, so `Folder` is sent
@@ -1159,6 +1164,9 @@ impl Solium {
         // it is what may fail, and the failure path has to leave the running
         // scripts -- and therefore their keep -- untouched.
         let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
+        // The stores saved now, whatever the new configuration turns out to
+        // be, so a reload never loses what a restart would keep (#473).
+        self.files.save(carried.stores());
         match Scripts::load_carrying(path, carried) {
             Ok(scripts) => {
                 crate::qml::clear_cache();
@@ -1236,6 +1244,9 @@ impl Solium {
                 // its own (#472): `tests::a_reload_kills_the_runs_and_cancels_the_timers`.
                 self.runs.stop_all();
                 self.timers.clear();
+                // And its watches, and what its reads and writes come to
+                // (#473): `tests::a_reload_ends_the_watches_and_keeps_the_store`.
+                self.files.reload();
                 self.start_scripts(Some(scripts));
                 // After the new configuration's `sol.startup`, so its
                 // `on_reload` is the one obeyed: the first frame's gate armed

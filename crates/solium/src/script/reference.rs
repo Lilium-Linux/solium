@@ -43,9 +43,10 @@ fn keys(table: &Table) -> BTreeSet<String> {
 }
 
 /// Every name the compositor puts in `sol`, in each table inside it, and on
-/// the objects the compositor hands out (the two `sol.layout` makes, and the
-/// timer `sol.after` and `sol.every` do), spelled the way `sol.lua` declares
-/// them: `sol.keep`, `sol.layout.grid`, `Tree:insert`, `Timer:cancel`.
+/// the objects the compositor hands out (the two `sol.layout` makes, the
+/// timer `sol.after` and `sol.every` do, and the watch `sol.watch` does),
+/// spelled the way `sol.lua` declares them: `sol.keep`, `sol.layout.grid`,
+/// `Tree:insert`, `Timer:cancel`.
 ///
 /// The tables are read from the real `sol` table, built the way a load builds
 /// it, so nothing here can be a stale copy. Every table-valued key is walked
@@ -83,6 +84,7 @@ fn registered() -> BTreeSet<String> {
         ("Tree", "TilingTree", 5),
         ("Scroller", "Scrolling", 5),
         ("Timer", "TimerHandle", 1),
+        ("Watch", "WatchHandle", 1),
     ] {
         let methods = userdata_methods(userdata);
         assert!(
