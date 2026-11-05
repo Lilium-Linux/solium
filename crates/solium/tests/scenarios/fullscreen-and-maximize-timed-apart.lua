@@ -2,7 +2,7 @@
 -- (#49): a second-long linear fullscreen is half way at 500 ms while a 200 ms
 -- maximise has long landed. Keys pressed with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::fullscreen_and_maximize_timed_apart`.
 
 local before = { x = 300, y = 200, w = 200, h = 100 }
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }

@@ -6,7 +6,7 @@
 -- taken again, it stays put for a few pixels and then comes off at the size
 -- it had, under the pointer, no longer marked.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, on one
+-- Played by `scenario::tests::each::desktop_snap_drag`, on one
 -- 1920x1080 monitor with nothing reserved.
 
 local function show(window)

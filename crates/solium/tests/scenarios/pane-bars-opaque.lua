@@ -2,7 +2,7 @@
 -- opaque and grey, focused or not, so what is behind the window -- the
 -- wallpaper's colour -- never shows through them and tints their grey.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_bars_opaque`, in
 -- software. Every pane is 400 by 300 outside. `reactive`'s bar is the top 30
 -- rows and `reveal`'s the top 34, there only while the pointer is inside the
 -- window; the points read are bar and nothing else, clear of the centred

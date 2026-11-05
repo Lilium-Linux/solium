@@ -10,7 +10,7 @@
 -- (1925, 490) takes the next free spot of the `cascade` grid down the left
 -- edge: (1920, 0), (1920, 32), (1920, 64). Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_tall_and_wide`.
 
 local short = { x = 0, y = 0, w = 1920, h = 110 }
 local narrow = { x = 1920, y = 0, w = 210, h = 1080 }

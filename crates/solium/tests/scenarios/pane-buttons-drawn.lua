@@ -3,7 +3,7 @@
 -- maximise, and shows its glyph, dark on it -- `×` to close, `+` to
 -- maximise. At rest neither shows a glyph.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_buttons_drawn`, in
 -- software. Every pane is 400 by 300 outside. A button is a 13-pixel disc,
 -- and what is read is the 7 by 7 square in the middle of it, which is inside
 -- the disc wherever it lands on the pixel grid: the fill and, while it shows,

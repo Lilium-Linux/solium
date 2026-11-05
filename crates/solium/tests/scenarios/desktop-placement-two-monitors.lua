@@ -3,7 +3,7 @@
 -- the windows already on that monitor -- the other monitor's windows take
 -- no spot on it (#240). Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_two_monitors`.
 
 local left = { x = 0, y = 0, w = 1920, h = 1080 }
 local right = { x = 1920, y = 0, w = 1280, h = 1024 }

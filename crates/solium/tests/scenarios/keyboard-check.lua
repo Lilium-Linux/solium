@@ -2,7 +2,7 @@
 -- one `config.lua` documents is accepted beside the xkb names, and a misspelt
 -- one is reported by its whole path, with the setting it was near.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::keyboard_check`.
 
 return {
     user = [[

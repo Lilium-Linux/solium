@@ -2,7 +2,7 @@
 -- what the panes are handed: `KeyboardPillLayer` at the caret. The QML's half;
 -- `keyboard-pane.lua` is the policy's.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::keyboard_pane_drawn`, in
 -- software. The pane is 400 by 300, its bar 32 high. A caret at (100, 60),
 -- 2 by 16, in the pane: the capsule is 28 high, its top 6 below the caret,
 -- so its middle row is y = 96, and it is centred on x = 101, at least 32

@@ -25,7 +25,7 @@
 //
 // `crates/solium/tests/scenarios/keyboard-surface-drawn.lua` and
 // `keyboard-pane-drawn.lua` draw it and read its pixels, through
-// `scenario::tests::every_scenario_on_the_qt_thread_passes`.
+// `scenario::tests::each`.
 
 import QtQuick
 import QtQuick.Shapes

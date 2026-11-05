@@ -34,7 +34,7 @@
 -- handed, Caps again on focus), `keyboard-pane-bare.lua` (a window with no
 -- frame, and one going fullscreen), `keyboard-off.lua` (`show = false`) and
 -- `keyboard-indicator-false.lua` (`indicator = false`), through
--- `scenario::tests::every_scenario_with_a_client_passes`.
+-- `scenario::tests::each`.
 
 local config = require("config")
 

@@ -2,7 +2,7 @@
 -- focused or not, so what is behind the window -- the wallpaper's colour --
 -- never shows through the frame.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_pulse_drawn`, in
 -- software. The pane is 400 by 300; the bar is 36 high and the line the two
 -- rows below it, 36 and 37.
 

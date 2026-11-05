@@ -3,7 +3,7 @@
 -- enables its field with no caret, and sends one a few milliseconds after
 -- each key, `sol.on("text_input")` telling it as `"caret"`.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
+-- Played by `scenario::tests::each::keyboard_follow`, with
 -- `us,ru` and Russian live. A framed window at (300, 200); the surface is
 -- 112 by 56, centred under the caret with the capsule's top 6 below it, as
 -- in `keyboard-surface.lua`, or on screen at (904, 938) with no caret.

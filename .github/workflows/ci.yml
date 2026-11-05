@@ -61,8 +61,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # nextest, as dev/gate.sh runs them: every test in a process of its own,
+      # so the Qt tests run in parallel (#480). Doctests are cargo's.
+      - uses: taiki-e/install-action@nextest
+
       - name: Tests
-        run: cargo test --workspace
+        run: |
+          cargo nextest run --workspace --no-fail-fast
+          cargo test --doc --workspace
 
       # The configuration is Lua, and nothing above this line reads Lua. A
       # syntax error in config.lua compiles, tests and clippies perfectly

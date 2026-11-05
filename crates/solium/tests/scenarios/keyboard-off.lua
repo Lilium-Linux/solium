@@ -1,7 +1,7 @@
 -- `keyboard.indicator.show = false`: no surface, and no pane draws a pill,
 -- whatever the keyboard does.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
+-- Played by `scenario::tests::each::keyboard_off`, with
 -- `us,ru` and Russian live.
 
 return {

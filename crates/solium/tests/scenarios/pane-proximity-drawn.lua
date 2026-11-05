@@ -2,7 +2,7 @@
 -- rest and on approach, focused or not, so what is behind the window -- the
 -- wallpaper's colour -- never shows through it.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_proximity_drawn`, in
 -- software. The pane is 400 by 300 outside, with 4 pixels reserved on every
 -- side: at rest the border is the outermost of them, a hairline, and with the
 -- pointer inside it fills all four.

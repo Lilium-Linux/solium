@@ -6,7 +6,7 @@
 // the surface goes and when there is something to show, and hands it as
 // `cue`; this draws it. Nothing in the compositor knows this file exists.
 // `crates/solium/tests/scenarios/keyboard-surface-drawn.lua`, through
-// `scenario::tests::every_scenario_on_the_qt_thread_passes`.
+// `scenario::tests::each`.
 
 import QtQuick
 import Solium

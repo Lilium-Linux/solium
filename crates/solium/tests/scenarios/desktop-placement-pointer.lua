@@ -4,7 +4,7 @@
 -- when that step would leave the work area, a new diagonal starts at the work
 -- area's top-left plus `cascade` (#240). Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_pointer`.
 
 local function show(window)
     return string.format("%d,%d %dx%d", window.x, window.y, window.w, window.h)
