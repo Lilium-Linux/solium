@@ -110,6 +110,11 @@ local function rules()
                        shine = 0, shine_back = 0, shade = 0 },
         }
     end
+    -- Then the rules user.lua adds in `effects.rules`, after these, so for one
+    -- part and slot a rule of the user's wins, as a later rule does (#500).
+    for _, rule in ipairs(require("config").effects.rules or {}) do
+        list[#list + 1] = rule
+    end
     return list
 end
 
