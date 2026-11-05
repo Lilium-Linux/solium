@@ -1,0 +1,50 @@
+title = "Minimise into the taskbar"
+what = "super+m pulls the window into its own taskbar button with the genie; a click on the button plays it back out."
+keys = "super+m, a click on the button"
+
+how = """The default configuration's taskbar.lua points the minimise at the window's own button: a present of the window, deformed by the effect folder named genie, a page of Lua that places a grid of points for each moment."""
+[stage]
+one_group = true
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [700, 70, 820, 520]
+"user.lua" = [160, 230, 820, 520]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+m"
+
+[[at]]
+ms = 8600
+move = "96,880"
+over = 700
+
+[[at]]
+ms = 9600
+click = "96,880"
+
+[[at]]
+ms = 10600
+move = "1300,640"
+over = 700
+
+[capture]
+from = 7000
+to = 11800
+loop = true
+
+[out]
+webp = 640
+poster = 900
+slow = 4
+
+[[code]]
+file = "crates/solium/default-config/taskbar.lua"
+find = "squeezed into its button"
+lines = 15

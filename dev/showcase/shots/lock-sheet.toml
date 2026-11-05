@@ -1,0 +1,37 @@
+title = "The lock screen Solium ships"
+what = "The lock Solium ships with no configuration: one sheet, down from the top as the session locks and back up as it unlocks."
+keys = "super+ctrl+l"
+
+[stage]
+one_group = true
+patch = '''
+config.lock.scene = "Lock"
+'''
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [240, 90, 820, 560]
+"user.lua" = [560, 160, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+ctrl+l"
+
+[[at]]
+ms = 9800
+unlock = true
+
+[capture]
+from = 7000
+to = 11400
+loop = true
+
+[out]
+webp = 640
+poster = 1600
+slow = 4

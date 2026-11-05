@@ -1183,7 +1183,15 @@ pub(crate) fn run() -> Result<()> {
                             path.clone()
                         };
                         match capture::take_frame(renderer, &framebuffer, size.w, size.h, &path) {
-                            Ok(()) => tracing::debug!(path = %path.display(), "captured a frame"),
+                            // When, on the compositor's clock: a burst's
+                            // frames are as far apart as the passes that drew
+                            // them, so a video made from them is paced by
+                            // these, not by the interval asked for (#497).
+                            Ok(()) => tracing::info!(
+                                path = %path.display(),
+                                at_us = u64::try_from(now.as_micros()).unwrap_or(u64::MAX),
+                                "captured a frame"
+                            ),
                             Err(err) => tracing::warn!(?err, "capturing a frame failed"),
                         }
 

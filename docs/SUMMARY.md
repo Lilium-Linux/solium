@@ -6,6 +6,8 @@
 
 [Introduction](introduction.md)
 
+[Showcase](showcase.md)
+
 # Getting started
 
 - [Installing and a first session](generated/getting-started.md)

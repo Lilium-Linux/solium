@@ -1,0 +1,9 @@
+title = "Fourteen frames"
+what = "Every frame style that ships, on the same two windows: each is a folder of QML, and pane in user.lua picks one."
+
+[grid]
+still = true
+cells = ["frame-rounded-violet", "frame-rounded-border", "frame-border", "frame-bottom", "frame-flush", "frame-glass", "frame-left", "frame-proximity", "frame-pulse", "frame-reactive", "frame-reveal", "frame-rounded", "frame-shadow", "frame-top"]
+labels = ["rounded-violet", "rounded-border", "border", "bottom", "flush", "glass", "left", "proximity", "pulse", "reactive", "reveal", "rounded", "shadow", "top"]
+cols = 4
+cell_width = 400

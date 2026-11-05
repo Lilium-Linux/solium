@@ -1,0 +1,59 @@
+title = "The extendable titlebar"
+what = "A right click on the titlebar grows it, and the window's content moves down to make room: quick settings for that one window. Esc folds it away."
+keys = "a right click on the titlebar, Esc"
+
+how = """QuickSettings.qml, part of the rounded-violet frame. The bar asks the compositor for room with growTop, so the window's content moves down instead of being covered, and titlebar.lua answers what its buttons ask."""
+[stage]
+one_group = true
+apps = ["log"]
+
+[stage.places]
+"git log" = [360, 160, 880, 560]
+
+[[at]]
+ms = 6200
+move = "1100,560"
+from = "1100,560"
+
+[[at]]
+ms = 7200
+move = "800,176"
+over = 500
+
+[[at]]
+ms = 8000
+click = "800,176"
+button = "right"
+
+[[at]]
+ms = 8900
+move = "450,248"
+over = 600
+
+[[at]]
+ms = 9700
+move = "1150,248"
+over = 1800
+
+[[at]]
+ms = 12000
+key = "escape"
+
+[[at]]
+ms = 12600
+move = "1100,560"
+over = 600
+
+[capture]
+from = 7000
+to = 13800
+loop = true
+
+[out]
+webp = 640
+poster = 2000
+crop = [240, 80, 1120, 630]
+
+[[code]]
+file = "crates/solium/default-config/qml/panes/rounded-violet/QuickSettings.qml"
+lines = 7

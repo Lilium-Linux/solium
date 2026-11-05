@@ -1,0 +1,24 @@
+title = "No configuration"
+what = "The same compositor with no ~/.config/solium: the bare session Solium ships."
+
+[stage]
+one_group = true
+bare = true
+apps = ["log", "shell"]
+
+[stage.places]
+"git log" = [200, 90, 820, 560]
+fastfetch = [620, 220, 820, 540]
+
+[[at]]
+ms = 6200
+move = "1500,780"
+from = "1500,780"
+
+[capture]
+from = 7000
+to = 7100
+
+[out]
+mp4 = false
+still = true

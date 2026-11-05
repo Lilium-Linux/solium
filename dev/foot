@@ -10,8 +10,12 @@
 # desktop instead of inside Solium — with nothing logged anywhere.
 #
 #   SOLIUM_TERMINAL=$PWD/dev/foot dev/run-nested.sh
+# The host's fonts, since the image has no monospace one, and a UTF-8
+# locale, which it has but does not set: without them foot opens on its own
+# warnings.
 exec podman run --rm --userns=keep-id --security-opt label=disable \
     -v "$HOME:$HOME" -v "$XDG_RUNTIME_DIR:$XDG_RUNTIME_DIR" \
+    -v /usr/share/fonts:/usr/share/fonts:ro -e LANG=C.UTF-8 \
     -e "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" \
     -e "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:?no compositor to connect to}" \
     localhost/solium-build:fc44 foot "$@"

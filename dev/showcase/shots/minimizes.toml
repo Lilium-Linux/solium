@@ -1,0 +1,12 @@
+title = "Four ways to minimise"
+what = "The same super+m and click under four morphs: the shipped genie, the genie with two numbers changed, and two example effect folders."
+
+[grid]
+cells = ["minimize", "minimize-spring", "minimize-fold", "minimize-dissolve"]
+labels = ["the genie (ships)", "genie: spread 3, a spring", "fold (an example)", "dissolve (an example)"]
+cols = 2
+cell_width = 720
+
+[out]
+webp = 960
+webp_kb = 4096

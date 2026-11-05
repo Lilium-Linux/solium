@@ -1,0 +1,8 @@
+title = "The desktop is configuration"
+what = "One compositor, two configurations: nothing in ~/.config/solium, and the default one install puts there."
+
+[grid]
+still = true
+cells = ["bare", "configured"]
+labels = ["no configuration", "the default configuration"]
+cols = 2

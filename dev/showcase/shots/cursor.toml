@@ -1,0 +1,53 @@
+title = "The pointer"
+what = "The default configuration's pointer is a QML scene: every shape is one outline of the same points, so a change of shape is a morph around the hotspot. Here over a terminal's text, a link, and a window's edge."
+how = """cursor = { scene = ... } in user.lua names Cursor.qml. Moving fast lights a glow, a MultiEffect, which only the GPU path draws: a nested capture, like this one, leaves it out."""
+
+[stage]
+apps = ["docs", "log"]
+patch = '''
+config.cursor.size = 48
+config.floating.atrium.enabled = false
+'''
+
+[stage.places]
+"org.mozilla.firefox" = [60, 60, 820, 560]
+showcase-log = [700, 260, 700, 420]
+
+[[at]]
+ms = 7000
+move = "520,780"
+from = "520,780"
+
+[[at]]
+ms = 7600
+move = "1000,470"
+over = 700
+
+[[at]]
+ms = 8700
+move = "190,563"
+over = 1000
+
+[[at]]
+ms = 10000
+move = "1401,470"
+over = 1000
+
+[[at]]
+ms = 12200
+move = "520,780"
+over = 900
+
+[capture]
+from = 7200
+to = 13400
+loop = true
+
+[out]
+webp = 640
+poster = 2600
+follow = { size = [640, 360] }
+
+[[code]]
+file = "crates/solium/default-config/cursor/Cursor.qml"
+lines = 14

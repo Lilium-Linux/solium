@@ -1,0 +1,23 @@
+title = "The default configuration"
+what = "The same two windows under the default configuration."
+
+[stage]
+one_group = true
+apps = ["log", "shell"]
+
+[stage.places]
+"git log" = [200, 90, 820, 560]
+fastfetch = [620, 220, 820, 540]
+
+[[at]]
+ms = 6200
+move = "1500,780"
+from = "1500,780"
+
+[capture]
+from = 7000
+to = 7100
+
+[out]
+mp4 = false
+still = true

@@ -1,0 +1,69 @@
+title = "Atrium"
+what = "Stage Manager on the floating desktop: the window in use on the stage, every other application a live, tilted card in a strip that slides in at the left edge. A click brings a card's group onto the stage."
+keys = "the pointer at the left edge, a click on a card"
+
+how = """Atrium is part of floating mode, crates/solium/lua/atrium.lua, and placing nothing: the cards are sol.presents of the live windows in perspective, and a click is only a change of focus. The default configuration turns it on in user.lua, with its key."""
+[stage]
+apps = ["log", "notes", "docs"]
+
+[stage.places]
+showcase-log = [300, 70, 900, 600]
+showcase-notes = [340, 110, 900, 600]
+"org.mozilla.firefox" = [270, 36, 1290, 800]
+
+[[at]]
+ms = 6200
+move = "960,470"
+from = "960,470"
+
+[[at]]
+ms = 7400
+move = "1,430"
+over = 650
+
+[[at]]
+ms = 8400
+move = "110,330"
+over = 450
+
+[[at]]
+ms = 9200
+click = "110,330"
+
+[[at]]
+ms = 10000
+move = "960,470"
+over = 700
+
+[[at]]
+ms = 11600
+move = "1,430"
+over = 650
+
+[[at]]
+ms = 12600
+move = "110,330"
+over = 450
+
+[[at]]
+ms = 13400
+click = "110,330"
+
+[[at]]
+ms = 14200
+move = "960,470"
+over = 700
+
+[capture]
+from = 7000
+to = 15600
+loop = true
+
+[out]
+webp = 640
+poster = 2200
+
+[[code]]
+file = "crates/solium/default-config/user.lua"
+find = "floating = {"
+lines = 3

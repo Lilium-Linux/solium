@@ -1,0 +1,60 @@
+title = "Snapping"
+what = "A window dragged to the right edge shows where it will go, and glides there when let go; dragged away, it comes back to its own size under the pointer."
+keys = "drag a titlebar to the right edge, and back"
+
+how = """crates/solium/lua/snap.lua, in Lua: the drag events say where the pointer is, a scene draws the preview, and sol.place glides the window into the zone. The left edge is Atrium's here, so this one snaps to the right."""
+[stage]
+one_group = true
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [140, 120, 760, 540]
+"user.lua" = [700, 260, 700, 460]
+
+[[at]]
+ms = 6200
+move = "520,420"
+from = "520,420"
+
+# The window to drag, focused first.
+[[at]]
+ms = 6500
+click = "520,136"
+
+[[at]]
+ms = 7200
+move = "520,136"
+over = 300
+
+[[at]]
+ms = 7600
+drag = "1597,420"
+over = 1000
+
+[[at]]
+ms = 9400
+move = "1200,16"
+over = 500
+
+[[at]]
+ms = 10200
+drag = "520,136"
+over = 1000
+
+[[at]]
+ms = 11500
+move = "520,420"
+over = 500
+
+[capture]
+from = 7000
+to = 12400
+loop = true
+
+[out]
+webp = 640
+poster = 1800
+
+[[code]]
+file = "crates/solium/lua/snap.lua"
+lines = 14

@@ -1,0 +1,57 @@
+# The book's Showcase page, docs/showcase.md, as `record.py --page` writes
+# it: these sections in this order, each shot's picture, what it shows, its
+# keys, how it is done and the code that does it, cut from the files the
+# recording ran. Edit this or a shot, never docs/showcase.md.
+
+title = "Showcase"
+intro = """
+Everything on this page was recorded from Solium itself, nested, on the
+configuration that ships, and is made again by one command,
+`dev/showcase/record.py`, whenever the desktop changes. Nothing is drawn on a
+frame afterwards. Under each one is how it is done: almost always a file of
+Lua or QML in the default configuration, which is yours to change.
+"""
+
+[[section]]
+title = "The desktop as it ships"
+shots = ["hero", "tour", "atrium", "tiling", "minimize", "snap", "titlebar", "lock"]
+
+[[section]]
+title = "Make it yours"
+intro = """
+The default configuration is an example, copied into `~/.config/solium` on
+install. Change a file and the running session reloads it.
+"""
+shots = ["live-config", "configuration-is-the-desktop"]
+
+[[section]]
+title = "Lock screens"
+intro = """
+A lock screen is a QML scene, chosen by `lock.scene`. Solium draws the
+desktop under it while it comes in and goes out, ends each at its bound, and
+never shows it the password: the scene only has to look right at every moment
+of its own entry and exit.
+"""
+shots = ["locks"]
+
+[[section]]
+title = "Morphs"
+intro = """
+A window's way into its taskbar button is an effect folder: Lua that places a
+grid of points for each moment, and, beside it if it wants one, GLSL for the
+pixels. The default configuration's minimise plays the folder named `genie`,
+and a folder of yours of that name takes its place.
+"""
+shots = ["minimizes"]
+
+[[section]]
+title = "Frames"
+intro = """
+A window's frame is a folder of QML: a `Pane.qml` saying what it reserves, and
+its layers. `pane` in `user.lua` picks one; every shipped one is below.
+"""
+shots = ["frames", "motion-frames", "glass"]
+
+[[section]]
+title = "The pointer and the keyboard"
+shots = ["cursor", "pill"]
