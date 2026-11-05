@@ -40,7 +40,15 @@ local MATERIAL = "blur"
 local ACTIVE = 0.88
 local INACTIVE = 0.80
 local FADE = { duration = 200, easing = "outCubic" }
-local PANE = "rounded-violet"
+-- The frame whose titlebar this file folds into the border as a window
+-- tiles, and unfolds as it floats: rounded-violet's (its Frame.qml). The
+-- frame every window gets is `pane` in user.lua, rounded-violet unless you
+-- choose another; with another, nothing folds and the rest still applies.
+local FOLDS = "rounded-violet"
+
+local function chosen()
+    return require("config").pane or FOLDS
+end
 -- The titlebar's height (Theme.titlebarHeight): what rounded-violet's frame
 -- takes above a floating window. Tiled, it folds to a band (Frame.qml),
 -- rounded-violet's `insets.top`.
@@ -81,7 +89,7 @@ local function rules()
     local glass = { "glass", radius = RADIUS, soften_passes = 5, soften_offset = 6, haze = 1, rim_haze = 0.7 }
     local behind = MATERIAL == "glass" and glass or blur
     local list = {}
-    for _, style in ipairs({ PANE }) do
+    for _, style in ipairs({ chosen() }) do
         list[#list + 1] = {
             match = { style = style, fullscreen = false },
             part = "pane", slot = "behind",
@@ -146,9 +154,10 @@ function looks.refresh()
 end
 
 function looks.pane()
-    if pane_now ~= PANE then
-        pane_now = PANE
-        sol.pane(PANE)
+    local pane = chosen()
+    if pane_now ~= pane then
+        pane_now = pane
+        sol.pane(pane)
         effects()
     end
 end
@@ -157,7 +166,7 @@ end
 -- configuration's frame, and what it takes now in any other (a window that
 -- draws its own titlebar has no frame at all).
 local function floating_top(w)
-    if w.style == PANE and not w.client_side then
+    if w.style == FOLDS and not w.client_side then
         return TITLEBAR
     end
     return w.insets and w.insets.top or 0
@@ -177,7 +186,7 @@ local function to_unfold(w, folded)
     local now
     if w.insets then
         now = w.insets.top
-    elseif w.style == PANE and not w.client_side then
+    elseif w.style == FOLDS and not w.client_side then
         now = folded and BAND or TITLEBAR
     else
         now = 0
