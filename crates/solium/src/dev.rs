@@ -27,6 +27,33 @@ pub(crate) fn capture_frames() -> usize {
         .max(1)
 }
 
+/// The rate the compositor's clock runs at, nested: `SOLIUM_CLOCK_RATE`, 1 when
+/// unset, from 0.05 to 4 (#501).
+///
+/// ```sh
+/// SOLIUM_CLOCK_RATE=0.25 SOLIUM_CAPTURE_INTERVAL=4 ./target/debug/solium
+/// ```
+///
+/// A capture reads its frame back in the pass that drew it, and a heavy pass
+/// takes longer than a frame, so a burst at the real rate misses frames. At a
+/// quarter, every animation, QML's and Lua's timers and every `SOLIUM_*_AT`
+/// moment go four times slower together, each host frame is a quarter of its
+/// time on the clock, and a video paced by the frames' own moments is smooth
+/// and true to speed. Applications are not slowed: their own clocks are their
+/// own.
+pub(crate) fn clock_rate() -> f64 {
+    let Ok(raw) = std::env::var("SOLIUM_CLOCK_RATE") else {
+        return 1.0;
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(rate) if rate.is_finite() && rate > 0.0 => rate.clamp(0.05, 4.0),
+        _ => {
+            tracing::warn!(value = raw, "SOLIUM_CLOCK_RATE is not a rate; the clock runs at 1");
+            1.0
+        }
+    }
+}
+
 /// How many monitors the nested backend should pretend to have.
 ///
 /// ```sh

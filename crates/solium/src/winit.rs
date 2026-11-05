@@ -74,6 +74,12 @@ pub(crate) fn run() -> Result<()> {
     let display_handle = display.handle();
 
     let mut state = Solium::new(display_handle.clone());
+    // Slowed for a capture, before anything has started to move (#501).
+    let rate = dev::clock_rate();
+    if rate != 1.0 {
+        tracing::info!(rate, "the compositor's clock runs at this rate (SOLIUM_CLOCK_RATE)");
+        state.clock.set_rate(rate);
+    }
 
     // The socket clients connect to. Named, not guessed: a client that resolves
     // WAYLAND_DISPLAY to empty gets the *default* socket, which on a developer

@@ -194,6 +194,15 @@ SOLIUM_CAPTURE_FRAMES=<n>
 SOLIUM_CAPTURE_INTERVAL=<ms>
     **Nested only.** The time between the frames of a burst. 16 by default.
 
+SOLIUM_CLOCK_RATE=<rate>
+    **Nested only.** Run the compositor's clock at this rate, from 0.05 to 4:
+    at `0.25` every animation, QML's animations and timers, Lua's timers and
+    every `SOLIUM_*_AT` moment go four times slower together. For a capture
+    burst whose passes take longer than a frame: with the clock slowed, each
+    host frame is a short step on the clock, and frames paced by their own
+    moments make a smooth video at true speed. Applications run at their own
+    speed.
+
 SOLIUM_TRIGGER_AT=<ms>:<combo>,...
     **Nested only.** Run what these key combinations are bound to, at these
     moments: `5200:super+space,6200:super+space`. The binding is looked up by
