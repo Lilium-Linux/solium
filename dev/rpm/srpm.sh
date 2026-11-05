@@ -10,7 +10,8 @@
 # is dev/rpm/solium.spec with the commit, its date, the commit count and the
 # version written in as %global lines, and the variant chosen, and next to the
 # source tarball is every crate Cargo.lock names, from `cargo vendor`, which
-# the spec unpacks `--with vendored`. Prints the path of the .src.rpm.
+# the spec unpacks `--with vendored`. Prints the path of the .src.rpm, and
+# writes OUTDIR/package.env: the name, version, base, count and commit.
 #
 # Needs git, cargo and rpmbuild (rpm-build), and network for `cargo vendor`;
 # no build container, since nothing is compiled. .github/workflows/package.yml
@@ -91,4 +92,7 @@ rpmbuild -bs --define "_topdir $topdir" "$spec" >"$out/srpm.log" 2>&1 \
     || { cat "$out/srpm.log" >&2; die "rpmbuild -bs failed"; }
 srpm="$(ls "$topdir"/SRPMS/"$name"-*.src.rpm)"
 mv "$srpm" "$out/"
+# What was packaged, for the workflow that names a release after it (#491).
+printf '%s\n' "name=$name" "version=$version" "base=$base" "count=$count" \
+    "commit=$commit" >"$out/package.env"
 echo "$out/${srpm##*/}"
