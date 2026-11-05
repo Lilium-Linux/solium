@@ -33,9 +33,9 @@ Tracking: [daily-drive queue](https://github.com/Lilium-Linux/solium/issues?q=is
 
 ## A complete, replaceable desktop
 
-The preview already supplies a bar, dock, search and desktop icons. Complete
-service-backed UI, widgets and native locking while keeping the whole desktop
-replaceable configuration. A shell that is its own program can already
+The preview already supplies a bar, search, Alt+Tab, a stage-manager strip
+and native locking. Complete the service-backed UI while keeping the whole
+desktop replaceable configuration. A shell that is its own program can already
 manage windows, workspaces and monitors through Wayland protocols (#50, #60,
 #51); what it still lacks is a way to be trusted with the clipboard and
 per-window icons.

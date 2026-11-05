@@ -15,8 +15,6 @@ require("recents")
 require("deskstack")
 -- The selected circular ripple on an application notification.
 require("notification-ripple")
--- The editable desktop canvas: real files, widgets and saved placement.
-require("desktop")
 -- Quick search on super+d (search.lua, shell/Search.qml).
 require("search")
 

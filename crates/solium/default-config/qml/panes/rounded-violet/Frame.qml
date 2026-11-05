@@ -67,9 +67,6 @@ Item {
     property bool fullscreen: false
     property bool floating: false
     property var windowValues: ({})
-    FlightVisibility { id: desktopOpening; values: frame.windowValues }
-    opacity: desktopOpening.flight && !desktopOpening.revealed ? 0 : 1
-    Behavior on opacity { enabled: desktopOpening.revealed; NumberAnimation { duration: 80 } }
 
     // Whether the quick settings are open (titlebar.lua keeps it): the bar
     // then grows taller and the window's content moves down to make room,

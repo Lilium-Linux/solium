@@ -66,12 +66,6 @@ PaneStyle {
     // bar and the outline square with it.
     client.radius: (maximized || (windowValues && windowValues.snapped)) ? 0 : 12
 
-    Layer {
-        depth: "behind"
-        name: "desktop-icon"
-        source: "DesktopIcon.qml"
-    }
-
     // Atrium's cards' shadows on one another (#449): dormant, and drawn at
     // no cost, unless the window is a card. Bled far enough for the shadow
     // of the smallest card, which is spread in the window's own pixels.

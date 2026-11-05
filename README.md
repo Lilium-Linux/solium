@@ -35,7 +35,7 @@ promised. Check the [current status](docs/status.md) and
 
 The default configuration is a whole desktop: a taskbar, a floating titlebar
 with quick settings, window snapping, a stage-manager strip, quick search,
-Alt+Tab cards and an editable desktop. It is configuration built on Solium's
+Alt+Tab cards and a 3D workspace stack. It is configuration built on Solium's
 public API, copied into `~/.config/solium` on install, and yours to change. Solium has its own
 lock screen, takes touch on its own UI as on windows, and serves notifications
 and audio to scenes and Lua, follows media players and hosts the tray. Power,

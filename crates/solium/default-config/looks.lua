@@ -124,7 +124,6 @@ local function effects()
         settings[key] = value
     end
     settings.rules = rules()
-    settings.load = { "desktop-flight" }
     sol.effects(settings)
     -- A rule the compositor refuses keeps the whole set out, and says so only
     -- here: in the log too, so it is not missed.
