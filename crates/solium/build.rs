@@ -97,9 +97,11 @@ fn main() {
         .file("qml/lock.cpp")
         .include("qml");
 
-    // Qt6Quick pulls in Core, Gui and Qml transitively.
+    // Qt6Quick pulls in Core, Gui and Qml transitively. Probed without telling
+    // cargo to link it yet: see `link_after`.
     let qt = match pkg_config::Config::new()
         .atleast_version("6.5")
+        .cargo_metadata(false)
         .probe("Qt6Quick")
     {
         Ok(qt) => qt,
@@ -189,11 +191,12 @@ fn main() {
     // libGLESv2 is deliberately *not* linked: the handful of plain GL calls go
     // through QOpenGLFunctions, which is by definition the GL that Qt's own RHI
     // is driving. See import_dmabuf_texture.
-    match pkg_config::Config::new().probe("egl") {
+    let egl = match pkg_config::Config::new().cargo_metadata(false).probe("egl") {
         Ok(egl) => {
             for path in &egl.include_paths {
                 build.include(path);
             }
+            egl
         }
         Err(err) => {
             eprintln!("error: EGL development files not found: {err}");
@@ -203,9 +206,28 @@ fn main() {
             eprintln!("       openSUSE:      Mesa-libEGL-devel");
             std::process::exit(1);
         }
-    }
+    };
 
     build.compile("solium_qml_host");
+    link_after(&[&qt, &egl]);
+}
+
+/// Link Qt and EGL after the host library that needs them.
+///
+/// rustc links with `--as-needed`, which keeps a shared library only if
+/// something already on the line uses it. `probe` would print Qt's and EGL's
+/// libraries at once, before `compile` names `solium_qml_host`, the only code
+/// that uses them, so a linker that honours the order drops them and every Qt
+/// symbol comes out undefined. Fedora's own build of the package does (#486).
+fn link_after(libraries: &[&pkg_config::Library]) {
+    for library in libraries {
+        for path in &library.link_paths {
+            println!("cargo:rustc-link-search=native={}", path.display());
+        }
+        for name in &library.libs {
+            println!("cargo:rustc-link-lib={name}");
+        }
+    }
 }
 
 /// Where moc is: `QT_MOC`, then the `libexecdir` Qt6Core's pkg-config file
