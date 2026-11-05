@@ -7,7 +7,7 @@
 // windows, and the press there goes on to their own resize borders, which
 // show the resize cursor and move the seam as a tiled seam moves.
 // `crates/solium/tests/scenarios/snap-drawn.lua`, through
-// `scenario::tests::every_scenario_on_the_qt_thread_passes`.
+// `scenario::tests::each`.
 
 import QtQuick
 import Solium

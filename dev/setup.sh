@@ -9,6 +9,8 @@
 #
 # 1. Rust, through rustup: the toolchain rust-toolchain.toml names, with
 #    rustfmt and clippy, which dev/gate.sh runs. rustup installs them.
+#    cargo-nextest, which runs the gate's tests, is named with the command
+#    that installs it.
 # 2. The system packages the README's "Building" section lists, asked of
 #    pkg-config. With all of them, cargo builds on this machine and dev/gate.sh
 #    runs as it is. Without them, on Fedora with podman, it builds the image
@@ -73,6 +75,11 @@ if command -v cargo >/dev/null 2>&1; then
             lack "cargo $tool (with rustup: rustup component add ${tool/fmt/rustfmt})"
         fi
     done
+    if cargo nextest --version >/dev/null 2>&1; then
+        ok "cargo nextest"
+    else
+        lack "cargo nextest, which runs the gate's tests: cargo install --locked cargo-nextest"
+    fi
 fi
 
 echo "System packages"

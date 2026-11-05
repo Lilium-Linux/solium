@@ -17352,7 +17352,10 @@ mod dialogs {
     fn scripts(name: &str, layout: &str) -> Scripts {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!("solium-dialogs-{name}-{serial}"));
+        let directory = std::env::temp_dir().join(format!(
+            "solium-dialogs-{name}-{}-{serial}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&directory);
         let entry = directory.join("init.lua");
         std::fs::write(
@@ -18070,7 +18073,10 @@ mod dialogs {
         fn layout_with(layout: &str, before: &str) -> (Scripts, std::path::PathBuf) {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!("solium-reflow-{layout}-{serial}"));
+            let directory = std::env::temp_dir().join(format!(
+                "solium-reflow-{layout}-{}-{serial}",
+                std::process::id()
+            ));
             let _ = std::fs::create_dir_all(&directory);
             let entry = directory.join("init.lua");
             std::fs::write(
@@ -18784,7 +18790,8 @@ mod dialogs {
         fn tiling_with(before: &str) -> (Scripts, std::path::PathBuf) {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!("solium-overflow-{serial}"));
+            let directory = std::env::temp_dir()
+                .join(format!("solium-overflow-{}-{serial}", std::process::id()));
             let _ = std::fs::create_dir_all(&directory);
             let entry = directory.join("init.lua");
             std::fs::write(
@@ -19730,7 +19737,8 @@ mod dialogs {
         fn entry_with(before: &str) -> std::path::PathBuf {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!("solium-sizes-{serial}"));
+            let directory =
+                std::env::temp_dir().join(format!("solium-sizes-{}-{serial}", std::process::id()));
             let _ = std::fs::create_dir_all(&directory);
             let entry = directory.join("init.lua");
             std::fs::write(

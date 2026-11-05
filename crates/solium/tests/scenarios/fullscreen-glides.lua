@@ -5,7 +5,7 @@
 -- application answers each size it is told, as one does. `drawn` is the
 -- rectangle the window is drawn at, on the compositor's clock.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::fullscreen_glides`.
 
 local before = { x = 300, y = 200, w = 200, h = 100 }
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }

@@ -23,7 +23,7 @@
 // `crates/solium/tests/scenarios/keyboard-pane-drawn.lua` draws it in the
 // shipped `top` style and reads its pixels: below the caret, above it near
 // the pane's bottom, gone with the caret, and nothing while `show` is not
-// true (`scenario::tests::every_scenario_on_the_qt_thread_passes`).
+// true (`scenario::tests::each`).
 //
 // A layer of its own because it draws over the client, and a layer is where a
 // style draws over the client (`panes/README.md`, "Layers"): the `frame`

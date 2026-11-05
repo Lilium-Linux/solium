@@ -5,7 +5,7 @@
 -- edge is; the right monitor's outer right edge is its right half, and let
 -- go there the window goes there.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, on two
+-- Played by `scenario::tests::each::desktop_snap_two_monitors`, on two
 -- 1920x1080 monitors side by side, `scenario-1` on the left.
 
 local function previews(monitor, kind, x, y, w, h)

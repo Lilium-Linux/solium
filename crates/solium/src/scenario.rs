@@ -71,8 +71,7 @@
 //! by the name of each of the frame's layers that says it is dormant now, and
 //! `opacity`, each layer's `layerOpacity` by its name: how opaque the next
 //! frame composites the picture `pixel` reads.
-//! `tests::every_scenario_with_a_client_passes`,
-//! `tests::every_scenario_on_the_qt_thread_passes`.
+//! `tests::each`, one test per file.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -301,7 +300,7 @@ fn world(lua: &Lua, desk: &Desk, windows: &[Window]) -> mlua::Result<Table> {
     world.set("windows", opened)?;
     // What `solium --check` would call a setting nothing reads, which a
     // scenario's own `user` can be checked against:
-    // `tests::every_scenario_with_a_client_passes`.
+    // `tests::each`.
     let unknown = lua.create_table()?;
     if let Some(scripts) = state.scripts.as_ref() {
         for (index, setting) in scripts.unknown_settings().into_iter().enumerate() {
@@ -729,19 +728,20 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// **Every scenario with a client passes.**
+    /// Play one scenario file: on the Qt thread when it says `qt = true`,
+    /// otherwise against a client.
     ///
-    /// Not on a machine whose own `~/.config/solium` holds Lua: that comes
-    /// first on `package.path`, so `require("user")` would find the
-    /// developer's settings and not the scenario's. Skipped there, as
+    /// A client scenario is skipped on a machine whose own `~/.config/solium`
+    /// holds Lua: that comes first on `package.path`, so `require("user")`
+    /// would find the developer's settings and not the scenario's, as
     /// `script::tests::shipped_init_with_user` skips.
-    #[test]
-    fn every_scenario_with_a_client_passes() {
-        let found: Vec<_> = super::scenarios()
-            .into_iter()
-            .filter(|path| !on_qt(path))
-            .collect();
-        assert!(!found.is_empty(), "no scenarios found; the walk is broken");
+    fn play(file: &str) {
+        let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/scenarios"))
+            .join(file);
+        if on_qt(&path) {
+            crate::qml::qt_test::on_the_qt_thread(move || super::on_the_qt_thread(&path));
+            return;
+        }
         let own = crate::script::Scripts::user_config_dir()
             .and_then(|own| std::fs::read_dir(own).ok())
             .is_some_and(|entries| {
@@ -755,23 +755,88 @@ mod tests {
             );
             return;
         }
-        for path in found {
-            super::with_a_client(&path);
-        }
+        super::with_a_client(&path);
     }
 
-    /// **Every scenario on the Qt thread passes.**
+    /// One test per scenario file, named after it, so the scenarios run in
+    /// parallel (each in a process of its own, under nextest) and a failure
+    /// names the scenario that failed. A new file is added here;
+    /// `every_scenario_file_has_its_test` fails until it is.
+    macro_rules! each {
+        ($($name:ident => $file:literal,)*) => {
+            /// The files the tests below play.
+            const LISTED: &[&str] = &[$($file),*];
+
+            mod each {
+                $(
+                    #[test]
+                    fn $name() {
+                        super::play($file);
+                    }
+                )*
+            }
+        };
+    }
+
+    each! {
+        desktop_placement_cascade => "desktop-placement-cascade.lua",
+        desktop_placement_center => "desktop-placement-center.lua",
+        desktop_placement_pointer => "desktop-placement-pointer.lua",
+        desktop_placement_tall_and_wide => "desktop-placement-tall-and-wide.lua",
+        desktop_placement_two_monitors => "desktop-placement-two-monitors.lua",
+        desktop_placement_wrap_center => "desktop-placement-wrap-center.lua",
+        desktop_placement_wrap_corner => "desktop-placement-wrap-corner.lua",
+        desktop_snap_divider => "desktop-snap-divider.lua",
+        desktop_snap_drag => "desktop-snap-drag.lua",
+        desktop_snap_keys => "desktop-snap-keys.lua",
+        desktop_snap_off => "desktop-snap-off.lua",
+        desktop_snap_settings => "desktop-snap-settings.lua",
+        desktop_snap_tiling => "desktop-snap-tiling.lua",
+        desktop_snap_two_monitors => "desktop-snap-two-monitors.lua",
+        fullscreen_and_maximize_timed_apart => "fullscreen-and-maximize-timed-apart.lua",
+        fullscreen_animate_false => "fullscreen-animate-false.lua",
+        fullscreen_animate_true => "fullscreen-animate-true.lua",
+        fullscreen_glides => "fullscreen-glides.lua",
+        fullscreen_instant => "fullscreen-instant.lua",
+        fullscreen_tiled => "fullscreen-tiled.lua",
+        keyboard_check => "keyboard-check.lua",
+        keyboard_follow => "keyboard-follow.lua",
+        keyboard_indicator_false => "keyboard-indicator-false.lua",
+        keyboard_off => "keyboard-off.lua",
+        keyboard_pane_bare => "keyboard-pane-bare.lua",
+        keyboard_pane_drawn => "keyboard-pane-drawn.lua",
+        keyboard_pane => "keyboard-pane.lua",
+        keyboard_surface_drawn => "keyboard-surface-drawn.lua",
+        keyboard_surface => "keyboard-surface.lua",
+        maximize_animate_false => "maximize-animate-false.lua",
+        pane_bars_opaque => "pane-bars-opaque.lua",
+        pane_buttons_drawn => "pane-buttons-drawn.lua",
+        pane_glass_drawn => "pane-glass-drawn.lua",
+        pane_proximity_drawn => "pane-proximity-drawn.lua",
+        pane_pulse_drawn => "pane-pulse-drawn.lua",
+        pane_top_drawn => "pane-top-drawn.lua",
+        snap_drawn => "snap-drawn.lua",
+    }
+
+    /// **Every scenario file has its test**, and every test its file.
     #[test]
-    fn every_scenario_on_the_qt_thread_passes() {
-        let found: Vec<_> = super::scenarios()
-            .into_iter()
-            .filter(|path| on_qt(path))
+    fn every_scenario_file_has_its_test() {
+        let found: Vec<String> = super::scenarios()
+            .iter()
+            .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
             .collect();
         assert!(!found.is_empty(), "no scenarios found; the walk is broken");
-        crate::qml::qt_test::on_the_qt_thread(move || {
-            for path in found {
-                super::on_the_qt_thread(&path);
-            }
-        });
+        for file in &found {
+            assert!(
+                LISTED.contains(&file.as_str()),
+                "tests/scenarios/{file} has no test: add it to `each!` in scenario.rs"
+            );
+        }
+        for file in LISTED {
+            assert!(
+                found.iter().any(|found| found == file),
+                "`each!` in scenario.rs names {file}, which tests/scenarios does not have"
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@
 -- the focused window's bar told apart from the others' by its shade, and its
 -- title light on it -- dimmer on a window without the keyboard.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_top_drawn`, in
 -- software. The pane is 400 by 300, its bar 32 high. (8, 8) is bar and
 -- nothing else; the title, "terminal", is centred on (200, 16), and the box
 -- from (160, 6) to (240, 26) holds all of it.

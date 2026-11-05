@@ -4,7 +4,7 @@
 -- second-long linear fullscreen, which is half way at 500 ms where tiling's
 -- 240 ms would have landed. Keys pressed with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::fullscreen_tiled`.
 
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }
 -- The second window's tile, once tiling has placed it.

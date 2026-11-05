@@ -3,7 +3,7 @@
 -- `preview.inset`; handed the next zone, it moves there; handed none, it
 -- fades out; and a seam's holder is a pill across the seam's middle.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::snap_drawn`, in
 -- software. A scene here is on no monitor, so `Solium.monitor.name` is empty
 -- and what is handed for it names "".
 

@@ -7,7 +7,7 @@
 -- `state::tests::real_client::a_rule_with_a_fade_eases_its_slot_in_and_out_with_the_focus`,
 -- and on the GPU wirecheck's "the shipped shade").
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::pane_glass_drawn`, in
 -- software. The pane is 400 by 300, its bar the bottom 32 rows, 268 to 299,
 -- and its corners 16 round. The buttons are at the left (`pane-buttons-drawn.lua`
 -- reads them), the title, "terminal", right after them, inside the box from

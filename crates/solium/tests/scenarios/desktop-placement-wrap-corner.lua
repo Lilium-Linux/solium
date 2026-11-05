@@ -10,7 +10,7 @@
 -- starts the next one at (240, 100). The step is not the shipped (32, 32), so
 -- this is also `cascade` being read. Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_wrap_corner`.
 
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }
 

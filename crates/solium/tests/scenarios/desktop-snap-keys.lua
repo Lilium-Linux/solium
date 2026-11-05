@@ -5,7 +5,7 @@
 -- back where it was placed. Each snap marks the window for its frame
 -- (`snapped`, #455), and `super+down` takes the mark off.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_snap_keys`.
 
 local function show(window)
     return string.format("%d,%d %dx%d", window.x, window.y, window.w, window.h)

@@ -8,7 +8,7 @@
 -- (980, 490), a step right of the first window; that diagonal holds five
 -- more, and the eleventh starts at (1100, 490). Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_wrap_center`.
 
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }
 

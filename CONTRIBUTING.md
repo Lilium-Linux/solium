@@ -249,9 +249,9 @@ And from Solium's first weeks:
   that names it. Lua policy and QML drawing from what the compositor publishes
   have no Rust of their own, and their tests need none either. A scenario is a
   Lua file in `crates/solium/tests/scenarios/` that returns
-  `{ qt, user, init, steps }`, and `cargo test` plays it
-  (`scenario::tests::every_scenario_with_a_client_passes`,
-  `every_scenario_on_the_qt_thread_passes`). The steps it can take, and what
+  `{ qt, user, init, steps }`, and the tests play it, one test per file
+  (`scenario::tests::each::<file name>`; a new file is added to `each!` in
+  `scenario.rs`, and a test fails until it is). The steps it can take, and what
   `expect` sees, are listed at the top of `crates/solium/src/scenario.rs`; the
   `keyboard-*.lua` scenarios are the examples, and the `pane-*.lua` ones read
   what a shipped pane style draws, focused or not and under the pointer.

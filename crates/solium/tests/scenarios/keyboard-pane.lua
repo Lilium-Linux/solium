@@ -2,7 +2,7 @@
 -- default. The policy's half: what every pane is handed, and the fallback to
 -- the screen; `keyboard-pane-drawn.lua` is the QML's half.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
+-- Played by `scenario::tests::each::keyboard_pane`, with
 -- `us,ru` and Russian live. Both windows are framed, as a window under a
 -- pane style is; `keyboard-pane-bare.lua` is a window with no frame.
 

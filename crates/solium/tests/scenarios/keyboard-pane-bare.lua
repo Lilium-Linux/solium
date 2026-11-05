@@ -3,7 +3,7 @@
 -- drawn around it to draw the pill, so the surface goes to its caret instead,
 -- where `show = "surface"` would put it.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
+-- Played by `scenario::tests::each::keyboard_pane_bare`, with
 -- `us,ru` and Russian live. A window at (300, 200) whose client says its caret
 -- is at (100, 40), 2 by 16: on screen that is (400, 240) once the window is
 -- bare, so the surface -- 112 by 56 -- is centred under the caret at

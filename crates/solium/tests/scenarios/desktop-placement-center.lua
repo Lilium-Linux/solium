@@ -5,7 +5,7 @@
 -- to the work area's bottom-right corner and every later one was clamped onto
 -- that same corner. Opened with Russian live.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`.
+-- Played by `scenario::tests::each::desktop_placement_center`.
 
 local screen = { x = 0, y = 0, w = 1920, h = 1080 }
 local step = { x = 32, y = 32 }

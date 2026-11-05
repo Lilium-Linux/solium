@@ -5,7 +5,7 @@
 -- leaves to `tiling.snap`, is a setting `--check` knows. `enabled = false` is
 -- `desktop-snap-off.lua`.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, on one
+-- Played by `scenario::tests::each::desktop_snap_settings`, on one
 -- 1920x1080 monitor with nothing reserved.
 
 local function zone(world)

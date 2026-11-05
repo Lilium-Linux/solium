@@ -5,7 +5,7 @@
 -- `divider.minimum`; and the holder goes where the seam went. A third window
 -- over the seam hides its holder.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, on one
+-- Played by `scenario::tests::each::desktop_snap_divider`, on one
 -- 1920x1080 monitor with nothing reserved.
 
 local function show(window)

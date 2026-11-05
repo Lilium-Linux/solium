@@ -2,7 +2,7 @@
 -- `keyboard-surface.lua`'s policy declares it: 112 by 56, the capsule in the
 -- middle of it, drawn from the cue it is handed.
 --
--- Played by `scenario::tests::every_scenario_on_the_qt_thread_passes`, in
+-- Played by `scenario::tests::each::keyboard_surface_drawn`, in
 -- software. The capsule is 28 high and at least 32 wide, centred: its middle
 -- row is y = 28, and (44, 28) is on it, clear of the glyph in its middle.
 

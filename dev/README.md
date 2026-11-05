@@ -152,11 +152,10 @@ The cargo steps run under `nice -n 19` and, where it exists, `ionice -c 3`, so
 a gate in the background leaves the machine usable. `solium --check` and
 `dev/wirecheck` are short and run at normal priority.
 
-The tests include the scenarios in `crates/solium/tests/scenarios/`, played by
-`scenario::tests::every_scenario_with_a_client_passes` and
-`every_scenario_on_the_qt_thread_passes`. Run natively on a machine whose
-`$XDG_CONFIG_HOME/solium` (`~/.config/solium`) holds any `.lua` file, the
-client scenarios (`every_scenario_with_a_client_passes`) and the script tests
+The tests include the scenarios in `crates/solium/tests/scenarios/`, one test
+each in `scenario::tests::each`, named after the file. Run natively on a
+machine whose `$XDG_CONFIG_HOME/solium` (`~/.config/solium`) holds any `.lua`
+file, the client scenarios (those without `qt = true`) and the script tests
 built on `script::tests::shipped_init_with_user` pass without running, because
 that directory comes first on `package.path`; the scenario test prints
 `skipped: ~/.config/solium holds Lua of its own, which a scenario would load`.

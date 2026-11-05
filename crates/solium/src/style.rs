@@ -1806,6 +1806,9 @@ mod tests {
                 }
                 "#,
             );
+            // Started here, not left to an earlier test: alone, as nextest
+            // runs every test, nothing else has started Qt.
+            crate::qml::start().expect("Qt starts");
             let scene =
                 crate::qml::Scene::for_host(&dir.join("Pane.qml"), 1, 1, None).expect("a scene");
 
@@ -1843,6 +1846,9 @@ mod tests {
                 "#,
             );
 
+            // Started here, not left to an earlier test: alone, as nextest
+            // runs every test, nothing else has started Qt.
+            crate::qml::start().expect("Qt starts");
             let scene =
                 crate::qml::Scene::for_host(&dir.join("Pane.qml"), 1, 1, None).expect("a scene");
             assert_eq!(scene.string_list("requires"), ["gpu", "effects/2"]);

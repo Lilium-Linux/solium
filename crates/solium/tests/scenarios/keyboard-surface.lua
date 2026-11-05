@@ -1,6 +1,6 @@
 -- The keyboard pill on its own surface: `keyboard.indicator.show = "surface"`.
 --
--- Played by `scenario::tests::every_scenario_with_a_client_passes`, with
+-- Played by `scenario::tests::each::keyboard_surface`, with
 -- `us,ru` and Russian live. A window at (300, 200) whose client says its
 -- caret is at (100, 40), 2 by 16, in its surface: on screen that is (400, 240)
 -- to (402, 256), so the surface -- 112 by 56, the capsule 28 high in the
