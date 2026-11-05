@@ -543,6 +543,92 @@ fn a_program_run_in_the_background_opens_no_window() {
     let _ = std::fs::remove_file(&marker);
 }
 
+/// A state running `init.lua` as `source` reads, from a directory of its own.
+fn state_running(name: &str, source: &str) -> (TestDisplay, Solium, std::path::PathBuf) {
+    let directory = crate::effect::host::tests::scratch(name);
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, source).expect("writing");
+    let display = TestDisplay::new().expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    state.socket_name = format!("wayland-{name}");
+    state.start_scripts(Some(
+        crate::script::Scripts::load(&entry).expect("loading the test script"),
+    ));
+    (display, state, directory)
+}
+
+/// **A run and a timer reach Lua through the loop's own checks** (#472):
+/// `sol.run{}`'s child is started as the compositor starts every program,
+/// read by `runs::settle`, and its `done` sets the status; a timer set from
+/// it falls due on the compositor's clock and `timers::settle` runs it.
+#[test]
+fn a_run_and_a_timer_reach_lua_through_the_loop() {
+    let (_display, mut state, directory) = state_running(
+        "state-run-and-timer",
+        r#"sol.run({ "sh", "-c", "echo \"$WAYLAND_DISPLAY\"; ls /proc/self/fd | wc -l" }, {
+               done = function(r)
+                   sol.status("ran " .. r.stdout)
+                   sol.after(1000, function() sol.status("timer") end)
+               end,
+           })"#,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !state.status.starts_with("ran") {
+        assert!(std::time::Instant::now() < deadline, "the run never ended");
+        crate::runs::settle(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Its own display, and stdin, stdout and stderr only (and the directory
+    // `ls` reads, which is its own).
+    assert_eq!(
+        state.status,
+        format!("ran {}\n4\n", state.socket_name),
+        "not the child every program Solium starts is"
+    );
+    assert!(state.runs.is_idle());
+    crate::timers::settle(&mut state);
+    assert!(state.status.starts_with("ran"), "the timer ran early");
+    state.clock.advance(std::time::Duration::from_millis(1000));
+    crate::timers::settle(&mut state);
+    assert_eq!(state.status, "timer");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// **A reload kills the runs and cancels the timers** (#472): the old
+/// configuration's child is killed and reaped, and neither its `done` nor
+/// its timer runs into the new configuration.
+#[test]
+fn a_reload_kills_the_runs_and_cancels_the_timers() {
+    let (_display, mut state, directory) = state_running(
+        "state-reload-runs",
+        r#"sol.run({ "sh", "-c", "sleep 30" }, { done = function() sol.status("old done") end })
+           sol.every(10, function() sol.status("old timer") end)"#,
+    );
+    assert_eq!(
+        (state.runs.running(), state.timers.len()),
+        (1, 1),
+        "the premise: a run and a timer"
+    );
+    let entry = directory.join("init.lua");
+    std::fs::write(&entry, "sol.status('new')").expect("writing");
+    state.reload_from(&entry);
+    assert_eq!((state.runs.running(), state.timers.len()), (0, 0));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while state.runs.dying() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the killed run was never reaped"
+        );
+        crate::runs::settle(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    state.clock.advance(std::time::Duration::from_millis(100));
+    crate::runs::settle(&mut state);
+    crate::timers::settle(&mut state);
+    assert_eq!(state.status, "new", "the old configuration's functions ran");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// **A `client_blur` that cannot bind costs only its own slots** (#78): with
 /// no `blur` anywhere, a rule of the user's still binds and runs, and the one
 /// problem listed is `client_blur`'s.

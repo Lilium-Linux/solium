@@ -1345,6 +1345,10 @@ pub(crate) fn run() -> Result<()> {
         crate::logind::settle(&mut state);
         // What the services' threads heard, and their timers: `services`.
         crate::services::settle(&mut state);
+        // What `sol.run{}`'s children said, and the timers due, on the
+        // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
+        crate::runs::settle(&mut state);
+        crate::timers::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.

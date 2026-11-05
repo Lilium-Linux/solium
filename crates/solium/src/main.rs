@@ -66,6 +66,7 @@ mod qml;
 mod remains;
 mod render;
 mod resizing;
+mod runs;
 mod scanout;
 #[cfg(test)]
 mod scenario;
@@ -85,6 +86,7 @@ mod successor;
 mod surface;
 mod synth;
 mod text_input;
+mod timers;
 mod toplevels;
 mod tty;
 mod warm;

@@ -43,8 +43,9 @@ fn keys(table: &Table) -> BTreeSet<String> {
 }
 
 /// Every name the compositor puts in `sol`, in each table inside it, and on
-/// the two objects `sol.layout` makes, spelled the way `sol.lua` declares them:
-/// `sol.keep`, `sol.layout.grid`, `Tree:insert`, `Scroller:consume`.
+/// the objects the compositor hands out (the two `sol.layout` makes, and the
+/// timer `sol.after` and `sol.every` do), spelled the way `sol.lua` declares
+/// them: `sol.keep`, `sol.layout.grid`, `Tree:insert`, `Timer:cancel`.
 ///
 /// The tables are read from the real `sol` table, built the way a load builds
 /// it, so nothing here can be a stale copy. Every table-valued key is walked
@@ -78,10 +79,14 @@ fn registered() -> BTreeSet<String> {
         "no sol.layout.* names found; the walk into sol's tables is broken"
     );
 
-    for (object, userdata) in [("Tree", "TilingTree"), ("Scroller", "Scrolling")] {
+    for (object, userdata, least) in [
+        ("Tree", "TilingTree", 5),
+        ("Scroller", "Scrolling", 5),
+        ("Timer", "TimerHandle", 1),
+    ] {
         let methods = userdata_methods(userdata);
         assert!(
-            methods.len() >= 5,
+            methods.len() >= least,
             "found {} methods on {userdata}; the scan of its impl block is broken",
             methods.len()
         );

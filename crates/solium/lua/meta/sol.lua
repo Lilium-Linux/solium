@@ -324,6 +324,30 @@
 ---@field decorated? boolean Whether its frame is drawn while it waits.
 ---@field fade? integer Milliseconds the scene takes to fade off the application.
 
+---What the table form of `sol.run` takes (#472). Any other key is an error.
+---@class sol.RunOptions
+---@field cwd? string The directory it runs in. Default: Solium's.
+---@field env? table<string, string|false> Variables set on top of the environment every program Solium starts gets, or removed from it with `false`.
+---@field timeout? number Milliseconds before it is killed, with every process it started. Default `run.timeout` in `config.lua`, 30000.
+---@field max_output? integer Bytes kept of each of stdout and stderr; past it the stream is closed and `truncated` is true. Default `run.max_output` in `config.lua`, 1048576 (1 MiB).
+---@field lines? fun(line: string, stream: "stdout"|"stderr") Called with each line as it arrives.
+---@field done? fun(result: sol.RunResult) Called once, when it has ended.
+
+---`config.lua`'s `run`: what a `sol.run{}` takes when it does not say (#472).
+---@class sol.RunDefaults
+---@field timeout? number Milliseconds before a command is killed, above 0. Default 30000.
+---@field max_output? integer Bytes kept of each stream, 0 or more. Default 1048576 (1 MiB).
+
+---How a program `sol.run` started ended (#472).
+---@class sol.RunResult
+---@field code? integer Its exit code; nil when a signal ended it, or it never started.
+---@field signal? integer The signal that ended it: 9 when it was killed at its timeout.
+---@field timed_out boolean It was killed at its timeout.
+---@field truncated boolean Stdout or stderr wrote past `max_output`.
+---@field stdout string What it wrote to stdout, up to `max_output` bytes.
+---@field stderr string What it wrote to stderr, up to `max_output` bytes.
+---@field error? string Why it could not be started, when it could not: a missing program or `cwd`.
+
 ---The idle lock and the idle blank. A key left out, or one that is not a
 ---number of 0 or more, keeps the default.
 ---@class sol.IdleOptions
@@ -1719,10 +1743,58 @@ function sol.spawn(program, ...) end
 ---come back to fill either. Use `sol.spawn` for an application, which opens a
 ---window; `sol.run` for a command, which does not. A program that exits with
 ---an error is logged, as one `sol.spawn` starts is.
+---
+---With a table first, the program and its arguments, what it says comes back
+---(#472): `sol.run({ "nmcli", "-t", "radio", "wifi" }, { done = function(r)
+---... end })`. The same child, with stdin on `/dev/null` and stdout and stderr
+---read by Solium as they arrive, never waiting for it. `lines` is called with
+---each whole line, without its newline, and the stream it came from, and once
+---more at the end for a last line with no newline; `done` once, after the
+---last line, with a `sol.RunResult`. At `timeout` the child is killed with
+---every process it started, and `timed_out` is true. Past `max_output` bytes
+---a stream is closed: what was read is kept and `truncated` is true. Because
+---the pipe is closed, a child still writing ends with `SIGPIPE` (`signal`
+---13), as one piped into `head` would. Output a process the child started
+---writes after the child itself has exited is not read. The defaults for
+---`timeout` and `max_output` are `config.lua`'s `run` (`sol.run_defaults`).
+---Lines and
+---`done` are dispatched like any event, each under the handler deadline. A
+---reload kills every child this form started, and none of their functions is
+---called again.
+---@overload fun(argv: string[], options?: sol.RunOptions): nil
 ---@param program string
 ---@param ... string
 ---@return nil
 function sol.run(program, ...) end
+
+---The defaults for what a `sol.run{}` leaves out: `config.run`, which the
+---shipped `init.lua` hands over (#472). A key left out, or one of the wrong
+---kind, keeps the built-in default, and a call's own option wins over either.
+---@param options? sol.RunDefaults
+---@return nil
+function sol.run_defaults(options) end
+
+---Call `fn` once, `ms` milliseconds from now, on the compositor's clock: the
+---one animations and QML run on. Checked once each time round the event loop,
+---which wakes at least every 16 ms, so it runs no earlier than asked and
+---rarely more than a frame later. Timers due at the same check run in the
+---order they fell due, and in the order they were made among those due at
+---the same moment; one set from inside a timer waits for the next check. A
+---reload cancels every timer.
+---@param ms number Milliseconds, 0 or more.
+---@param fn fun()
+---@return sol.Timer
+function sol.after(ms, fn) end
+
+---Call `fn` every `ms` milliseconds, on the compositor's clock, as
+---`sol.after` does once, until the handle's `cancel` or a reload. A period
+---the compositor fell behind on is caught up once, not once for each missed
+---period. A function stopped at the handler deadline three times is
+---cancelled.
+---@param ms number Milliseconds, above 0.
+---@param fn fun()
+---@return sol.Timer
+function sol.every(ms, fn) end
 
 ---Whether a program can be found on `PATH`. A name with a `/` in it is
 ---checked as a path. Nothing is run.
@@ -1879,6 +1951,18 @@ sol._keeps = {}
 ---@private
 ---@type table<function, integer>
 sol._strikes = {}
+
+---Internal: each `sol.run{}`'s `lines` and `done`, by run id, until it is
+---done (#472). Use `sol.run`.
+---@private
+---@type table<integer, { lines?: fun(line: string, stream: "stdout"|"stderr"), done?: fun(result: sol.RunResult) }>
+sol._runs = {}
+
+---Internal: each timer's function, by timer id, until it is cancelled or, for
+---`sol.after`, has run (#472). Use `sol.after` and `sol.every`.
+---@private
+---@type table<integer, fun()>
+sol._timers = {}
 
 ---Internal: the action functions of `sol.notify`'s own notifications, by the
 ---token their command carries, until one runs (#346).
@@ -2162,3 +2246,15 @@ function Scroller:windows() end
 ---@param options sol.LayoutOptions
 ---@return sol.Slot[]
 function Scroller:layout(options) end
+
+-- Timers --------------------------------------------------------------------
+
+---A timer `sol.after` or `sol.every` set (#472).
+---@class sol.Timer
+local Timer = {}
+
+---Cancel it: its function is not called again, even when it was due at the
+---same moment as the timer that cancels it. Cancelling one that has run or
+---was cancelled already does nothing.
+---@return nil
+function Timer:cancel() end

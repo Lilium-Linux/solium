@@ -619,6 +619,18 @@ impl Solium {
         }
     }
 
+    /// Start a program whose output comes back (`sol.run{}`, #472): the
+    /// child [`Self::run`] starts, with its output piped to `crate::runs`
+    /// and stdin on `/dev/null`.
+    pub(crate) fn run_read(&mut self, request: crate::runs::Request) {
+        let Some((program, args)) = request.argv.split_first() else {
+            return;
+        };
+        let process = self.client_process(program, args);
+        let now = self.clock.now();
+        self.runs.start(request, process, now);
+    }
+
     /// The child every program Solium starts is: from
     /// [`crate::launch::command`], with its arguments, stdin and stdout on
     /// `/dev/null`, stderr Solium's, and the session's own variables.

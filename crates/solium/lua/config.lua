@@ -728,6 +728,18 @@ local defaults = {
         step = 0.05,
     },
 
+    -- Commands a configuration runs and reads back (#472):
+    -- `sol.run({ argv }, { done = ... })`. These are the defaults for what a
+    -- call leaves out; a call's own `timeout` or `max_output` wins.
+    run = {
+        -- How long a command may run, in milliseconds, before it is killed
+        -- with every process it started. Above 0.
+        timeout = 30000,
+        -- How many bytes of each of stdout and stderr are kept. Past it the
+        -- stream is closed, and the result says `truncated`. 0 or more.
+        max_output = 1048576,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.

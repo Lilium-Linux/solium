@@ -56,6 +56,9 @@ sol.media(config.media or { watch = true })
 -- Audio: the volume keys below, and `Audio` for a shell's slider. See
 -- `config.lua`.
 sol.audio(config.audio or {})
+-- The defaults for what a `sol.run{}` leaves out: its timeout and how much
+-- output it keeps. See `config.lua`.
+sol.run_defaults(config.run)
 -- libinput device settings: tap-to-click, scrolling, acceleration and the
 -- rest, by device type and by device, applied now and again on every
 -- reload. See `config.lua`.
