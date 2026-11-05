@@ -762,10 +762,18 @@ local defaults = {
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.
     --
-    -- Nothing here is read on the nested backend (`solium` inside another
-    -- compositor): there is no libinput device there to apply it to, only a
-    -- host window's own pointer and keyboard.
+    -- Device settings require libinput on the hardware backend. Shortcut
+    -- policy applies on both hardware and nested backends.
     input = {
+        -- Focused games, VMs and remote desktops can ask for every shortcut.
+        -- false refuses them; "fullscreen" allows them only while fullscreen.
+        -- Deny names match app_id (Wayland) or WM_CLASS (X11): exact, "*",
+        -- or a prefix ending in "*". Reclaim lasts until focus leaves.
+        shortcuts_inhibit = {
+            allow = true,
+            escape = "super+Escape",
+            apps = { deny = {} },
+        },
         -- Defaults by device type. A touchpad is `Pointer` capability plus
         -- `Gesture` -- the one libinput reports only for a driver that
         -- recognises multi-finger gestures, which in practice means

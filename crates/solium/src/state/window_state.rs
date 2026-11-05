@@ -325,6 +325,7 @@ impl Solium {
             self.transition(id, Change::Fullscreen, true, start);
         }
         self.redraw = true;
+        self.refresh_inhibitors();
         tracing::debug!(?screen, "a window went fullscreen");
     }
 
@@ -404,6 +405,7 @@ impl Solium {
 
         // No rect, no size: an xdg client picks its own.
         write_fullscreen(window, false);
+        self.refresh_inhibitors();
         tell(window, back, Some(tiled), Sending::OnceConfigured);
         if let Some(back) = back {
             if let Some(pane) = self.panes.get_mut(id) {

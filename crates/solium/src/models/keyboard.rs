@@ -31,6 +31,12 @@ pub(crate) struct Published {
 /// `tests::the_keyboard_singleton_changes_once_for_a_layout_switch_and_a_caps_toggle`.
 pub(crate) fn publish(state: &mut Solium, last: &mut Published) {
     let keyboard = &state.keyboard;
+    let owner = state.shortcuts_owner();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "pane IDs match Windows, far below 2^53"
+    )]
+    let owner_number = owner.unwrap_or(0) as f64;
     let values = BTreeMap::from([
         (
             "layout".to_owned(),
@@ -50,6 +56,8 @@ pub(crate) fn publish(state: &mut Solium, last: &mut Published) {
         ),
         ("caps".to_owned(), Json::Bool(keyboard.caps)),
         ("num".to_owned(), Json::Bool(keyboard.num)),
+        ("shortcutsInhibited".to_owned(), Json::Bool(owner.is_some())),
+        ("shortcutsOwner".to_owned(), Json::Number(owner_number)),
     ]);
     let serials = state.keyboard_told.serials;
     let changed: Vec<Json> = [Change::Layout, Change::Caps, Change::Num]

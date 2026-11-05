@@ -279,6 +279,7 @@ impl XdgShellHandler for Solium {
     /// decided again when it does (#462).
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         self.decide_frame(&surface);
+        self.refresh_inhibitors();
     }
 
     /// Which configure a toplevel has acknowledged, remembered for the commit

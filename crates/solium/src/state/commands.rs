@@ -730,6 +730,7 @@ impl Solium {
                 // reload; the nested backend never does, which is correct --
                 // it has no libinput devices to apply anything to.
                 Command::Input(config) => self.input.configure(config),
+                Command::ShortcutsInhibit(settings) => self.configure_inhibitors(settings),
                 Command::Notifications(config) => self.services.notifications.configure(config),
                 Command::Notify(own) => crate::services::notify_own(self, &own),
                 Command::Audio(Some(settings)) => self.services.audio.configure(settings),
@@ -1403,6 +1404,7 @@ impl Solium {
             self.scripts = None;
             return;
         };
+        self.inhibitors.settings = crate::shortcuts_inhibit::Settings::default();
         let outcome = scripts.startup();
         self.scripts = Some(scripts);
         // What the configuration does to the keyboard as it starts is told
@@ -1411,6 +1413,7 @@ impl Solium {
         self.keyboard_told.forget();
         self.apply(outcome);
         self.keyboard_changed();
+        self.refresh_inhibitors();
         self.warn_about_unwatched_configured_paths();
     }
 

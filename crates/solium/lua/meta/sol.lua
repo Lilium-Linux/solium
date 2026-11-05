@@ -138,6 +138,8 @@
 ---@field num boolean Whether Num Lock is on.
 ---@field repeat_rate integer Repeats per second.
 ---@field repeat_delay integer Milliseconds a key is held before it repeats.
+---@field shortcuts_inhibited boolean Whether the focused window currently holds shortcuts.
+---@field shortcuts_owner? integer Owning window ID, absent when shortcuts are available.
 
 ---The focused text field, as `sol.text_input()` answers: the window it is
 ---in, whether that window is framed, and its caret in the global space. The
@@ -407,6 +409,7 @@
 ---connected and to each one added later -- and reapplied, from whatever this
 ---now says, on every reload.
 ---@class sol.InputOptions
+---@field shortcuts_inhibit? sol.ShortcutsInhibitOptions
 ---@field touchpad? sol.InputDeviceOptions
 ---@field mouse? sol.InputDeviceOptions
 ---@field keyboard? sol.InputDeviceOptions
@@ -415,6 +418,12 @@
 ---@field tablet_pad? sol.InputDeviceOptions
 ---@field switch? sol.InputDeviceOptions
 ---@field devices? sol.InputDeviceMatch[]
+
+---Shortcut policy for focused Wayland inhibitors and XWayland keyboard grabs.
+---@class sol.ShortcutsInhibitOptions
+---@field allow? boolean|"fullscreen" true allows requests, false refuses them, "fullscreen" allows only fullscreen windows. Default true.
+---@field escape? string Reclaims shortcuts and the pointer even without a binding. Default "super+Escape". Uses the Latin key position under non-Latin layouts.
+---@field apps? { deny: string[] } Denied app_id or X11 WM_CLASS names: exact, "*", or a trailing-star prefix. Default empty.
 
 ---logind's `Lock` and sleep requests (#153). A key left out keeps the
 ---default.
@@ -1115,7 +1124,7 @@ function sol.idle(options) end
 ---@return nil
 function sol.auto_reload(options) end
 
----Set libinput device settings: `config.input`, which the shipped `init.lua`
+---Set device settings and shortcut policy: `config.input`, which the shipped `init.lua`
 ---hands over. Applied to every device already connected and to each one
 ---added later, and reapplied on reload.
 ---@param options? sol.InputOptions

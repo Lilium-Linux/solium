@@ -31,6 +31,8 @@ class SoliumKeyboardState : public QObject
     Q_PROPERTY(QStringList layouts READ layouts NOTIFY layoutsChanged)
     Q_PROPERTY(bool caps READ caps NOTIFY capsChanged)
     Q_PROPERTY(bool num READ num NOTIFY numChanged)
+    Q_PROPERTY(bool shortcutsInhibited READ shortcutsInhibited NOTIFY shortcutsChanged)
+    Q_PROPERTY(qulonglong shortcutsOwner READ shortcutsOwner NOTIFY shortcutsChanged)
 public:
     using QObject::QObject;
     int layout() const { return m_layout; }
@@ -39,6 +41,8 @@ public:
     QStringList layouts() const { return m_layouts; }
     bool caps() const { return m_caps; }
     bool num() const { return m_num; }
+    bool shortcutsInhibited() const { return m_shortcuts_inhibited; }
+    qulonglong shortcutsOwner() const { return m_shortcuts_owner; }
 
     /* Take what the compositor publishes: every value first, then each
      * property's own notification, then `changed(what)` for each name in
@@ -51,6 +55,7 @@ signals:
     void layoutsChanged();
     void capsChanged();
     void numChanged();
+    void shortcutsChanged();
     /* A real change: "layout", "caps" or "num". */
     void changed(const QString &what);
 
@@ -61,6 +66,8 @@ private:
     QStringList m_layouts;
     bool m_caps = false;
     bool m_num = false;
+    bool m_shortcuts_inhibited = false;
+    qulonglong m_shortcuts_owner = 0;
 };
 
 /* The one instance, made on first ask and never freed. */

@@ -808,6 +808,7 @@ impl XwmHandler for Solium {
     /// last time a window type went unread, the only symptom was a menu in the
     /// wrong place and nothing in the log at all.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        self.refresh_inhibitors();
         // A third, since #115: `WM_NORMAL_HINTS` is where an X11 client says
         // how small and how large it can be, and it says so with a property
         // rather than a commit. Told to the layouts as an xdg client's commit

@@ -5,6 +5,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonParseError>
+#include <QtCore/QVariant>
 #include <QtQml/QQmlEngine>
 
 void SoliumKeyboardState::publish(const QJsonObject &next)
@@ -18,18 +19,23 @@ void SoliumKeyboardState::publish(const QJsonObject &next)
     }
     const bool caps = next.value(QStringLiteral("caps")).toBool();
     const bool num = next.value(QStringLiteral("num")).toBool();
+    const bool shortcuts = next.value(QStringLiteral("shortcutsInhibited")).toBool();
+    const qulonglong owner = next.value(QStringLiteral("shortcutsOwner")).toVariant().toULongLong();
 
     const bool layout_moved =
         layout != m_layout || name != m_layout_name || short_name != m_layout_short;
     const bool layouts_moved = layouts != m_layouts;
     const bool caps_moved = caps != m_caps;
     const bool num_moved = num != m_num;
+    const bool shortcuts_moved = shortcuts != m_shortcuts_inhibited || owner != m_shortcuts_owner;
     m_layout = layout;
     m_layout_name = name;
     m_layout_short = short_name;
     m_layouts = layouts;
     m_caps = caps;
     m_num = num;
+    m_shortcuts_inhibited = shortcuts;
+    m_shortcuts_owner = owner;
 
     if (layouts_moved) {
         emit layoutsChanged();
@@ -42,6 +48,9 @@ void SoliumKeyboardState::publish(const QJsonObject &next)
     }
     if (num_moved) {
         emit numChanged();
+    }
+    if (shortcuts_moved) {
+        emit shortcutsChanged();
     }
     for (const QJsonValue &what : next.value(QStringLiteral("changed")).toArray()) {
         emit changed(what.toString());

@@ -340,6 +340,7 @@ impl Solium {
             tray: self.services.tray.view(),
             media: self.services.media.seen(self.clock.now()),
             keyboard: self.keyboard.clone(),
+            shortcuts_owner: self.shortcuts_owner(),
             work_area: self.work_area().map(to_rect).unwrap_or_default(),
             cursor: (cursor.x, cursor.y),
             screens: self.screens(),

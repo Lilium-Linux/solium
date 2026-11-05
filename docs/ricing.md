@@ -731,6 +731,39 @@ focused, `"caret"` when its caret moves and `"framed"` when its window goes
 fullscreen or comes back. A caret that moves twice before the next frame is
 told once, where it ended up.
 
+### Giving shortcuts to a client
+
+A focused virtual machine, game or remote desktop can request Solium's
+shortcuts through keyboard-shortcuts-inhibit or XWayland keyboard grabs.
+Configure the permission in `user.lua`:
+
+```lua
+return { input = { shortcuts_inhibit = {
+    allow = "fullscreen", -- true (default), false, or "fullscreen"
+    escape = "super+Escape",
+    apps = { deny = { "untrusted.viewer", "blocked*" } },
+} } }
+```
+
+Deny entries match native `app_id` or X11 `WM_CLASS`, case-sensitively: an
+exact name, `*`, or a prefix ending in `*`. Changes apply on reload, including
+to an existing request. Fullscreen and application-identity changes are
+rechecked while the window remains focused.
+
+The configured escape always reclaims shortcuts and releases a confined or
+locked pointer. Explicit bindings with `{ inhibited = true }` also work.
+Reclaim lasts until keyboard focus leaves the window; reloading policy does
+not undo it. The lock and VT switching retain priority. XWayland grabs follow
+the same focused-window policy and cannot pin keyboard focus on a background
+window. Only XWayland can bind that protocol.
+
+A QML bar can read `Keyboard.shortcutsInhibited` and
+`Keyboard.shortcutsOwner` (the owning window's ID, or `0` when inactive),
+then find that ID in `Windows` for its title or application. Lua reads
+`sol.keyboard().shortcuts_inhibited` and `shortcuts_owner` (`nil` when
+inactive). These report inactive with no owner while locked. The indicator's
+appearance is up to the shell configuration.
+
 ### The keyboard pill
 
 Switch layout, or press Caps Lock, and a small capsule appears just below

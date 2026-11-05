@@ -116,6 +116,9 @@ pub(crate) fn run() -> Result<()> {
                 #[allow(unsafe_code)]
                 let dispatched = unsafe { display.get_mut().dispatch_clients(state) };
                 dispatched?;
+                // XWayland grab destruction has no handler callback in Smithay.
+                // Reconcile before deciding whether an idle output needs a frame.
+                state.refresh_inhibitors();
                 Ok(smithay::reexports::calloop::PostAction::Continue)
             },
         )
