@@ -1,0 +1,36 @@
+title = "An animated shader"
+what = "An example effect: a neon band round the focused window, its colours drifting and a white-hot head running round the edge. One GLSL file for the band, and a timer in Lua that turns its phase every frame."
+how = "An effect's params can be animated by handing its rules over again with new values: Solium keeps what each slot captured and runs only the shader again."
+
+[stage]
+one_group = true
+apps = ["log", "notes"]
+files = ["docs/showcase/examples/effects/aurora:effects/aurora", "docs/showcase/examples/lua/aurora.lua:aurora.lua"]
+patch = '''
+config.effects.rules = { require("aurora").rule }
+'''
+
+[stage.places]
+"git log" = [200, 90, 760, 520]
+"user.lua" = [560, 200, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1500,780"
+from = "1500,780"
+
+[capture]
+from = 7000
+to = 11000
+loop = true
+
+[out]
+webp = 800
+poster = 1500
+
+[[code]]
+file = "docs/showcase/examples/effects/aurora/aurora.frag"
+
+[[code]]
+file = "docs/showcase/examples/lua/aurora.lua"
+find = "aurora.rule = {"

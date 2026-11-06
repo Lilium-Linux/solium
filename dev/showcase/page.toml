@@ -53,5 +53,14 @@ its layers. `pane` in `user.lua` picks one; every shipped one is below.
 shots = ["frames", "motion-frames", "glass"]
 
 [[section]]
+title = "Shaders"
+intro = """
+An effect is a folder of GLSL and Lua, in `~/.config/solium/effects/`, put on
+any part of a window by a rule in `user.lua`. Its params can be animated from
+Lua, a frame at a time.
+"""
+shots = ["aurora"]
+
+[[section]]
 title = "The pointer and the keyboard"
 shots = ["cursor", "pill"]
