@@ -35,14 +35,28 @@ local function shrunk(window, factor)
     }
 end
 
+local open = {}
+
+-- Window `id` grows into `rect`, from `config.open.scale` of it about its
+-- centre, over `config.open.motion`. A layout that puts a window somewhere
+-- other than where the compositor opened it, before it is on screen at a size
+-- of its own, calls this again with where it put it, so it grows into that
+-- place rather than out of the slot it opened in (#507, `floating.lua`). The
+-- later present takes the earlier one's place.
+function open.grow(id, rect)
+    sol.animate(config.open.motion)
+    -- Where it comes *from*; the compositor animates it to where it
+    -- actually lives.
+    sol.present_from(id, shrunk(rect, config.open.scale))
+end
+
 sol.on("open", function(id)
     for _, window in ipairs(sol.windows()) do
         if window.id == id then
-            sol.animate(config.open.motion)
-            -- Where it comes *from*; the compositor animates it to where it
-            -- actually lives.
-            sol.present_from(id, shrunk(window, config.open.scale))
+            open.grow(id, window)
             return
         end
     end
 end)
+
+return open
