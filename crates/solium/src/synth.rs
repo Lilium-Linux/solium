@@ -864,12 +864,8 @@ mod tests {
     fn a_paced_move_presses_nothing_and_starts_where_the_pointer_is() {
         let (_display, mut state) = us_ru(0);
         let region = monitor(&mut state);
-        super::send_motion(
-            &mut state,
-            region,
-            Point::from((50.0, 60.0)) - super::current(&state),
-            0,
-        );
+        let to_start = Point::from((50.0, 60.0)) - super::current(&state);
+        super::send_motion(&mut state, region, to_start, 0);
         let start = Duration::from_secs(2);
         let route = Route {
             at: start,
