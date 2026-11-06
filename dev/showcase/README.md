@@ -132,6 +132,7 @@ command. `{ app = "notes", size = [900, 560] }` sizes a kitty window.
 | `webp = 960` | `<shot>.webp`, animated, that wide, within `webp_kb` (3072) |
 | `poster = ms`, `still = true` | `<shot>.png` |
 | `slow = 4` | `<shot>-x4.mp4` |
+| `slow_webp = true` | that slow copy as `<shot>-x4.webp` too, shown under the true-speed one |
 | `filmstrip = 6` | `<shot>-strip.png`, six frames side by side |
 | `crop = [x, y, w, h]` | every output cut to that, in logical pixels |
 | `follow = { size = [w, h] }` | a crop of that size centred on the pointer's path |

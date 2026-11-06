@@ -46,7 +46,9 @@ loop = true
 [out]
 webp = 640
 poster = 2600
-follow = { size = [640, 360] }
+follow = { size = [480, 270] }
+slow = 4
+slow_webp = true
 
 [[code]]
 file = "crates/solium/default-config/cursor/Cursor.qml"

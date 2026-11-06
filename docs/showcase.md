@@ -321,6 +321,10 @@ config.pane = "glass"
 
 ![The default configuration's pointer is a QML scene: every shape is one outline of the same points, so a change of shape is a morph around the hotspot. Here over a terminal's text, a link, and a window's edge.](media/cursor.webp)
 
+![The same, 4 times slower](media/cursor-x4.webp)
+
+4 times slower.
+
 The default configuration's pointer is a QML scene: every shape is one outline of the same points, so a change of shape is a morph around the hotspot. Here over a terminal's text, a link, and a window's edge.
 
 **How it is done.** cursor = { scene = ... } in user.lua names Cursor.qml. Moving fast lights a glow, a MultiEffect, which only the GPU path draws: a nested capture, like this one, leaves it out.

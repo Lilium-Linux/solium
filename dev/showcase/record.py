@@ -674,6 +674,11 @@ def encode(shot, frames, work):
                "-c:v", "libx264", "-crf", "16", "-preset", "slow",
                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(target))
         written.append(target)
+        # And as a WebP, shown on the page under the true-speed one, for a
+        # motion too quick to follow: the pointer's morphs.
+        if out.get("slow_webp"):
+            written.append(webp(shot, target, int(out.get("webp", 640)),
+                                int(out.get("webp_kb", 3072)) * 2, f"{shot.name}-x{out['slow']}"))
     if out.get("webp"):
         written.append(webp(shot, master, int(out["webp"]), int(out.get("webp_kb", 3072))))
     poster_ms = out.get("poster")
@@ -690,11 +695,11 @@ def encode(shot, frames, work):
     return written
 
 
-def webp(shot, master, width, budget_kb):
+def webp(shot, master, width, budget_kb, name=None):
     """An animated WebP within `budget_kb`, as good as fits: one try at a
     good quality, then, if it is too large, one at the quality its size says
     should fit, and only then fewer frames a second."""
-    target = media_dir(shot) / f"{shot.name}.webp"
+    target = media_dir(shot) / f"{name or shot.name}.webp"
 
     def make(fps, quality):
         ffmpeg("-i", str(master), "-vf", f"fps={fps},scale={width}:-2:flags=lanczos",
@@ -953,7 +958,10 @@ def page():
             image = "webp" if (MEDIA / f"{name}.webp").exists() else "png"
             out.append(f"![{shot.data.get('what', shot.title)}](media/{name}.{image})")
             slow = shot.out.get("slow")
-            if slow and (MEDIA / f"{name}-x{slow}.mp4").exists():
+            if slow and (MEDIA / f"{name}-x{slow}.webp").exists():
+                out += ["", f"![The same, {slow} times slower]"
+                            f"(media/{name}-x{slow}.webp)", "", f"{slow} times slower."]
+            elif slow and (MEDIA / f"{name}-x{slow}.mp4").exists():
                 out += ["", f"[{slow} times slower](media/{name}-x{slow}.mp4)"]
             out.append("")
             if shot.data.get("what"):
