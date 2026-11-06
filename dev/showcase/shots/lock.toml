@@ -1,0 +1,40 @@
+title = "The lock screen"
+what = "super+ctrl+l: the clock flies from the bar to the middle as the session locks, and back into the bar as it unlocks."
+keys = "super+ctrl+l"
+
+how = """The lock is a QML scene, Violet.qml in the default configuration, named in user.lua. Solium draws the desktop under it while it comes and goes, for enter_ms and exit_ms, and never shows it the password."""
+[stage]
+one_group = true
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [240, 90, 820, 560]
+"user.lua" = [560, 160, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+ctrl+l"
+
+[[at]]
+ms = 9800
+unlock = true
+
+[capture]
+from = 7000
+to = 11400
+loop = true
+
+[out]
+webp = 640
+poster = 1600
+slow = 4
+
+[[code]]
+file = "crates/solium/default-config/user.lua"
+find = "lock = {"
+lines = 1

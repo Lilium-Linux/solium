@@ -35,15 +35,32 @@ use solium_animation::{Animation, lerp};
 ///
 /// Every animation reads the same instant, so two windows started together
 /// stay together even if a frame takes longer than expected.
+///
+/// It runs at `rate` times real time: 1 but under `SOLIUM_CLOCK_RATE`, which
+/// slows it for a nested capture (#501), every animation, QML's included, with
+/// it.
 #[derive(Debug)]
 pub(crate) struct Clock {
     start: std::time::Instant,
+    /// The time at `start`, which the real time since is added to.
+    base: Duration,
+    rate: f64,
 }
 impl Clock {
     pub(crate) fn new() -> Self {
         Self {
             start: std::time::Instant::now(),
+            base: Duration::ZERO,
+            rate: 1.0,
         }
+    }
+
+    /// Run at `rate` times real time from now on, without moving `now`.
+    /// `tests::a_clock_at_a_quarter_moves_a_quarter_as_far_and_does_not_jump`.
+    pub(crate) fn set_rate(&mut self, rate: f64) {
+        self.base = self.now();
+        self.start = std::time::Instant::now();
+        self.rate = rate;
     }
 
     /// The time now.
@@ -66,10 +83,15 @@ impl Clock {
     /// same discipline written down six times, and the seventh source added
     /// later would not know about it.
     pub(crate) fn now(&self) -> Duration {
-        self.start.elapsed()
+        let real = self.start.elapsed();
+        if self.rate == 1.0 {
+            return self.base + real;
+        }
+        self.base + real.mul_f64(self.rate)
     }
 
-    /// Pretend `by` more time has passed than really has.
+    /// Pretend `by` more real time has passed than really has: `by` on the
+    /// clock itself at the usual rate of 1.
     ///
     /// **Test-only, and the only way to test the hit test.** Most of this
     /// compositor takes `now` as an argument, which is what lets a test assert
@@ -1353,6 +1375,28 @@ pub(crate) fn to_window_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A clock at a quarter moves a quarter as far, and does not jump**
+    /// (#501): setting a rate leaves `now` where it was, and from then on a
+    /// second of real time is a quarter of a second on the clock.
+    #[test]
+    fn a_clock_at_a_quarter_moves_a_quarter_as_far_and_does_not_jump() {
+        let mut clock = Clock::new();
+        clock.advance(Duration::from_secs(10));
+        let before = clock.now();
+        clock.set_rate(0.25);
+        let after = clock.now();
+        assert!(
+            after >= before && after - before < Duration::from_millis(50),
+            "setting the rate moved the clock from {before:?} to {after:?}"
+        );
+        clock.advance(Duration::from_secs(4));
+        let moved = clock.now() - after;
+        assert!(
+            moved >= Duration::from_secs(1) && moved < Duration::from_millis(1050),
+            "four real seconds at a quarter moved the clock {moved:?}"
+        );
+    }
 
     #[test]
     fn the_clock_advances_without_being_asked() {

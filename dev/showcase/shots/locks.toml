@@ -1,0 +1,12 @@
+title = "Four ways to lock"
+what = "The same lock, in and out, under four scenes: each is one QML file, and lock.scene in user.lua picks it."
+
+[grid]
+cells = ["lock", "lock-sheet", "lock-curtain", "lock-iris"]
+labels = ["Violet (the default configuration's)", "the sheet (Solium's own)", "Curtain (an example)", "Iris (an example)"]
+cols = 2
+cell_width = 720
+
+[out]
+webp = 960
+webp_kb = 4096

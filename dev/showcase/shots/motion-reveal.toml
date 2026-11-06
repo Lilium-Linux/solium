@@ -1,0 +1,37 @@
+title = "reveal"
+what = "A titlebar that is not there until the pointer comes near: it reserves nothing, so the window keeps its whole slot and nothing reflows when the bar appears."
+
+[stage]
+one_group = true
+apps = ["log"]
+patch = '''
+config.pane = "reveal"
+'''
+
+[stage.places]
+"git log" = [400, 200, 800, 480]
+
+[[at]]
+ms = 6200
+move = "1400,800"
+from = "1400,800"
+
+[[at]]
+ms = 7400
+move = "800,215"
+over = 800
+
+[[at]]
+ms = 9200
+move = "1400,800"
+over = 800
+
+[capture]
+from = 7000
+to = 10800
+loop = true
+
+[out]
+webp = 720
+poster = 1400
+crop = [240, 110, 1120, 630]

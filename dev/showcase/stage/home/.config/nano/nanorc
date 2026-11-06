@@ -1,0 +1,6 @@
+include /usr/share/nano/lua.nanorc
+set linenumbers
+set titlecolor bold,lightwhite,#3b2d63
+set numbercolor #5c5866
+set constantshow
+set nohelp

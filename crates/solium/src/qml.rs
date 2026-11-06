@@ -132,6 +132,8 @@ mod ffi {
         #[cfg(test)]
         pub(super) fn solium_qml_let_go_for_test(scene: *mut Scene) -> c_int;
         #[cfg(test)]
+        pub(super) fn solium_qml_settle_workers(timeout_ms: c_int) -> c_int;
+        #[cfg(test)]
         pub(super) fn solium_qml_theme_mark_for_test(import_path: *const c_char) -> c_int;
         #[cfg(test)]
         pub(super) fn solium_qml_input_context_for_test() -> *const c_char;
@@ -1945,6 +1947,10 @@ pub(crate) mod qt_test {
     ///
     /// A panic is carried back and resumed here, so an assertion inside reads
     /// as that assertion failing on the test that wrote it.
+    ///
+    /// The work is not over until what it left Qt's worker-script thread to
+    /// do is done: freeing a scene leaves that thread its `WorkerScript`
+    /// engines to delete, and the process must not exit under them (#503).
     pub(crate) fn on_the_qt_thread(work: impl FnOnce() + Send + 'static) {
         type Job = Box<dyn FnOnce() + Send>;
         static QT: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
@@ -1965,6 +1971,19 @@ pub(crate) mod qt_test {
         let (done, finished) = std::sync::mpsc::channel();
         let job: Job = Box::new(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            // What the work's freed scenes left Qt's worker-script thread to do
+            // is done before the test is, after a panic too. The test may be
+            // the process's last, and that thread's work run into the
+            // process's exit corrupts the heap (#503).
+            let outcome = match (outcome, settle_workers()) {
+                (Ok(()), false) => {
+                    let busy: Box<dyn std::any::Any + Send> = Box::new(format!(
+                        "Qt's worker-script thread was still busy {SETTLE:?} after the work ended"
+                    ));
+                    Err(busy)
+                }
+                (outcome, _) => outcome,
+            };
             // The receiver is on a live test thread waiting on it; there is
             // nothing useful to do here if it has gone.
             let _ = done.send(outcome);
@@ -1983,6 +2002,21 @@ pub(crate) mod qt_test {
                 "the Qt thread went without saying why: {gone}"
             ))),
         }
+    }
+
+    /// How long a test's work may leave Qt's worker-script thread busy once it
+    /// has ended: a script still running after this long is the test's own.
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Wait, up to [`SETTLE`], until Qt's worker-script thread has handled
+    /// what the work posted to it, and say whether it did. See
+    /// `solium_qml_settle_workers` in `qml/host.h`;
+    /// `tests::the_qt_threads_work_ends_with_the_worker_scripts_it_freed_gone`.
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    fn settle_workers() -> bool {
+        let millis = std::ffi::c_int::try_from(SETTLE.as_millis()).unwrap_or(std::ffi::c_int::MAX);
+        // SAFETY: called on the Qt thread, the one thread that touches Qt.
+        unsafe { super::ffi::solium_qml_settle_workers(millis) != 0 }
     }
 
     thread_local! {
@@ -2066,6 +2100,124 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&directory);
         });
+    }
+
+    /// The threads of this process that Qt named `QQmlThread`: one for each
+    /// type loader, including the one a `WorkerScript`'s engine loads its
+    /// script with.
+    fn type_loader_threads() -> std::collections::BTreeSet<u64> {
+        std::fs::read_dir("/proc/self/task")
+            .expect("this process's threads")
+            .filter_map(|task| {
+                let task = task.ok()?;
+                let name = std::fs::read_to_string(task.path().join("comm")).ok()?;
+                if name.trim_end() != "QQmlThread" {
+                    return None;
+                }
+                task.file_name().to_str()?.parse().ok()
+            })
+            .collect()
+    }
+
+    /// **The Qt thread's work ends with the worker scripts it freed gone**
+    /// (#503). A `WorkerScript` runs in a JavaScript engine of its own on Qt's
+    /// worker-script thread, and freeing its scene only asks that thread to
+    /// delete the engine, whenever it next gets to it. Left to it, the delete
+    /// ran after the test had ended, into the process's exit: the engine's
+    /// destructor sweeps Qt's type registry while `exit()` destroys it, and
+    /// the process died of a corrupted heap after every test had passed.
+    ///
+    /// The worker here is half a second into a message when its scene is
+    /// freed, so its engine outlives the work on the Qt thread unless that
+    /// waits for it. The engine's own type-loader thread is how its going is
+    /// seen from outside.
+    #[test]
+    fn the_qt_threads_work_ends_with_the_worker_scripts_it_freed_gone() {
+        const BUSY_MS: i32 = 500;
+        let (loaders_out, loaders_in) = std::sync::mpsc::channel();
+        super::qt_test::on_the_qt_thread(move || {
+            super::start().expect("Qt starts");
+            let directory = std::env::temp_dir().join("solium-qml-test-worker-freed");
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a temporary directory");
+            std::fs::write(
+                directory.join("worker.js"),
+                r"
+                WorkerScript.onMessage = function (message) {
+                    const until = Date.now() + message.busy
+                    while (Date.now() < until) {}
+                    WorkerScript.sendMessage({})
+                }
+                ",
+            )
+            .expect("writing the worker");
+            let path = directory.join("Scene.qml");
+            std::fs::write(
+                &path,
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool answered: false
+                    property int busy: 0
+                    onBusyChanged: worker.sendMessage({ busy: busy })
+                    WorkerScript {
+                        id: worker
+                        source: 'worker.js'
+                        onReadyChanged: if (ready) worker.sendMessage({ busy: 0 })
+                        onMessage: root.answered = true
+                    }
+                }
+                ",
+            )
+            .expect("writing the scene");
+            // The engine every scene shares starts a loader thread of its own
+            // with its first scene, and keeps it.
+            let plain = directory.join("Plain.qml");
+            std::fs::write(&plain, "import QtQuick\nItem {}\n").expect("writing a plain scene");
+            drop(super::Scene::for_host(&plain, 64, 16, None).expect("the plain scene builds"));
+
+            let before = type_loader_threads();
+            let mut scene = super::Scene::for_host(&path, 64, 16, None).expect("the scene builds");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !scene.get_bool("answered") && std::time::Instant::now() < deadline {
+                let _ = super::drain(std::time::Duration::ZERO, false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(scene.get_bool("answered"), "the worker never answered");
+            let loaders: Vec<u64> = type_loader_threads().difference(&before).copied().collect();
+            assert!(
+                !loaders.is_empty(),
+                "the premise: a worker's engine loads its script on a thread of its own"
+            );
+
+            scene.set_int("busy", BUSY_MS);
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            let _ = loaders_out.send(loaders);
+        });
+
+        let loaders = loaders_in.recv().expect("the worker's loader threads");
+        // Its last moments: the loader thread is told to stop and waited
+        // for, and only then leaves the kernel's list.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut left = type_loader_threads();
+        while loaders.iter().any(|thread| left.contains(thread))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            left = type_loader_threads();
+        }
+        let still: Vec<&u64> = loaders
+            .iter()
+            .filter(|thread| left.contains(thread))
+            .collect();
+        assert!(
+            still.is_empty(),
+            "the freed worker's engine outlived the work that freed it: its loader thread \
+             {still:?} still runs"
+        );
     }
 
     /// **A cache clear from a test thread runs on the Qt thread (#237).**

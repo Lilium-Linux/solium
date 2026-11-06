@@ -1,0 +1,39 @@
+title = "The desktop as it ships"
+what = "The default configuration as it is installed: the bar, rounded violet frames over a frosted backdrop, and Atrium's strip of live cards, brought out by the pointer at the left edge."
+
+how = """The whole desktop is the default configuration, a folder of Lua and QML copied into ~/.config/solium on install. Its user.lua starts by requiring each piece of it; delete a line and that piece is gone."""
+[stage]
+apps = ["log", "notes", "docs"]
+
+[stage.places]
+showcase-log = [300, 70, 900, 600]
+showcase-notes = [340, 110, 900, 600]
+"org.mozilla.firefox" = [270, 36, 1290, 800]
+
+[[at]]
+ms = 6200
+move = "960,470"
+from = "960,470"
+
+[[at]]
+ms = 7400
+move = "1,430"
+over = 650
+
+# Onto the first card, which comes forward under the pointer.
+[[at]]
+ms = 8200
+move = "95,330"
+over = 400
+
+[capture]
+from = 9400
+to = 9500
+
+[out]
+mp4 = false
+still = true
+
+[[code]]
+file = "crates/solium/default-config/user.lua"
+lines = 20

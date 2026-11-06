@@ -1,0 +1,41 @@
+title = "Liquid glass"
+what = "The glass frame style: the window and its bar one rounded piece of dark glass. Dragged across the wallpaper, the backdrop bends round the rim and the light runs along its edge."
+keys = "super+drag"
+how = "`pane = \"glass\"` in user.lua. The glass is an effect folder, crates/solium/effects/glass, which the style puts behind every window it frames."
+
+[stage]
+one_group = true
+apps = ["clear"]
+patch = '''
+config.pane = "glass"
+'''
+
+[stage.places]
+"git log" = [180, 160, 640, 440]
+
+[[at]]
+ms = 6200
+move = "500,380"
+from = "500,380"
+
+[[at]]
+ms = 7200
+drag = "1100,420"
+over = 2400
+hold = "super"
+
+[[at]]
+ms = 10000
+drag = "500,380"
+over = 2400
+hold = "super"
+
+[capture]
+from = 7000
+to = 12800
+loop = true
+
+[out]
+webp = 800
+poster = 1500
+slow = 2

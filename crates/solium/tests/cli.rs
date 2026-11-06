@@ -225,6 +225,37 @@ fn check_exits_1_on_a_broken_user_effect_folder() {
     assert!(out.contains("api2/effect.lua"), "{out}");
 }
 
+/// **The default configuration names its scenes where it lives** (#502): the
+/// shipped `default-config/user.lua` puts the pointer's and the shell's scene
+/// under `$XDG_CONFIG_HOME/solium`, where Solium reads `user.lua` itself. Here
+/// `XDG_CONFIG_HOME` is the test's directory and `~/.config` the `.config`
+/// inside it, two places; the pointer's used to follow `HOME`, so a scratch
+/// configuration drew the fallback pointer. The modules `user.lua` requires
+/// answer with an empty table: what they declare is not under test.
+#[test]
+fn the_default_configuration_names_its_scenes_under_xdg_config_home() {
+    let default_config = concat!(env!("CARGO_MANIFEST_DIR"), "/default-config");
+    let (code, out, err) = run_args_with(&["--check"], "check-default-config-scenes", |dir| {
+        std::fs::write(
+            dir.join("init.lua"),
+            format!(
+                r#"table.insert(package.searchers, 1, function(name)
+    if name ~= "user" then return function() return {{}} end end
+end)
+package.path = {default_config:?} .. "/?.lua;" .. package.path
+local user = require("user")
+table.remove(package.searchers, 1)
+local here = os.getenv("XDG_CONFIG_HOME") .. "/solium"
+assert(user.cursor.scene == here .. "/cursor/Cursor.qml", "cursor.scene is " .. user.cursor.scene)
+assert(user.shell.scene == here .. "/shell/Shell.qml", "shell.scene is " .. user.shell.scene)
+"#
+            ),
+        )
+        .expect("an init.lua");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+}
+
 /// **`solium pin set` and `solium pin clear` need a terminal**: with
 /// standard input not one, each exits 1 saying so, before asking for anything
 /// or writing anything, and `pin` with any other word is refused like any

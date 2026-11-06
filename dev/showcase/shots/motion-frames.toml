@@ -1,0 +1,12 @@
+title = "Frames that move"
+what = "Four frame styles that animate, each a folder of QML: a running sheen, a glow that follows the pointer, a border that wakes, and a titlebar that appears."
+
+[grid]
+cells = ["motion-pulse", "motion-reactive", "motion-proximity", "motion-reveal"]
+labels = ["pulse", "reactive", "proximity", "reveal"]
+cols = 2
+cell_width = 720
+
+[out]
+webp = 960
+webp_kb = 4096

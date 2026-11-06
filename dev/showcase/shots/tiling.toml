@@ -1,0 +1,47 @@
+title = "Floating and tiling"
+what = "super+t tiles the desktop and every titlebar folds into its window's border; super+t again and each window glides back to where it was."
+keys = "super+t, super+t"
+
+how = """The titlebar is the rounded-violet frame, which folds its bar into the border as the window goes into a tile (one QML frame for both, nothing rebuilt). Coming back to floating, looks.lua glides every window to where it was."""
+[stage]
+one_group = true
+apps = ["log", "notes", "shell"]
+
+[stage.places]
+"git log" = [60, 50, 700, 470]
+"user.lua" = [800, 50, 740, 470]
+fastfetch = [330, 560, 900, 260]
+
+# Side by side, so no stacking order can differ between the two ends; and
+# the same window focused at both.
+[[at]]
+ms = 6200
+click = "1100,66"
+
+[[at]]
+ms = 6500
+move = "1500,700"
+from = "1500,700"
+
+[[at]]
+ms = 7400
+key = "super+t"
+
+[[at]]
+ms = 9400
+key = "super+t"
+
+[capture]
+from = 7000
+to = 11000
+loop = true
+
+[out]
+webp = 640
+poster = 1600
+slow = 4
+
+[[code]]
+file = "crates/solium/default-config/looks.lua"
+find = "switching from floating to a tiling"
+lines = 3

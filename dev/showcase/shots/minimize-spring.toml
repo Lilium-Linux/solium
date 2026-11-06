@@ -1,0 +1,47 @@
+title = "The genie, on a spring"
+what = "The same genie, with its tail drawn out further and a spring instead of an ease: two numbers in user.lua."
+keys = "super+m, a click on the button"
+
+[stage]
+one_group = true
+patch = '''
+config.minimize = { spread = 3, motion = { duration = 650, easing = "spring" } }
+'''
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [240, 90, 820, 560]
+"user.lua" = [560, 160, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+m"
+
+[[at]]
+ms = 8600
+move = "96,880"
+over = 700
+
+[[at]]
+ms = 9600
+click = "96,880"
+
+[[at]]
+ms = 10600
+move = "1300,640"
+over = 700
+
+[capture]
+from = 7000
+to = 11800
+loop = true
+
+[out]
+webp = 640
+poster = 900
+slow = 4

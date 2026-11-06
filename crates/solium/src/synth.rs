@@ -27,10 +27,11 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
 };
 
-use crate::state::Solium;
+use std::time::Duration;
 
-/// The left mouse button, as the kernel numbers it.
-const BTN_LEFT: u32 = 0x110;
+use solium_animation::Curve;
+
+use crate::state::Solium;
 
 /// A backend that no hardware is behind.
 #[derive(Debug)]
@@ -278,9 +279,10 @@ impl InputBackend for Synthetic {
 pub(crate) fn drag(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
-    from: Point<f64, Logical>,
+    from: Option<Point<f64, Logical>>,
     to: Point<f64, Logical>,
     steps: u32,
+    button: u32,
 ) {
     let steps = steps.max(1);
     let mut time = 0_u64;
@@ -291,16 +293,12 @@ pub(crate) fn drag(
 
     // Put the pointer on the target first. Relative motion has no absolute
     // form, so getting somewhere means moving there from wherever it is.
+    // With no start, the drag starts wherever that is.
     let start = current(state);
+    let from = from.unwrap_or(start);
     send_motion(state, region, from - start, tick(&mut time));
 
-    send_button(
-        state,
-        region,
-        BTN_LEFT,
-        ButtonState::Pressed,
-        tick(&mut time),
-    );
+    send_button(state, region, button, ButtonState::Pressed, tick(&mut time));
 
     let span = to - from;
     for step in 1..=steps {
@@ -316,23 +314,22 @@ pub(crate) fn drag(
     send_button(
         state,
         region,
-        BTN_LEFT,
+        button,
         ButtonState::Released,
         tick(&mut time),
     );
 }
 
-/// [`drag`], with the keys `held` names (as [`key`] takes them, `super` for
-/// the drag modifier) down for the whole of it: pressed before the button and
-/// let go after it, as a hand does. Empty holds nothing.
+/// [`drag`] of `route`, with the keys it holds (as [`key`] takes them,
+/// `super` for the drag modifier) down for the whole of it: pressed before the
+/// button and let go after it, as a hand does. Empty holds nothing.
 pub(crate) fn drag_holding(
     state: &mut Solium,
     region: Rectangle<i32, Logical>,
-    from: Point<f64, Logical>,
-    to: Point<f64, Logical>,
+    route: &crate::dev::Route,
     steps: u32,
-    held: &str,
 ) {
+    let held = route.held.as_str();
     let codes = codes(state, held);
     let mut at = 0_u64;
     let mut send = |state: &mut Solium, code: Keycode, key_state: KeyState| {
@@ -352,13 +349,135 @@ pub(crate) fn drag_holding(
     for &code in codes.iter().flatten() {
         send(state, code, KeyState::Pressed);
     }
-    drag(state, region, from, to, steps);
+    let from = route.from.map(Point::from);
+    drag(
+        state,
+        region,
+        from,
+        route.to.into(),
+        steps,
+        route.button.code(),
+    );
     for &code in codes.iter().flatten().rev() {
         send(state, code, KeyState::Released);
     }
     // Where it ended, which is not `to` when something held the pointer: a
     // locked one stays put (#427).
     tracing::info!(at = ?current(state), "scripted drag ended");
+}
+
+/// A drag or a pointer move spread over time (#498): the pointer travels
+/// from its start to its end on an `inOutCubic` path, sent to where the path
+/// is each time it is told the time -- once a frame -- as a hand moves a
+/// mouse, rather than all at once. A drag presses its button at the start and
+/// lets go at the end, with the keys it holds down around that; a
+/// move presses no button. `SOLIUM_DRAG_AT` and `SOLIUM_MOVE_AT` with a `~`.
+/// `tests::a_paced_drag_travels_its_path_a_step_a_frame_and_lets_go_at_its_end`.
+#[derive(Debug)]
+pub(crate) struct Journey {
+    start: Duration,
+    over: Duration,
+    from: Point<f64, Logical>,
+    to: Point<f64, Logical>,
+    button: Option<u32>,
+    held: Vec<Keycode>,
+}
+
+impl Journey {
+    /// One begun at `now`, from `route`: the keys it holds down, the pointer
+    /// put on its start (left where it is when it has none), and for a drag
+    /// (`press`) its button down.
+    pub(crate) fn begin(
+        state: &mut Solium,
+        region: Rectangle<i32, Logical>,
+        now: Duration,
+        route: &crate::dev::Route,
+        press: bool,
+    ) -> Self {
+        let time = micros(now);
+        let held = codes(state, &route.held).unwrap_or_default();
+        for &code in &held {
+            send_key(state, region, code, KeyState::Pressed, time);
+        }
+        let at = current(state);
+        let from = route.from.map_or(at, Point::from);
+        if from != at {
+            send_motion(state, region, from - at, time);
+        }
+        let button = press.then(|| route.button.code());
+        if let Some(button) = button {
+            send_button(state, region, button, ButtonState::Pressed, time);
+        }
+        Self {
+            start: now,
+            over: route.over,
+            from,
+            to: route.to.into(),
+            button,
+            held,
+        }
+    }
+
+    /// The pointer sent to where the path is at `now`, and whether the
+    /// journey is over. At its end the pointer is on `to` exactly, and the
+    /// button and then the keys come up.
+    pub(crate) fn step(
+        &self,
+        state: &mut Solium,
+        region: Rectangle<i32, Logical>,
+        now: Duration,
+    ) -> bool {
+        let progress = if self.over.is_zero() {
+            1.0
+        } else {
+            (now.saturating_sub(self.start).as_secs_f64() / self.over.as_secs_f64()).min(1.0)
+        };
+        let along = Curve::InOutCubic.at(progress);
+        let target = self.from + (self.to - self.from).upscale(along);
+        let time = micros(now);
+        let delta = target - current(state);
+        if delta != Point::default() {
+            send_motion(state, region, delta, time);
+        }
+        if progress < 1.0 {
+            return false;
+        }
+        if let Some(button) = self.button {
+            send_button(state, region, button, ButtonState::Released, time);
+        }
+        for &code in self.held.iter().rev() {
+            send_key(state, region, code, KeyState::Released, time);
+        }
+        // Where it ended, which is not `to` when something held the pointer.
+        tracing::info!(at = ?current(state), "scripted journey ended");
+        true
+    }
+}
+
+/// A moment on the compositor's clock, in the microseconds an event carries.
+fn micros(at: Duration) -> u64 {
+    u64::try_from(at.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// One key down or up, through the real input path.
+fn send_key(
+    state: &mut Solium,
+    region: Rectangle<i32, Logical>,
+    code: Keycode,
+    key_state: KeyState,
+    time: u64,
+) {
+    crate::input::handle::<Synthetic>(
+        state,
+        region,
+        InputEvent::Keyboard {
+            event: Key {
+                code,
+                state: key_state,
+                time,
+            },
+        },
+    );
 }
 
 /// The keycodes of a combination, as [`key`] finds them, or `None` when the
@@ -623,10 +742,161 @@ pub(crate) fn touch_cancel(state: &mut Solium, region: Rectangle<i32, Logical>) 
 
 #[cfg(test)]
 mod tests {
-    use smithay::utils::Rectangle;
+    use std::time::Duration;
 
+    use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+    use smithay::utils::{Logical, Point, Rectangle};
+    use solium_animation::Curve;
+
+    use crate::dev::Route;
     use crate::keymap::live;
     use crate::keymap::tests::us_ru;
+    use crate::state::Solium;
+
+    /// One 1920x1080 monitor at the origin, so the pointer has somewhere to be.
+    fn monitor(state: &mut Solium) -> Rectangle<i32, Logical> {
+        let output = Output::new(
+            "synth-journey".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "solium".to_owned(),
+                model: "synth-journey".to_owned(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(1.0)),
+            Some((0, 0).into()),
+        );
+        state.space.map_output(&output, (0, 0));
+        Rectangle::from_size((1920, 1080).into())
+    }
+
+    /// Whether the left button holds the pointer, and whether Super is down.
+    fn held(state: &Solium) -> (bool, bool) {
+        let grabbed = state
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed());
+        let logo = state
+            .seat
+            .get_keyboard()
+            .is_some_and(|keyboard| keyboard.modifier_state().logo);
+        (grabbed, logo)
+    }
+
+    /// One step of a journey as `travel` saw it: when, where the pointer
+    /// was, and whether the button and Super were held.
+    type Seen = (Duration, Point<f64, Logical>, (bool, bool));
+
+    /// `journey` stepped every 16 ms from `start` until it says it is over:
+    /// where the pointer was after each step, and what was held then.
+    fn travel(
+        state: &mut Solium,
+        region: Rectangle<i32, Logical>,
+        journey: &super::Journey,
+        start: Duration,
+    ) -> Vec<Seen> {
+        let mut seen = Vec::new();
+        for frame in 1..=200 {
+            let now = start + Duration::from_millis(16 * frame);
+            let over = journey.step(state, region, now);
+            seen.push((now, super::current(state), held(state)));
+            if over {
+                return seen;
+            }
+        }
+        panic!("a 600 ms journey still going after 200 frames");
+    }
+
+    /// **A paced drag travels its path a step a frame, and lets go at its
+    /// end** (#498): the button and Super go down at the start; each pass puts
+    /// the pointer where the `inOutCubic` path is at that moment, so it moves
+    /// a little every frame and never jumps; it lands on the end exactly, and
+    /// only then do the button and the key come up.
+    #[test]
+    fn a_paced_drag_travels_its_path_a_step_a_frame_and_lets_go_at_its_end() {
+        let (_display, mut state) = us_ru(0);
+        let region = monitor(&mut state);
+        let start = Duration::from_secs(1);
+        let route = Route {
+            at: start,
+            from: Some((100.0, 100.0)),
+            to: (700.0, 400.0),
+            over: Duration::from_millis(600),
+            held: "super".to_owned(),
+            button: crate::dev::Button::Left,
+        };
+        let journey = super::Journey::begin(&mut state, region, start, &route, true);
+        assert_eq!(
+            (super::current(&state), held(&state)),
+            ((100.0, 100.0).into(), (true, true)),
+            "on its start, the button and Super down"
+        );
+
+        let seen = travel(&mut state, region, &journey, start);
+        assert_eq!(seen.len(), 38, "a step a frame: 600 ms is 38 frames of 16");
+        let (from, to) = (Point::from((100.0, 100.0)), Point::from((700.0, 400.0)));
+        for &(now, at, _) in &seen {
+            let progress = ((now - start).as_secs_f64() / 0.6).min(1.0);
+            let path = from + (to - from).upscale(Curve::InOutCubic.at(progress));
+            assert!(
+                (at.x - path.x).abs() < 1e-6 && (at.y - path.y).abs() < 1e-6,
+                "at {now:?} the pointer is at {at:?}, the path at {path:?}"
+            );
+        }
+        let (_, last, after) = seen[seen.len() - 1];
+        assert_eq!(last, to, "it lands on the end exactly");
+        assert_eq!(after, (false, false), "and lets go of the button and Super");
+        assert!(
+            seen[..seen.len() - 1]
+                .iter()
+                .all(|&(_, _, held)| held == (true, true)),
+            "held for the whole way"
+        );
+    }
+
+    /// **A paced move presses nothing, and starts where the pointer is**
+    /// (#498): with no start the journey begins wherever the pointer already
+    /// is, travels to its end, and no button is down at any step.
+    #[test]
+    fn a_paced_move_presses_nothing_and_starts_where_the_pointer_is() {
+        let (_display, mut state) = us_ru(0);
+        let region = monitor(&mut state);
+        let to_start = Point::from((50.0, 60.0)) - super::current(&state);
+        super::send_motion(&mut state, region, to_start, 0);
+        let start = Duration::from_secs(2);
+        let route = Route {
+            at: start,
+            from: None,
+            to: (900.0, 320.0),
+            over: Duration::from_millis(600),
+            held: String::new(),
+            button: crate::dev::Button::Left,
+        };
+        let journey = super::Journey::begin(&mut state, region, start, &route, false);
+        assert_eq!(
+            super::current(&state),
+            (50.0, 60.0).into(),
+            "it starts where it is"
+        );
+
+        let seen = travel(&mut state, region, &journey, start);
+        assert!(
+            seen.iter().all(|&(_, _, held)| held == (false, false)),
+            "nothing pressed at any step"
+        );
+        assert!(
+            seen.windows(2).all(|pair| pair[1].1.x >= pair[0].1.x),
+            "always on its way"
+        );
+        assert_eq!(seen[seen.len() - 1].1, (900.0, 320.0).into(), "and arrives");
+    }
 
     /// **A scripted key is pressed through the real input path, with
     /// `us,ru` and Russian active**: Caps Lock by name locks Caps, Shift and

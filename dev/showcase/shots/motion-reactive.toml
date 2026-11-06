@@ -1,0 +1,47 @@
+title = "reactive"
+what = "A border that lights up where the pointer is, following it across the window, not only along the frame."
+
+[stage]
+one_group = true
+apps = ["log"]
+patch = '''
+config.pane = "reactive"
+'''
+
+[stage.places]
+"git log" = [400, 200, 800, 480]
+
+[[at]]
+ms = 6200
+move = "1400,800"
+from = "1400,800"
+
+[[at]]
+ms = 7400
+move = "760,300"
+over = 700
+
+[[at]]
+ms = 8300
+move = "1120,620"
+over = 1100
+
+[[at]]
+ms = 9600
+move = "520,600"
+over = 900
+
+[[at]]
+ms = 10600
+move = "1400,800"
+over = 700
+
+[capture]
+from = 7000
+to = 11600
+loop = true
+
+[out]
+webp = 720
+poster = 1400
+crop = [240, 110, 1120, 630]

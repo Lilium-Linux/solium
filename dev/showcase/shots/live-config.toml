@@ -1,0 +1,95 @@
+title = "Your configuration, live"
+what = "The frame style is one line of user.lua. Changed and saved, the running session reloads it: every window is reframed on the spot, and back again."
+keys = "editing user.lua in nano: pane = \"left\", save"
+
+how = """The frame style is pane in user.lua. Solium watches the configuration's files and reloads it when one is saved: the panes are rebuilt and every window keeps its place."""
+[stage]
+one_group = true
+apps = ["notes", "log"]
+
+[stage.places]
+"git log" = [860, 80, 680, 460]
+"user.lua" = [120, 200, 900, 600]
+
+[[at]]
+ms = 6200
+move = "1500,780"
+from = "1500,780"
+
+[[at]]
+ms = 7000
+key = "ctrl+w"
+
+[[at]]
+ms = 7300
+type = "\"rounded-violet\""
+every = 45
+
+[[at]]
+ms = 8200
+key = "return"
+
+[[at]]
+ms = 8400
+key = "right"
+
+[[at]]
+ms = 8600
+key = "delete"
+times = 14
+every = 40
+
+[[at]]
+ms = 9300
+type = "left"
+every = 90
+
+[[at]]
+ms = 9900
+key = "ctrl+s"
+
+[[at]]
+ms = 11400
+key = "ctrl+w"
+
+[[at]]
+ms = 11700
+type = "\"left\""
+every = 60
+
+[[at]]
+ms = 12100
+key = "return"
+
+[[at]]
+ms = 12300
+key = "right"
+
+[[at]]
+ms = 12500
+key = "delete"
+times = 4
+every = 60
+
+[[at]]
+ms = 12900
+type = "rounded-violet"
+every = 45
+
+[[at]]
+ms = 13700
+key = "ctrl+s"
+
+[capture]
+from = 8500
+to = 16000
+loop = true
+
+[out]
+webp = 960
+poster = 2500
+
+[[code]]
+file = "crates/solium/default-config/user.lua"
+find = 'pane = "rounded-violet"'
+lines = 1

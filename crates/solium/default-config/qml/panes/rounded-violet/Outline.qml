@@ -10,10 +10,6 @@ Item {
 
     property bool focused: false
     property int clientRadius: 0
-    property var windowValues: ({})
-    FlightVisibility { id: desktopOpening; values: outline.windowValues }
-    opacity: desktopOpening.flight && !desktopOpening.revealed ? 0 : 1
-    Behavior on opacity { enabled: desktopOpening.revealed; NumberAnimation { duration: 80 } }
 
     Rectangle {
         anchors.fill: parent

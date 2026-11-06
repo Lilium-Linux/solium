@@ -76,9 +76,11 @@
 #include <QtCore/QtMessageHandler>
 #include <QtCore/QPauseAnimation>
 #include <QtCore/QPointer>
+#include <QtCore/QSemaphore>
 #include <QtCore/QSet>
 #include <QtCore/QSize>
 #include <QtCore/QSocketNotifier>
+#include <QtCore/QThread>
 #include <QtCore/QUrl>
 #include <QtCore/QVariant>
 #include <QtGui/QCursor>
@@ -2374,6 +2376,60 @@ extern "C" int solium_qml_let_go_for_test(SoliumQmlScene *scene)
                      [window]() { g_let_go = window.isNull() ? 2 : 1; });
     item->deleteLater();
     return 0;
+}
+
+/*
+ * Wait until Qt's worker-script thread has handled what was posted to it
+ * before this call (#503).
+ *
+ * A `WorkerScript` runs in a JavaScript engine of its own on that thread, and
+ * freeing its scene only posts the thread a request to delete the engine,
+ * which it handles when it next gets to it. The delete ends in
+ * QQmlMetaType::freeUnusedTypesAndCaches, a sweep of Qt's process-wide type
+ * registry. Run into the process's exit, it sweeps the registry while
+ * libQt6Qml's static destructors free it: QQmlMetaTypeData's destructor takes
+ * no lock, and its global static reads as live until that destructor returns.
+ * Two threads free the same nodes, and glibc aborts on a corrupted heap
+ * (qtdeclarative v6.11.2, qquickworkerscript.cpp and qqmlmetatype.cpp; qtbase
+ * v6.11.2, qglobalstatic.h).
+ *
+ * The thread handles its events in the order they were posted, so once an
+ * event posted here has been handled, every request posted before it has been
+ * too. solium_qml_scene_free does not wait like this: the thread may be in
+ * the middle of a script, for as long as the script runs, and the compositor
+ * does not wait on a script.
+ */
+namespace {
+QObject *g_on_worker_thread = nullptr;
+} // namespace
+
+extern "C" int solium_qml_settle_workers(int timeout_ms)
+{
+    if (g_engine == nullptr) {
+        return 1;
+    }
+    QThread *worker = nullptr;
+    const auto threads = g_engine->findChildren<QThread *>(Qt::FindDirectChildrenOnly);
+    for (QThread *thread : threads) {
+        if (thread->inherits("QQuickWorkerScriptEngine")) {
+            worker = thread;
+            break;
+        }
+    }
+    if (worker == nullptr || !worker->isRunning()) {
+        return 1;
+    }
+    // Made once and kept, as the thread is: the engine that owns the thread
+    // lives as long as the process.
+    if (g_on_worker_thread == nullptr) {
+        g_on_worker_thread = new QObject();
+        g_on_worker_thread->moveToThread(worker);
+    }
+    // Shared, so a late release after a timeout lands on a live semaphore.
+    const auto handled = std::make_shared<QSemaphore>();
+    QMetaObject::invokeMethod(g_on_worker_thread, [handled]() { handled->release(); },
+                              Qt::QueuedConnection);
+    return handled->tryAcquire(1, timeout_ms) ? 1 : 0;
 }
 
 /* For tests: which `Solium.Theme` an engine given `import_path` the way the

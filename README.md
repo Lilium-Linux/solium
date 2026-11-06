@@ -23,8 +23,12 @@ presentation and animation engine. Layout policy, desktop UI and effects are
 files you can change without rebuilding the compositor.
 
 [Install on Fedora](#install) · [Documentation](https://lilium-linux.github.io/solium/) ·
-[Known limitations](docs/gaps.md) · [Roadmap](docs/roadmap.md) ·
+[Showcase](docs/showcase.md) · [Known limitations](docs/gaps.md) · [Roadmap](docs/roadmap.md) ·
 [Contributing](CONTRIBUTING.md) · [Discord](https://discord.gg/ATQNfHHvFa)
+
+![Solium as it ships: the bar along the bottom, a browser on the stage in a rounded violet frame, and Atrium's strip of live, tilted cards brought out at the left edge](docs/media/hero.png)
+
+![Alt+Tab lays every window out as a live card, then super+tab stands the workspaces up as a 3D stack and the wallpaper pans to the one chosen](docs/media/tour.webp)
 
 ## Status
 
@@ -35,17 +39,30 @@ promised. Check the [current status](docs/status.md) and
 
 The default configuration is a whole desktop: a taskbar, a floating titlebar
 with quick settings, window snapping, a stage-manager strip, quick search,
-Alt+Tab cards and an editable desktop. It is configuration built on Solium's
+Alt+Tab cards and a 3D workspace stack. It is configuration built on Solium's
 public API, copied into `~/.config/solium` on install, and yours to change. Solium has its own
 lock screen, takes touch on its own UI as on windows, and serves notifications
 and audio to scenes and Lua, follows media players and hosts the tray. Power,
 network and Bluetooth services, gestures and input methods are still
 unfinished.
 
-![An earlier nested Solium session with QML window frames](docs/desktop.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/media/atrium.webp" alt="The pointer at the left edge brings out Atrium's strip of live, tilted cards; a click brings a card's application onto the stage"><br><b>Atrium.</b> The window in use on the stage, every other application a live card at the edge.</td>
+<td width="50%"><img src="docs/media/tiling.webp" alt="super+t tiles three windows and their titlebars fold into the borders; super+t again and each glides back"><br><b>Tiling and back.</b> Titlebars fold into the border; floating again, every window glides home.</td>
+</tr>
+<tr>
+<td><img src="docs/media/minimize.webp" alt="super+m pulls a window into its own taskbar button with the genie, and a click plays it back out"><br><b>Into the taskbar.</b> The genie lands in the window's own button.</td>
+<td><img src="docs/media/snap.webp" alt="A window dragged to the left edge shows where it will go and glides into the left half; dragged away, it takes back its size"><br><b>Snapping.</b> A preview at the edge, a glide on release.</td>
+</tr>
+<tr>
+<td><img src="docs/media/titlebar.webp" alt="A right click grows the titlebar into quick settings for that window, moving its content down, and Esc folds it away"><br><b>A titlebar that grows.</b> Quick settings for one window, in its own bar.</td>
+<td><img src="docs/media/lock.webp" alt="The clock flies from the bar to the middle as the session locks, and back into the bar as it unlocks"><br><b>The lock.</b> The bar's clock flies to the middle and back.</td>
+</tr>
+</table>
 
-This capture predates the current dark theme and default configuration. It shows the
-window-frame rendering, rather than the current desktop appearance.
+Every one of these is a file of Lua or QML in the default configuration.
+[The Showcase](docs/showcase.md) has more, each with how it is done.
 
 ## What it offers
 
@@ -267,8 +284,12 @@ return {
 }
 ```
 
-Run `solium --check`, then press `super+shift+r` in the session. The example
-moves window titlebars to the left edge. A configuration that fails to load
+Run `solium --check`, then press `super+shift+r` in the session, or just save:
+the session reloads a configuration file that changes. The example moves
+window titlebars to the left edge.
+
+![nano editing user.lua in the running session: pane = "left" typed and saved, and every window reframed on the spot, then back](docs/media/live-config.webp)
+ A configuration that fails to load
 leaves the running configuration in place and reports the error in the log.
 
 Continue with [configuring Solium](docs/ricing.md), the
@@ -290,6 +311,8 @@ startup probe, with software rendering as a fallback and in nested sessions.
 Solium can host a shell in its QML engine or run ordinary layer-shell clients.
 It does not require a particular desktop environment or a separate shell
 project. The default configuration is one configuration of the compositor.
+
+![The same two windows under the same compositor: on the left with no ~/.config/solium at all, on the right with the default configuration](docs/media/configuration-is-the-desktop.png)
 
 ## Find your way around
 

@@ -1,0 +1,63 @@
+title = "The keyboard pill"
+what = "Typing in foot: Caps Lock on and the pill says so just under the caret; the layout switched to Russian and it says that; it follows the caret as the text runs on."
+keys = "caps_lock, shift+alt_l"
+how = "keyboard.indicator in config.lua and lua/keyboard_indicator.lua, from the caret foot reports over text-input-v3. Every shipped frame style draws the pill with one line, KeyboardPillLayer {}."
+
+[stage]
+one_group = true
+apps = ["foot"]
+patch = '''
+config.keyboard = { layout = "us,ru", options = "grp:alt_shift_toggle" }
+'''
+
+[stage.places]
+foot = [300, 200, 1000, 420]
+
+[[at]]
+ms = 6000
+move = "1500,800"
+from = "1500,800"
+
+[[at]]
+ms = 7400
+type = "echo hello "
+every = 90
+
+[[at]]
+ms = 8600
+key = "caps_lock"
+
+[[at]]
+ms = 9200
+type = "solium"
+every = 110
+
+[[at]]
+ms = 10200
+key = "caps_lock"
+
+[[at]]
+ms = 10800
+key = "shift+alt_l"
+
+[[at]]
+ms = 11400
+type = " ghbdtn"
+every = 110
+
+[[at]]
+ms = 12600
+key = "shift+alt_l"
+
+[[at]]
+ms = 13200
+key = "ctrl+u"
+
+[capture]
+from = 7000
+to = 14000
+
+[out]
+webp = 960
+poster = 4600
+crop = [260, 170, 1080, 608]

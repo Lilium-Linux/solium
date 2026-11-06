@@ -1,0 +1,92 @@
+title = "Alt+Tab and the workspace stack"
+what = "Alt+Tab lays every window out as a live card; super+tab stands the workspaces up as a 3D stack and the wallpaper pans to the one chosen."
+keys = "alt+tab, return · super+tab, down, return"
+
+how = """Both are files of the default configuration. recents.lua presents every live window where a row puts it, with sol.present: the cards are the windows themselves, never screenshots. deskstack.lua turns each workspace into a plane of its windows and tilts it about the desk's centre."""
+[stage]
+apps = ["log", "notes", "docs", "shell"]
+
+[stage.places]
+showcase-log = [300, 70, 900, 600]
+showcase-notes = [520, 160, 900, 600]
+"org.mozilla.firefox" = [270, 36, 1290, 800]
+showcase-shell = [420, 140, 860, 560]
+
+[[at]]
+ms = 6200
+key = "super+shift+2"
+
+[[at]]
+ms = 6400
+move = "1500,700"
+from = "1500,700"
+
+[[at]]
+ms = 7600
+key = "alt+tab"
+
+[[at]]
+ms = 8500
+key = "tab"
+
+[[at]]
+ms = 9300
+key = "return"
+
+[[at]]
+ms = 10500
+key = "super+tab"
+
+[[at]]
+ms = 11400
+key = "down"
+
+[[at]]
+ms = 12200
+key = "return"
+
+[[at]]
+ms = 13400
+key = "super+tab"
+
+[[at]]
+ms = 14200
+key = "up"
+
+[[at]]
+ms = 15000
+key = "return"
+
+# Back to the window it began on: Alt+Tab opens on the window before this
+# one (Firefox), and one Tab more is notes.
+[[at]]
+ms = 16000
+key = "alt+tab"
+
+[[at]]
+ms = 16600
+key = "tab"
+
+[[at]]
+ms = 17200
+key = "return"
+
+[capture]
+from = 7200
+to = 18200
+loop = true
+
+[out]
+webp = 960
+webp_kb = 4096
+poster = 1600
+
+[[code]]
+file = "crates/solium/default-config/recents.lua"
+find = "Alt+Tab as Android"
+lines = 13
+
+[[code]]
+file = "crates/solium/default-config/deskstack.lua"
+find = "A 3D overview"
+lines = 12

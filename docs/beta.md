@@ -26,7 +26,7 @@ in the repository is not release acceptance.
 | Area | Evidence required |
 |---|---|
 | Daily use | Core application and window-management workflows survive real use; remaining release blockers in the daily-drive queue are resolved |
-| Desktop | The default configuration works with real services and data, including the intended widgets and native lock UI |
+| Desktop | The default configuration works with real services and data, including the bar's services and native lock UI |
 | Hardware | Recorded long-session and suspend/resume checks, plus input, output hotplug, scaling and GPU behavior on the supported machines |
 | Installation | A fresh system can install, select the session, upgrade and remove the release using its documented packages |
 | Session services | Locking, idle, autostart, authentication and portal workflows are exercised in the installed session |

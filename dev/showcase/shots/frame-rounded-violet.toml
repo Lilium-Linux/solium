@@ -1,0 +1,27 @@
+title = "rounded-violet"
+what = "pane = \"rounded-violet\": a focused window in front, one without the keyboard behind it."
+
+[stage]
+one_group = true
+apps = ["log", "notes"]
+patch = '''
+config.pane = "rounded-violet"
+'''
+
+[stage.places]
+"user.lua" = [260, 150, 760, 480]
+"git log" = [560, 300, 760, 440]
+
+[[at]]
+ms = 6200
+move = "1500,820"
+from = "1500,820"
+
+[capture]
+from = 7000
+to = 7100
+
+[out]
+mp4 = false
+still = true
+crop = [180, 90, 1200, 720]

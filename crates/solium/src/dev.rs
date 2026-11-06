@@ -27,6 +27,36 @@ pub(crate) fn capture_frames() -> usize {
         .max(1)
 }
 
+/// The rate the compositor's clock runs at, nested: `SOLIUM_CLOCK_RATE`, 1 when
+/// unset, from 0.05 to 4 (#501).
+///
+/// ```sh
+/// SOLIUM_CLOCK_RATE=0.25 SOLIUM_CAPTURE_INTERVAL=4 ./target/debug/solium
+/// ```
+///
+/// A capture reads its frame back in the pass that drew it, and a heavy pass
+/// takes longer than a frame, so a burst at the real rate misses frames. At a
+/// quarter, every animation, QML's and Lua's timers and every `SOLIUM_*_AT`
+/// moment go four times slower together, each host frame is a quarter of its
+/// time on the clock, and a video paced by the frames' own moments is smooth
+/// and true to speed. Applications are not slowed: their own clocks are their
+/// own.
+pub(crate) fn clock_rate() -> f64 {
+    let Ok(raw) = std::env::var("SOLIUM_CLOCK_RATE") else {
+        return 1.0;
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(rate) if rate.is_finite() && rate > 0.0 => rate.clamp(0.05, 4.0),
+        _ => {
+            tracing::warn!(
+                value = raw,
+                "SOLIUM_CLOCK_RATE is not a rate; the clock runs at 1"
+            );
+            1.0
+        }
+    }
+}
+
 /// How many monitors the nested backend should pretend to have.
 ///
 /// ```sh
@@ -124,43 +154,126 @@ pub(crate) fn clicks() -> Vec<(Duration, (f64, f64))> {
     })
 }
 
-/// A drag: when to start it, where from, where to, and the keys held down
-/// for it, as `SOLIUM_KEY_AT` names keys (`super`, `alt`), empty for none.
-pub(crate) type Drag = (Duration, (f64, f64), (f64, f64), String);
+/// A drag or a pointer move: when it starts, where from (`None`: wherever the
+/// pointer is by then), where to, how long the pointer takes to get there
+/// (zero: at once), the keys held down for it, as `SOLIUM_KEY_AT` names keys
+/// (`super`, `alt`), empty for none, and the button a drag presses.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Route {
+    pub(crate) at: Duration,
+    pub(crate) from: Option<(f64, f64)>,
+    pub(crate) to: (f64, f64),
+    pub(crate) over: Duration,
+    pub(crate) held: String,
+    pub(crate) button: Button,
+}
+
+/// A pointer button a scripted drag or click presses (#498).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Button {
+    #[default]
+    Left,
+    Right,
+    Middle,
+}
+
+impl Button {
+    /// The button's code, as the kernel numbers it.
+    pub(crate) fn code(self) -> u32 {
+        match self {
+            Self::Left => 0x110,
+            Self::Right => 0x111,
+            Self::Middle => 0x112,
+        }
+    }
+}
 
 /// Drags to perform, as `<ms>:<x1>,<y1>><x2>,<y2>` separated by semicolons,
-/// each with the keys to hold for it before an `@` if any.
+/// each with the keys to hold for it before an `@` if any, and how long it
+/// takes after a `~` (#498), and the button after a `#`, `left` unless it
+/// says `right` or `middle`. The start may be left out, for a drag from
+/// wherever the pointer is.
 ///
 /// ```sh
 /// SOLIUM_DRAG_AT="4000:300,200>1200,600"
 /// SOLIUM_DRAG_AT="4000:super@300,200>1200,600"
+/// SOLIUM_DRAG_AT="4000:300,200>1200,600~700"
+/// SOLIUM_DRAG_AT="4000:300,200>300,200#right"   # a right click
 /// ```
 ///
 /// A drag is the interaction that could not be tested without a hand on a
 /// mouse, and it is where the last two bugs in this compositor were — one of
 /// them a deadlock that froze the machine. It runs through the real grab and
 /// the real layout scripts; see `synth`. With `super` held it is the drag
-/// modifier's move, which works anywhere in a window (#427).
-pub(crate) fn drags() -> Vec<Drag> {
-    parse_list_with("SOLIUM_DRAG_AT", ';', parse_drag)
+/// modifier's move, which works anywhere in a window (#427). Without a `~` it
+/// happens inside one frame, which is enough for the grab and wrong for
+/// anything watched: with one, the pointer travels, one step a frame
+/// (`synth::Journey`).
+pub(crate) fn drags() -> Vec<Route> {
+    routes("SOLIUM_DRAG_AT")
+}
+
+/// Pointer moves, written as drags are and pressing nothing: the pointer
+/// travels to each end, so hovering, entering and leaving, the cursor's
+/// shapes and a frame that follows the pointer all see it move (#498).
+///
+/// ```sh
+/// SOLIUM_MOVE_AT="2000:400,300>900,320~600;3000:>900,600~400"
+/// ```
+pub(crate) fn moves() -> Vec<Route> {
+    routes("SOLIUM_MOVE_AT")
+}
+
+fn routes(name: &str) -> Vec<Route> {
+    parse_list_with(name, ';', parse_route)
         .into_iter()
-        .map(|(at, (from, to, held))| (at, from, to, held))
+        .map(|(at, (from, to, over, held, button))| Route {
+            at,
+            from,
+            to,
+            over,
+            held,
+            button,
+        })
         .collect()
 }
 
-/// A drag after its moment: where from, where to, and the keys held.
-type DragValue = ((f64, f64), (f64, f64), String);
+/// A route after its moment: where from, where to, how long, the keys held,
+/// the button.
+type RouteValue = (Option<(f64, f64)>, (f64, f64), Duration, String, Button);
 
-/// One drag's value, after its moment: `[<keys>@]<x1>,<y1>><x2>,<y2>`.
-/// `tests::a_drag_may_hold_keys`.
-fn parse_drag(value: &str) -> Option<DragValue> {
+/// One route's value, after its moment:
+/// `[<keys>@][<x1>,<y1>]><x2>,<y2>[~<ms>][#<button>]`.
+/// `tests::a_drag_may_hold_keys`,
+/// `tests::a_route_may_take_a_duration_and_start_where_the_pointer_is`.
+fn parse_route(value: &str) -> Option<RouteValue> {
     let (held, value) = value.split_once('@').unwrap_or(("", value));
+    let (value, button) = match value.split_once('#') {
+        Some((value, button)) => (
+            value,
+            match button.trim() {
+                "left" => Button::Left,
+                "right" => Button::Right,
+                "middle" => Button::Middle,
+                _ => return None,
+            },
+        ),
+        None => (value, Button::Left),
+    };
+    let (value, over) = match value.split_once('~') {
+        Some((value, over)) => (value, Duration::from_millis(over.trim().parse().ok()?)),
+        None => (value, Duration::ZERO),
+    };
     let (from, to) = value.split_once('>')?;
     let point = |raw: &str| -> Option<(f64, f64)> {
         let (x, y) = raw.split_once(',')?;
         Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
     };
-    Some((point(from)?, point(to)?, held.trim().to_owned()))
+    let from = match from.trim() {
+        "" => None,
+        from => Some(point(from)?),
+    };
+    Some((from, point(to)?, over, held.trim().to_owned(), button))
 }
 
 /// Scheduled touchscreen samples, in global logical coordinates.
@@ -568,19 +681,87 @@ pub(crate) fn debug_mode() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     /// **A drag may hold keys**, before an `@`, as the drag modifier's move
     /// needs `super` held (#427); without one it holds none.
     #[test]
     fn a_drag_may_hold_keys() {
         assert_eq!(
-            super::parse_drag("super@300,200>1200,600"),
-            Some(((300.0, 200.0), (1200.0, 600.0), "super".to_owned()))
+            super::parse_route("super@300,200>1200,600"),
+            Some((
+                Some((300.0, 200.0)),
+                (1200.0, 600.0),
+                Duration::ZERO,
+                "super".to_owned(),
+                super::Button::Left
+            ))
         );
         assert_eq!(
-            super::parse_drag("300,200>1200,600"),
-            Some(((300.0, 200.0), (1200.0, 600.0), String::new()))
+            super::parse_route("300,200>1200,600"),
+            Some((
+                Some((300.0, 200.0)),
+                (1200.0, 600.0),
+                Duration::ZERO,
+                String::new(),
+                super::Button::Left
+            ))
         );
-        assert_eq!(super::parse_drag("super@300,200"), None);
+        assert_eq!(super::parse_route("super@300,200"), None);
+    }
+
+    /// **A route may take a duration, may start where the pointer is, and may
+    /// press another button** (#498): `~<ms>` after the end is how long the
+    /// pointer takes, an empty start is wherever it is, `#right` presses the
+    /// right button, and a duration or a button that is neither is no route
+    /// at all rather than an instant one or a left click.
+    #[test]
+    fn a_route_may_take_a_duration_and_start_where_the_pointer_is() {
+        assert_eq!(
+            super::parse_route("super@300,200>1200,600~700"),
+            Some((
+                Some((300.0, 200.0)),
+                (1200.0, 600.0),
+                Duration::from_millis(700),
+                "super".to_owned(),
+                super::Button::Left
+            ))
+        );
+        assert_eq!(
+            super::parse_route(">1200,600~700"),
+            Some((
+                None,
+                (1200.0, 600.0),
+                Duration::from_millis(700),
+                String::new(),
+                super::Button::Left
+            ))
+        );
+        assert_eq!(
+            super::parse_route(">1200,600"),
+            Some((
+                None,
+                (1200.0, 600.0),
+                Duration::ZERO,
+                String::new(),
+                super::Button::Left
+            ))
+        );
+        assert_eq!(
+            super::parse_route("300,200>300,200#right"),
+            Some((
+                Some((300.0, 200.0)),
+                (300.0, 200.0),
+                Duration::ZERO,
+                String::new(),
+                super::Button::Right
+            )),
+            "a right click"
+        );
+        assert_eq!(super::parse_route("300,200>300,200#fourth"), None);
+        assert_eq!(super::parse_route("300,200>1200,600~"), None);
+        assert_eq!(super::parse_route("300,200>1200,600~fast"), None);
+        assert_eq!(super::parse_route("x,200>1200,600~700"), None);
     }
 
     #[test]

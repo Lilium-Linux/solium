@@ -1,0 +1,45 @@
+title = "Burnt away"
+what = "An example morph: the window burns away on a violet edge as it drifts towards its button, and comes back the same way."
+keys = "super+m, a click on the button"
+
+[stage]
+one_group = true
+files = ["docs/showcase/examples/effects/dissolve:effects/genie"]
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [240, 90, 820, 560]
+"user.lua" = [560, 160, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+m"
+
+[[at]]
+ms = 8600
+move = "96,880"
+over = 700
+
+[[at]]
+ms = 9600
+click = "96,880"
+
+[[at]]
+ms = 10600
+move = "1300,640"
+over = 700
+
+[capture]
+from = 7000
+to = 11800
+loop = true
+
+[out]
+webp = 640
+poster = 900
+slow = 4

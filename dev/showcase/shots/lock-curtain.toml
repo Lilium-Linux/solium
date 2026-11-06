@@ -1,0 +1,38 @@
+title = "A curtain"
+what = "An example lock scene: two halves meet in the middle as the session locks, and part as it unlocks."
+keys = "super+ctrl+l"
+
+[stage]
+one_group = true
+files = ["docs/showcase/examples/lock/Curtain.qml:qml/lock/Curtain.qml"]
+patch = '''
+config.lock.scene = "Curtain"
+'''
+apps = ["log", "notes"]
+
+[stage.places]
+"git log" = [240, 90, 820, 560]
+"user.lua" = [560, 160, 860, 560]
+
+[[at]]
+ms = 6200
+move = "1300,640"
+from = "1300,640"
+
+[[at]]
+ms = 7400
+key = "super+ctrl+l"
+
+[[at]]
+ms = 9800
+unlock = true
+
+[capture]
+from = 7000
+to = 11400
+loop = true
+
+[out]
+webp = 640
+poster = 1600
+slow = 4

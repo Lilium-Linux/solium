@@ -1,0 +1,16 @@
+// The showcase's fastfetch: what the machine is, and nothing about who.
+{
+  "logo": { "type": "small", "padding": { "top": 1, "left": 2, "right": 3 } },
+  "display": { "separator": "  ", "color": { "keys": "magenta" } },
+  "modules": [
+    "break",
+    { "type": "os", "format": "{name} {version-id}" },
+    "kernel",
+    "wm",
+    "cpu",
+    "gpu",
+    "memory",
+    "break",
+    "colors"
+  ]
+}

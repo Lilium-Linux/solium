@@ -95,3 +95,22 @@ INFO solium::winit: nested window focus changed focused=true
 ```
 
 and that is the rule working as designed, not failing.
+
+## When nothing should ever give it focus
+
+Over a fullscreen game, a nested window opening still took focus as it
+appeared, once each time: `dev/showcase/record.py` opens one for every shot,
+dozens in a run. Where the nested runs are scripted, as an agent's and the
+showcase's are, none of them needs the keyboard, so the rule can say the
+window never takes it:
+
+```ini
+acceptfocus=false
+acceptfocusrule=2
+```
+
+With these, a run logs no `focused=true` at all, and the keys and pointer it
+is driven with (`SOLIUM_KEY_AT`, `SOLIUM_MOVE_AT`, ...) reach it as before:
+they are Solium's own input, not the host's. Remove the two lines, or turn
+the setting off in System Settings, Window Rules, to type into a nested
+session yourself.
