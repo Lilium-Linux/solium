@@ -695,6 +695,21 @@ sol.on("open", function(id)
     -- setting of this file's: this is still the window opening, and
     -- `placement.size` only decides how big, not how it gets there.
     local rect = floating.placement_for(window, area, others)
+    if not window.shown then
+        -- Nothing of it is on screen at a size of its own yet: a launch's
+        -- waiting window, which the compositor opened in a slot of its own,
+        -- the work area less a margin. Put straight where it goes, and grown
+        -- into that from `open.scale` of it; glided there, it was drawn at the
+        -- slot's size and shrank into its place (#507).
+        -- `a_launched_window_grows_into_its_place_not_out_of_its_slot`.
+        sol.animate({ duration = 0 })
+        sol.place(id, { x = rect.x, y = rect.y, w = rect.w, h = rect.h, tile = false })
+        local open = package.loaded.open
+        if type(open) == "table" and open.grow then
+            open.grow(id, rect)
+        end
+        return
+    end
     sol.place(id, { x = rect.x, y = rect.y, w = rect.w, h = rect.h, tile = false })
 end)
 

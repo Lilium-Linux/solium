@@ -10477,6 +10477,65 @@ end)"#,
         ));
     }
 
+    /// **#507: a window launched onto the floating desktop grows into the
+    /// place floating gives it**, from `open.scale` of that place about its
+    /// centre, and is never drawn larger than it.
+    ///
+    /// A launch opens its window in a slot of the compositor's, the whole
+    /// work area less a margin, and in the same `open` the shipped
+    /// `open.lua` asked for its grow-in from 0.88 of the window's rectangle
+    /// as `sol.windows()` had it (that slot), before `floating.lua` placed
+    /// it smaller. The first frame was the window at 0.88 of the work area,
+    /// and it shrank into its place: a window "appearing and then changing
+    /// its size by 20-30%", as the maintainer saw it.
+    #[test]
+    fn a_launched_window_grows_into_its_place_not_out_of_its_slot() {
+        let display = Display::<Solium>::new().expect("creating a test wayland display");
+        let mut state = Solium::new(display.handle());
+        state
+            .decorations
+            .set_style(&mut state.panes, Some("none".to_string()));
+        one_screen(&mut state);
+        shipped_with(
+            &mut state,
+            "launched-window-grows-into-its-place",
+            "require(\"open\")\nrequire(\"floating\")\n",
+        );
+
+        let pane = state.open_loading("app", None, crate::pane::loading_source(None), None);
+        let now = state.clock.now();
+        let held = state.panes.get(pane).expect("the launched window is here");
+        // Where floating put it, as `sol.windows()` says it.
+        let placed = state.asked_outer(held);
+        let screen = state.work_area().expect("the monitor has a work area");
+        assert!(
+            placed.size.w < screen.size.w * 3 / 4,
+            "the premise: floating placed it smaller than the slot: {placed:?} on {screen:?}"
+        );
+
+        let first = state.drawn_at(held, state.pane_outer(held), now);
+        let (w, h) = (first.rect.size.w, first.rect.size.h);
+        assert!(
+            (w - f64::from(placed.size.w) * 0.88).abs() < 1.0
+                && (h - f64::from(placed.size.h) * 0.88).abs() < 1.0,
+            "its first frame is 0.88 of where it was placed ({placed:?}), not of the slot: {:?}",
+            first.rect
+        );
+        let centre = |x: f64, w: f64| x + w / 2.0;
+        assert!(
+            (centre(first.rect.loc.x, w)
+                - centre(f64::from(placed.loc.x), f64::from(placed.size.w)))
+            .abs()
+                < 1.0
+                && (centre(first.rect.loc.y, h)
+                    - centre(f64::from(placed.loc.y), f64::from(placed.size.h)))
+                .abs()
+                    < 1.0,
+            "and about its centre: {:?} in {placed:?}",
+            first.rect
+        );
+    }
+
     /// **#443: a window maximised while the desktop floated joins its tile
     /// when a layout takes over.**
     ///
