@@ -77,7 +77,10 @@ pub(crate) fn run() -> Result<()> {
     // Slowed for a capture, before anything has started to move (#501).
     let rate = dev::clock_rate();
     if rate != 1.0 {
-        tracing::info!(rate, "the compositor's clock runs at this rate (SOLIUM_CLOCK_RATE)");
+        tracing::info!(
+            rate,
+            "the compositor's clock runs at this rate (SOLIUM_CLOCK_RATE)"
+        );
         state.clock.set_rate(rate);
     }
 

@@ -48,7 +48,10 @@ pub(crate) fn clock_rate() -> f64 {
     match raw.trim().parse::<f64>() {
         Ok(rate) if rate.is_finite() && rate > 0.0 => rate.clamp(0.05, 4.0),
         _ => {
-            tracing::warn!(value = raw, "SOLIUM_CLOCK_RATE is not a rate; the clock runs at 1");
+            tracing::warn!(
+                value = raw,
+                "SOLIUM_CLOCK_RATE is not a rate; the clock runs at 1"
+            );
             1.0
         }
     }

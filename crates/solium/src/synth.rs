@@ -311,7 +311,13 @@ pub(crate) fn drag(
         send_motion(state, region, delta.into(), tick(&mut time));
     }
 
-    send_button(state, region, button, ButtonState::Released, tick(&mut time));
+    send_button(
+        state,
+        region,
+        button,
+        ButtonState::Released,
+        tick(&mut time),
+    );
 }
 
 /// [`drag`] of `route`, with the keys it holds (as [`key`] takes them,
@@ -344,7 +350,14 @@ pub(crate) fn drag_holding(
         send(state, code, KeyState::Pressed);
     }
     let from = route.from.map(Point::from);
-    drag(state, region, from, route.to.into(), steps, route.button.code());
+    drag(
+        state,
+        region,
+        from,
+        route.to.into(),
+        steps,
+        route.button.code(),
+    );
     for &code in codes.iter().flatten().rev() {
         send(state, code, KeyState::Released);
     }
@@ -837,7 +850,9 @@ mod tests {
         assert_eq!(last, to, "it lands on the end exactly");
         assert_eq!(after, (false, false), "and lets go of the button and Super");
         assert!(
-            seen[..seen.len() - 1].iter().all(|&(_, _, held)| held == (true, true)),
+            seen[..seen.len() - 1]
+                .iter()
+                .all(|&(_, _, held)| held == (true, true)),
             "held for the whole way"
         );
     }
@@ -849,7 +864,12 @@ mod tests {
     fn a_paced_move_presses_nothing_and_starts_where_the_pointer_is() {
         let (_display, mut state) = us_ru(0);
         let region = monitor(&mut state);
-        super::send_motion(&mut state, region, Point::from((50.0, 60.0)) - super::current(&state), 0);
+        super::send_motion(
+            &mut state,
+            region,
+            Point::from((50.0, 60.0)) - super::current(&state),
+            0,
+        );
         let start = Duration::from_secs(2);
         let route = Route {
             at: start,
@@ -860,7 +880,11 @@ mod tests {
             button: crate::dev::Button::Left,
         };
         let journey = super::Journey::begin(&mut state, region, start, &route, false);
-        assert_eq!(super::current(&state), (50.0, 60.0).into(), "it starts where it is");
+        assert_eq!(
+            super::current(&state),
+            (50.0, 60.0).into(),
+            "it starts where it is"
+        );
 
         let seen = travel(&mut state, region, &journey, start);
         assert!(
