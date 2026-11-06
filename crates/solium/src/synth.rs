@@ -790,6 +790,10 @@ mod tests {
         (grabbed, logo)
     }
 
+    /// One step of a journey as `travel` saw it: when, where the pointer
+    /// was, and whether the button and Super were held.
+    type Seen = (Duration, Point<f64, Logical>, (bool, bool));
+
     /// `journey` stepped every 16 ms from `start` until it says it is over:
     /// where the pointer was after each step, and what was held then.
     fn travel(
@@ -797,7 +801,7 @@ mod tests {
         region: Rectangle<i32, Logical>,
         journey: &super::Journey,
         start: Duration,
-    ) -> Vec<(Duration, Point<f64, Logical>, (bool, bool))> {
+    ) -> Vec<Seen> {
         let mut seen = Vec::new();
         for frame in 1..=200 {
             let now = start + Duration::from_millis(16 * frame);
