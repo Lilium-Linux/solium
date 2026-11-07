@@ -100,7 +100,7 @@ unsafe extern "C" {
     fn solium_qml_scene_set_bool(scene: *mut c_void, name: *const c_char, value: c_int);
     fn solium_qml_scene_get_int(scene: *mut c_void, name: *const c_char) -> c_int;
     fn solium_qml_scene_free(scene: *mut c_void);
-    fn solium_qml_scene_animating(scene: *const c_void) -> c_int;
+    fn solium_qml_scene_animating(scene: *const c_void, still: c_int) -> c_int;
     fn solium_qml_tick(elapsed_ms: i64);
     fn solium_qml_next_due_ms() -> c_int;
     fn solium_qml_drain(elapsed_ms: i64, advance: c_int) -> c_int;
@@ -1077,7 +1077,7 @@ fn spin_of(scene: *mut c_void) -> i32 {
 /// the obvious wrong answer -- fails on the second too, because by then
 /// `quadrants.qml` has been animating for the whole run.
 fn animating(scene: *mut c_void) -> bool {
-    unsafe { solium_qml_scene_animating(scene.cast_const()) != 0 }
+    unsafe { solium_qml_scene_animating(scene.cast_const(), 0) != 0 }
 }
 
 /// Does an animation started from a settled desktop actually *run*, or does it

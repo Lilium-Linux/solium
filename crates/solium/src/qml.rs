@@ -178,10 +178,14 @@ mod ffi {
             index: c_int,
         ) -> *const c_char;
         pub(super) fn solium_qml_scene_dirty(scene: *const Scene) -> c_int;
-        pub(super) fn solium_qml_scene_animating(scene: *const Scene) -> c_int;
+        pub(super) fn solium_qml_scene_animating(scene: *const Scene, still: c_int) -> c_int;
         pub(super) fn solium_qml_scene_set_quiet(scene: *mut Scene, quiet: c_int);
         #[cfg(test)]
         pub(super) fn solium_qml_scene_ticking(scene: *const Scene) -> c_int;
+        #[cfg(test)]
+        pub(super) fn solium_qml_census_walks() -> u64;
+        #[cfg(test)]
+        pub(super) fn solium_qml_census_classes_found() -> c_int;
         pub(super) fn solium_qml_scene_pointer(
             scene: *mut Scene,
             x: c_double,
@@ -999,6 +1003,35 @@ pub(crate) fn tick(elapsed: Duration) {
     // SAFETY: the host is started before any scene exists, and this touches
     // only process-global state.
     unsafe { ffi::solium_qml_tick(millis) }
+    note_the_clock();
+}
+
+/// The [`hosted::generation`] at which a tick or a drain last left the
+/// animation clock still, or `u64::MAX` when it left it running.
+///
+/// An animation Qt is asked to start joins the clock only when Qt next runs
+/// its event queue (a queued call), so for a moment the clock reads still
+/// while a Transition or a flick has already begun. A tick or a drain runs
+/// that queue; a clock still after one, with Qt not touched since, is a
+/// clock nothing has asked to run.
+static STILL_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn note_the_clock() {
+    let still = if animating() {
+        u64::MAX
+    } else {
+        hosted::generation()
+    };
+    STILL_AT.store(still, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether nothing at all can be animating: the clock was still when Qt last
+/// ran its queue, nothing has touched Qt since, and it is still now. Then no
+/// scene is in the middle of anything, and none needs its census walked.
+/// `wake::tests::nothing_on_the_clock_is_no_walk`,
+/// `wake::tests::a_transition_moves_on_the_frames_that_draw_it`.
+fn nothing_on_the_clock() -> bool {
+    STILL_AT.load(std::sync::atomic::Ordering::Relaxed) == hosted::generation() && !animating()
 }
 
 /// One descriptor Qt waits on, and for what. `SoliumQmlPollFd` in
@@ -1065,7 +1098,9 @@ pub(crate) fn drain(elapsed: Duration, advance: bool) -> bool {
     hosted::touched();
     let millis = c_longlong::try_from(elapsed.as_millis()).unwrap_or(c_longlong::MAX);
     // SAFETY: touches only process-global state, as `tick` does.
-    unsafe { ffi::solium_qml_drain(millis, c_int::from(advance)) != 0 }
+    let changed = unsafe { ffi::solium_qml_drain(millis, c_int::from(advance)) != 0 };
+    note_the_clock();
+    changed
 }
 
 /// Matches `SOLIUM_QML_UNCHANGED` in `qml/host.h`.
@@ -1591,11 +1626,14 @@ impl Scene {
     /// Per scene, and deliberately not `QAnimationDriver::isRunning()`, which
     /// is process-wide: one animation anywhere would keep every scene drawing.
     /// `qml/host.cpp`'s `solium_qml_scene_animating` has the measurements, and
-    /// `dev/wirecheck`'s scene case the proof.
+    /// `dev/wirecheck`'s scene case the proof. Only the process's "no" answers
+    /// for every scene, and then the scene is not walked at all
+    /// ([`nothing_on_the_clock`]).
     #[expect(unsafe_code, reason = "calling into the Qt host")]
     pub(crate) fn animation_in_flight(&self) -> bool {
+        let still = c_int::from(nothing_on_the_clock());
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
-        unsafe { ffi::solium_qml_scene_animating(self.scene) != 0 }
+        unsafe { ffi::solium_qml_scene_animating(self.scene, still) != 0 }
     }
 
     /// Keep the scene but stop it ticking, or start it again: its running
@@ -1607,6 +1645,25 @@ impl Scene {
     pub(crate) fn set_quiet(&mut self, quiet: bool) {
         // SAFETY: `self.scene` is non-null for the lifetime of `self`.
         unsafe { ffi::solium_qml_scene_set_quiet(self.scene, c_int::from(quiet)) }
+    }
+
+    /// How many scenes the census has walked in this process: what
+    /// [`Self::animation_in_flight`] spends when it is not answered by the
+    /// clock alone.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn census_walks_for_test() -> u64 {
+        // SAFETY: reads a process-global counter.
+        unsafe { ffi::solium_qml_census_walks() }
+    }
+
+    /// Whether the census found QtQuick's classes, so it asks each object
+    /// about them by pointer rather than by name.
+    #[cfg(test)]
+    #[expect(unsafe_code, reason = "calling into the Qt host")]
+    pub(crate) fn census_classes_found_for_test() -> bool {
+        // SAFETY: touches only process-global state.
+        unsafe { ffi::solium_qml_census_classes_found() != 0 }
     }
 
     /// Whether a Timer or an animation in the scene is running.
