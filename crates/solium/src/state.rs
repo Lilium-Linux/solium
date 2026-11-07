@@ -437,6 +437,9 @@ pub(crate) struct Solium {
     /// anything on screen -- see `lock.rs` for why that asymmetry is the
     /// safe one.
     pub(crate) lock: Option<crate::lock::Lock>,
+    /// The lock's state as the scripts were last told it (`sol.on("lock")`),
+    /// so each is told once: `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.
+    pub(crate) lock_told: &'static str,
     /// What Solium's own lock draws on each monitor while it holds the lock.
     /// See `lock_scene.rs`.
     pub(crate) lock_scenes: crate::lock_scene::LockScenes,
@@ -1543,6 +1546,7 @@ impl Solium {
             text_inputs: crate::text_input::TextInputs::new(&display_handle),
             session_lock_state: crate::lock::state(&display_handle),
             lock: None,
+            lock_told: "unlocked",
             lock_scenes: crate::lock_scene::LockScenes::default(),
             lock_auth: crate::lock_auth::LockAuth::default(),
             rescan_outputs: false,

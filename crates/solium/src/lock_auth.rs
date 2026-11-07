@@ -3071,6 +3071,50 @@ mod tests {
         settings
     }
 
+    /// **The scripts hear the lock come and go**, each state once and nothing
+    /// else of it: `"locking"` as the scene comes down, `"locked"` at the
+    /// entry's bound, `"unlocking"` at the unlock while the scene goes, and
+    /// `"unlocked"` at the exit's bound. A lock with no entry, the one taken
+    /// before sleep, is `"locked"` at once.
+    #[test]
+    fn the_scripts_hear_the_lock_come_and_go() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::unlocked("told", &Shows::Own("import QtQuick\nItem {}"));
+            crate::keyboard_change::tests::configured(
+                &mut locked.state,
+                "lock-told",
+                r#"seen = {}
+                sol.on("lock", function(state) seen[#seen + 1] = state end)"#,
+            );
+            let seen = |state: &Solium| crate::keyboard_change::tests::seen(state);
+            let settings = scene_settings(&locked.state, |settings| {
+                settings.enter = Duration::from_millis(300);
+                settings.exit = Duration::from_millis(400);
+            });
+            locked.state.lock_scenes.configure(settings);
+
+            locked.state.lock_natively();
+            let coming = seen(&locked.state);
+            locked.state.clock.advance(Duration::from_millis(300));
+            crate::lock_scene::settle(&mut locked.state);
+            let up = seen(&locked.state);
+            locked.state.unlock_natively();
+            crate::render::frame_tick(&mut locked.state);
+            let going = seen(&locked.state);
+            locked.state.clock.advance(Duration::from_millis(400));
+            crate::lock_scene::settle(&mut locked.state);
+            let gone = seen(&locked.state);
+            locked.state.lock_natively_at_once();
+            let at_once = seen(&locked.state);
+
+            assert_eq!(coming, "locking", "taking the lock");
+            assert_eq!(up, "locked", "the entry's bound");
+            assert_eq!(going, "unlocking", "the unlock");
+            assert_eq!(gone, "unlocked", "the exit's bound");
+            assert_eq!(at_once, "locked", "a lock with no entry");
+        });
+    }
+
     /// **The exit plays over the desktop for `lock.exit_ms`, and input is the
     /// desktop's at once**: from the yes on the session is unlocked, a click
     /// reaches no lock scene, and the scene reads `Lock.state` as

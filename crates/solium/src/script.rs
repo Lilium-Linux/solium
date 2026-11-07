@@ -2985,6 +2985,15 @@ impl Scripts {
         })
     }
 
+    /// The session's lock changed: `(state)`, `"locking"` while Solium's own
+    /// lock comes down over the desktop, `"locked"`, `"unlocking"` while it
+    /// goes, and `"unlocked"`. Nothing else of the lock: not who holds it,
+    /// nothing of what is typed at it.
+    /// `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.
+    pub(crate) fn lock_changed(&mut self, state: &'static str, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "lock", state))
+    }
+
     /// The focused text field changed: `(field, why)`, `field` being what
     /// `sol.text_input()` answers and `why` `"field"`, `"caret"` or
     /// `"framed"`, as `text_input::Why` names it.

@@ -967,6 +967,9 @@ pub(crate) fn settle(state: &mut Solium) {
     // `Lock.state` reads "idle" again, for the next lock.
     state.lock_auth.touch();
     state.redraw = true;
+    if state.lock.is_none() {
+        state.tell_lock("unlocked");
+    }
 }
 
 #[cfg(test)]

@@ -803,6 +803,30 @@ impl Solium {
             }
         }
         self.confirm_lock();
+        let now = self.clock.now();
+        self.tell_lock(if self.lock_scenes.entering(now) {
+            "locking"
+        } else {
+            "locked"
+        });
+    }
+
+    /// Tell the scripts the lock's state (`sol.on("lock")`), once each time
+    /// it changes: what a configuration needs to move with the lock, a bar
+    /// putting its clock away while the lock's flies out of it, and nothing
+    /// more of the lock. `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.
+    pub(crate) fn tell_lock(&mut self, state: &'static str) {
+        if self.lock_told == state {
+            return;
+        }
+        self.lock_told = state;
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.lock_changed(state, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
     }
 
     /// The native lock's entry is over, at its bound or cut short: the
@@ -819,6 +843,9 @@ impl Solium {
         self.redraw = true;
         self.lock_auth_changed();
         self.confirm_lock();
+        if self.lock.is_some() {
+            self.tell_lock("locked");
+        }
     }
 
     /// End the lock, whoever holds it: the half of unlocking a client and
@@ -876,6 +903,12 @@ impl Solium {
             self.settle_focus();
         }
         tracing::info!("session unlocked");
+        let now = self.clock.now();
+        self.tell_lock(if self.lock_scenes.exiting(now) {
+            "unlocking"
+        } else {
+            "unlocked"
+        });
     }
 
     /// Which lock a frame built now is built under, if the session is locked.
