@@ -6480,10 +6480,13 @@ fn panes(
         // enlarged by a mode has its bleed enlarged with it. And grown by the
         // furthest its effects' results reach
         // (`tests::the_bleed_cull_counts_an_effects_reach`).
+        // The size its layers are laid out at: its own, or the size a glide
+        // draws it at ([`composed`]).
+        let laid = composed(&frame, outer.size);
         let bled = crate::decoration::spread(
             crate::decoration::Drawing {
                 rect: frame.rect,
-                outer: outer.size,
+                outer: laid,
                 alpha: frame.opacity,
                 scale,
                 now,
@@ -6509,7 +6512,7 @@ fn panes(
         // Where this pane's layers go, computed once for all three depths.
         let drawing = crate::decoration::Drawing {
             rect: frame.rect,
-            outer: outer.size,
+            outer: laid,
             alpha: frame.opacity,
             scale,
             now,
@@ -7794,6 +7797,52 @@ pub(crate) struct Placed {
     pub(crate) fit: Fit,
 }
 
+/// The size a pane is composed at to be drawn as `frame`: what its frame's
+/// layers are laid out at and its client is placed in, before the frame's
+/// zoom scales the whole window. `outer` is the pane's own outer size.
+///
+/// The drawn rectangle over the zoom. At rest that is `outer`, and so it is
+/// under a zoom, an open, a close, a thumbnail or a card, whose rectangle is
+/// the window's own scaled: the window is drawn whole and scaled, as before.
+/// A glide that changes the window's size has no zoom, and there it is the
+/// size drawn on that frame: the window is laid out at it, so the titlebar's
+/// text and the client's picture are their own size on every frame, the
+/// picture against its corner with `resize.background` beyond it until the
+/// client draws at the new size (#233: text never stretches). It was `outer`
+/// there too, the window at its new size scaled into the old rectangle, so a
+/// maximise began with everything in it at half its size.
+/// `tests::a_glide_composes_the_window_at_the_size_it_draws`.
+///
+/// A matrix or a deform keeps `outer`: those are drawn from a capture of
+/// the window at its own size, warped (`offscreen::pane_job`). Atrium's
+/// windows carry one until their glide lands, so a glide out of Atrium is
+/// still the window at its new size, scaled.
+pub(crate) fn composed(frame: &present::Frame, outer: Size<i32, Logical>) -> Size<i32, Logical> {
+    if !frame.matrix.is_identity() || frame.deform.is_some() {
+        return outer;
+    }
+    let side = |drawn: f64, zoom: f64, own: i32| -> i32 {
+        if zoom <= f64::EPSILON || !drawn.is_finite() {
+            return own;
+        }
+        let pictured = (drawn / zoom).round();
+        if (pictured - f64::from(own)).abs() < 1.0 {
+            return own;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a drawn side is a screen's size at most, clamped"
+        )]
+        let side = pictured.clamp(1.0, f64::from(i32::MAX)) as i32;
+        side
+    };
+    (
+        side(frame.rect.size.w, frame.zoom.0, outer.w),
+        side(frame.rect.size.h, frame.zoom.1, outer.h),
+    )
+        .into()
+}
+
 /// Where `pane`'s client is drawn inside `frame`, and how its buffer is fitted
 /// to it.
 ///
@@ -7809,6 +7858,9 @@ pub(crate) fn place_client(
     outer: Size<i32, Logical>,
     committed: Size<i32, Logical>,
 ) -> Placed {
+    // At the size the window is composed at, which is `outer` but for a
+    // glide that changes the window's size ([`composed`]).
+    let outer = composed(frame, outer);
     // The frame's share, in drawn pixels. Scaled as the frame canvas is --
     // `decoration::spread` stretches the canvas from `outer` to the drawn rect
     // -- so the client fills the hole the canvas leaves for it.
@@ -8528,6 +8580,33 @@ pub(crate) mod tests {
             crate::present::Frame::real(smithay::utils::Rectangle::from_size((w, h).into()));
         frame.rect.size = drawn.into();
         frame
+    }
+
+    /// **A glide composes the window at the size it draws** (#233), and
+    /// anything else at the window's own. A maximise glide's first frame draws
+    /// a 1600x860 pane at the 828x547 it is leaving, with no zoom: composed at
+    /// 828x547, so its titlebar and its client's picture are their own size,
+    /// where composed at 1600x860 and scaled down they were at half. An open or
+    /// a thumbnail is the window scaled, its zoom the drawn size over its own:
+    /// composed at its own. At rest, and under a matrix (a warp from a capture
+    /// at its own size), its own.
+    #[test]
+    fn a_glide_composes_the_window_at_the_size_it_draws() {
+        use super::composed;
+        let outer = smithay::utils::Size::from((1600, 860));
+        let gliding = presented_at(1600, 860, (828.0, 547.0));
+        assert_eq!(composed(&gliding, outer), (828, 547).into());
+
+        let mut opening = presented_at(1600, 860, (1440.0, 774.0));
+        opening.zoom = (0.9, 0.9);
+        assert_eq!(composed(&opening, outer), outer);
+
+        let resting = presented_at(1600, 860, (1600.0, 860.0));
+        assert_eq!(composed(&resting, outer), outer);
+
+        let mut tilted = gliding;
+        tilted.matrix = crate::mat4::Mat4::rotate_y(0.3);
+        assert_eq!(composed(&tilted, outer), outer);
     }
 
     /// **A pane drawn at a quarter is captured at a quarter** of its full
