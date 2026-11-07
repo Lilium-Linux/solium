@@ -82,13 +82,14 @@ return {
     -- monitor's own refresh rate rather than 60 a second.
     effects = { motion_hz = 0 },  -- every pass: effects follow each monitor's own rate
     -- Atrium, Stage Manager on the floating desktop: the window in use
-    -- and its app's other windows on the stage, every other app a live,
-    -- tilted card in a strip down the left, most recent at the top. A card
-    -- click brings it forward, shift+click or a drag onto the stage joins it,
-    -- a window dropped on the strip leaves its group; super+a turns it off
-    -- and on. The strip slides away while a window covers it.
+    -- and its app's other windows on the stage, every other app a live card
+    -- leaning back in a row along the bottom, above the bar, most recent in
+    -- the middle. A card click brings it forward, shift+click or a drag onto
+    -- the stage joins it, a window dropped on the strip leaves its group;
+    -- super+a turns it off and on. The strip slides away only while a window
+    -- covers it, and the left and right edges are free for snapping.
     floating = {
-        atrium = { enabled = true, key = "super+a" },
+        atrium = { enabled = true, key = "super+a", side = "bottom", strip = 180, hide = "overlap" },
     },
 
     -- Resizing as KDE does: every app always at its window's border. A

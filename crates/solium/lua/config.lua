@@ -1852,8 +1852,14 @@ local defaults = {
             -- again until you restart (it survives `super+shift+r`).
             enabled = true,
             key = "super+a",
-            -- The strip's width, in logical pixels (80 or more), and how many
-            -- cards it shows; older groups wait off the edge.
+            -- Where the strip is: "left", a column down the work area, most
+            -- recent card at the top; or "bottom", a row along it above the
+            -- bar, most recent in the middle, which leaves the left edge to
+            -- window snapping (a strip on the left takes it).
+            side = "left",
+            -- The strip's depth, in logical pixels (80 or more): its width
+            -- down the left, its height along the bottom. And how many cards
+            -- it shows; older groups wait off the edge.
             strip = 220,
             cards = 6,
             -- How the cards stand: degrees turned about their left edge, and

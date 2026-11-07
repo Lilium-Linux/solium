@@ -2,8 +2,9 @@
 --
 -- The window you are using, and the windows grouped with it, stay where they
 -- live: on the stage, live and whole. Every other group on the desk is a card
--- in a strip down the left of the work area, most recent at the top, drawn
--- from the real window in perspective -- still live, never a screenshot.
+-- in a strip down the left of the work area, most recent at the top, or along
+-- its bottom, most recent in the middle (`floating.atrium.side`), drawn from
+-- the real window in perspective -- still live, never a screenshot.
 -- Choosing a card brings its group onto the stage, and the group that was
 -- there springs into the strip. Apple calls this Stage Manager; an atrium is
 -- the hall of a Roman house the rooms open off.
@@ -105,6 +106,7 @@ local function settings()
     local drag = type(given.drag) == "table" and given.drag or {}
     return {
         enabled = given.enabled ~= false,
+        side = given.side == "bottom" and "bottom" or "left",
         strip = number(given.strip, 220, 80),
         cards = math.floor(number(given.cards, 6, 1)),
         tilt = number(given.tilt, 26, -89),
@@ -307,9 +309,44 @@ end
 
 -- ## Where things are drawn
 
--- The strip's column on a monitor's work area.
+-- Which side of the work area the strip is on: "left", a column down it, or
+-- "bottom", a row along it. Everything that measures towards the stage
+-- measures across the strip: rightwards from a strip on the left, upwards
+-- from one along the bottom.
+local function along_bottom(set)
+    return set.side == "bottom"
+end
+
+function atrium.side()
+    return settings().side
+end
+
+-- The strip on a monitor's work area: its column, or its row.
 local function strip_of(area, set)
+    if along_bottom(set) then
+        return { x = area.x, y = area.y + area.h - set.strip, w = area.w, h = set.strip }
+    end
     return { x = area.x, y = area.y, w = set.strip, h = area.h }
+end
+
+-- The strip's scene: the strip, and `drag.reach` past it towards the stage,
+-- as far as a card can be dragged and still be a card, so the icons of one
+-- in the hand go with it.
+local function scene_of(area, set)
+    local deep = set.strip + set.reach
+    if along_bottom(set) then
+        return { x = area.x, y = area.y + area.h - deep, w = area.w, h = deep }
+    end
+    return { x = area.x, y = area.y, w = deep, h = area.h }
+end
+
+-- How far `x`, `y` is out of the strip towards the stage, from its inner
+-- edge: negative inside the strip.
+local function out_of_strip(area, set, x, y)
+    if along_bottom(set) then
+        return (area.y + area.h - set.strip) - y
+    end
+    return x - (area.x + set.strip)
 end
 
 -- What is left of the work area for the stage: where `floating.lua` opens a
@@ -318,7 +355,11 @@ function atrium.stage_area(area)
     if not area or not atrium.running() then
         return area
     end
-    local width = settings().strip
+    local set = settings()
+    if along_bottom(set) then
+        return { x = area.x, y = area.y, w = area.w, h = math.max(1, area.h - set.strip) }
+    end
+    local width = set.strip
     return { x = area.x + width, y = area.y, w = math.max(1, area.w - width), h = area.h }
 end
 
@@ -328,8 +369,29 @@ end
 
 -- The card boxes of a strip holding `count` cards: the same size each,
 -- spaced evenly and centred down the work area, with room under each for its
--- icons.
+-- icons. Along the bottom, centred along it in a row as high as the strip
+-- leaves room for under them, the most recent in the middle and the older
+-- ones out to either side, so the row stays clear of the corners a window is
+-- snapped into.
 local function slots(area, set, count)
+    if along_bottom(set) then
+        local pad = math.floor(set.strip * 0.1)
+        local h = math.max(1, set.strip - pad - set.spacing)
+        local w = math.floor(h / set.aspect)
+        local shown = math.min(count, set.cards)
+        local pitch = math.min(w + 2 * pad, math.floor((area.w - 48) / math.max(shown, 1)))
+        local left = area.x + math.floor((area.w - shown * pitch) / 2)
+        local y = area.y + area.h - set.strip + pad
+        local out = {}
+        local mid = math.floor((shown + 1) / 2)
+        for k = 1, shown do
+            -- 1 in the middle, then right, left, right, left, outwards.
+            local step = math.floor(k / 2)
+            local place = k % 2 == 0 and mid + step or mid - step
+            out[k] = { x = left + (place - 1) * pitch + math.floor((pitch - w) / 2), y = y, w = w, h = h }
+        end
+        return out
+    end
     local pad = math.floor(set.strip * 0.1)
     local w = set.strip - 2 * pad
     local h = math.floor(w * set.aspect)
@@ -403,18 +465,31 @@ local function present(id, options)
     sol.present(id, options)
 end
 
--- The windows drawn as cards are told so through their frames, as
--- `atrium = { card = true, scale = s }`, `s` how small the card draws the
--- window: a style can then give a card what a window on the stage has not, a
--- shadow on the windows behind it, sized for the card rather than the window.
--- Told only when it changes, the scale in twentieths.
-local function as_card(id, scale)
+-- The windows atrium draws are told so through their frames, as
+-- `atrium = { card, scale, stiffness, damping }`: `card` whether it is a card
+-- or on the stage, `scale` how small it is drawn (1 on the stage), and the
+-- spring it gets there on (`floating.atrium.motion`), the one its picture
+-- rides. A style can then cast a shadow that stays the same on screen as a
+-- window flies from the stage into its card and back, following the window
+-- on its own spring. Told only when it changes, the scale in twentieths.
+local function tell_frame(id, card, scale)
     local key = tostring(id)
-    scale = math.max(0.05, math.floor(scale * 20 + 0.5) / 20)
-    if kept.carded[key] ~= scale then
-        kept.carded[key] = scale
-        sol.frame(id, { atrium = { card = true, scale = scale } })
+    local said = card and scale or "stage"
+    if kept.carded[key] ~= said then
+        kept.carded[key] = said
+        local spring = settings().motion
+        sol.frame(id, { atrium = {
+            card = card, scale = scale, stiffness = spring.stiffness, damping = spring.damping,
+        } })
     end
+end
+
+local function as_card(id, scale)
+    tell_frame(id, true, math.max(0.05, math.floor(scale * 20 + 0.5) / 20))
+end
+
+local function as_stage(id)
+    tell_frame(id, false, 1)
 end
 
 local function not_card(id)
@@ -425,13 +500,18 @@ local function not_card(id)
     end
 end
 
-local function release(id)
-    touched[id] = true
-    not_card(id)
+-- Drawn where it lives again: its present let go of.
+local function unpresent(id)
     if kept.presented[tostring(id)] then
         kept.presented[tostring(id)] = nil
         sol.present_clear(id)
     end
+end
+
+local function release(id)
+    touched[id] = true
+    not_card(id)
+    unpresent(id)
 end
 
 -- Every card back where its window lives, and the strips taken down. The
@@ -443,6 +523,13 @@ local function release_all()
         if id then
             not_card(id)
             sol.present_clear(id)
+        end
+    end
+    -- And the stage's windows are atrium's no longer either.
+    for key in pairs(kept.carded) do
+        local id = tonumber(key)
+        if id then
+            not_card(id)
         end
     end
     for name in pairs(kept.surfaces) do
@@ -508,6 +595,8 @@ local function arrange_desk(key, area, by_id, set, children)
     local groups = kept.desks[key] or {}
     local monitor = key:match("@(.*)$")
     local strip = strip_of(area, set)
+    local scene = scene_of(area, set)
+    local bottom = along_bottom(set)
 
     for _, id in ipairs(groups[1] or {}) do
         if id == kept.moving then
@@ -515,7 +604,9 @@ local function arrange_desk(key, area, by_id, set, children)
             -- strip it is.
             touched[id] = true
         else
-            release(id)
+            touched[id] = true
+            unpresent(id)
+            as_stage(id)
         end
         for _, child in ipairs(children[id] or {}) do
             release(child)
@@ -537,12 +628,21 @@ local function arrange_desk(key, area, by_id, set, children)
         local box = boxes[k]
         local waiting = box == nil
         box = box or boxes[#boxes]
-        -- The card under the pointer comes forward: flat, larger, and out to
-        -- the right towards the stage; the cards above and below it part.
+        -- The card under the pointer comes forward: flat, larger, and out
+        -- towards the stage; the cards beside it part. Along the bottom the
+        -- neighbours are told by where they stand, not by their number.
         local lift, tilt, dx, dy = 1, set.tilt, 0, 0
         if hovered and not hidden then
             if hovered == k then
-                lift, tilt, dx = set.lift, set.tilt * set.hover_tilt, set.shift
+                lift, tilt = set.lift, set.tilt * set.hover_tilt
+                if bottom then
+                    dy = -set.shift
+                else
+                    dx = set.shift
+                end
+            elseif bottom then
+                local there = boxes[hovered]
+                dx = (there and box.x < there.x) and -set.part or set.part
             elseif k < hovered then
                 dy = -set.part
             else
@@ -552,11 +652,18 @@ local function arrange_desk(key, area, by_id, set, children)
         local drawn = fanned(groups[index], by_id, box, set.fan)
         local front = drawn[1]
         for at, card in ipairs(drawn) do
-            -- Grown from the front window's left edge and middle, so the card
-            -- reaches towards the stage rather than spreading both ways.
+            -- Grown from the front window's edge on the strip's side and its
+            -- middle the other way, so the card reaches towards the stage
+            -- rather than spreading both ways.
             local w, h = card.w * lift, card.h * lift
-            local x = front.x + (card.x - front.x) * lift + dx
-            local y = front.y + front.h / 2 + (card.y - front.y - front.h / 2) * lift + dy
+            local x, y
+            if bottom then
+                x = front.x + front.w / 2 + (card.x - front.x - front.w / 2) * lift + dx
+                y = front.y + front.h + (card.y - front.y - front.h) * lift + dy
+            else
+                x = front.x + (card.x - front.x) * lift + dx
+                y = front.y + front.h / 2 + (card.y - front.y - front.h / 2) * lift + dy
+            end
             local opacity = at == 1 and 1 or set.behind
             if held == k then
                 -- Being dragged: `drag` draws it, following the pointer, and
@@ -568,7 +675,11 @@ local function arrange_desk(key, area, by_id, set, children)
             else
                 local away = nil
                 if hidden or waiting then
-                    x = x - set.strip
+                    if bottom then
+                        y = y + set.strip
+                    else
+                        x = x - set.strip
+                    end
                     opacity = 0
                     -- Out of the way unhurried, on a softer spring.
                     local soft = { easing = { spring = set.hide_motion } }
@@ -578,11 +689,16 @@ local function arrange_desk(key, area, by_id, set, children)
                 -- when it has been brought back over it, and while it slides
                 -- away, so it is seen going even off a maximised window.
                 local z = ((peeking or hidden or waiting) and 100 or 0) - k - at * 0.1
-                present(card.id, {
-                    x = x, y = y, w = w, h = h,
-                    rotate_y = tilt, pivot_x = 0, perspective = set.perspective,
-                    opacity = opacity, z = z, motion = away,
-                })
+                -- Turned about its edge on the strip's side: standing in a
+                -- column on the left, leaning back in a row along the bottom.
+                local turn = { x = x, y = y, w = w, h = h, perspective = set.perspective,
+                    opacity = opacity, z = z, motion = away }
+                if bottom then
+                    turn.rotate_x, turn.pivot_y = tilt, 1
+                else
+                    turn.rotate_y, turn.pivot_x = tilt, 0
+                end
+                present(card.id, turn)
                 local window = by_id[card.id]
                 if window and window.w > 0 then
                     as_card(card.id, w / window.w)
@@ -608,8 +724,8 @@ local function arrange_desk(key, area, by_id, set, children)
                     -- A window just come off the stage: its icon starts at
                     -- its corner there and goes with it into the card.
                     if window and not was_card[tostring(id)] then
-                        seen[app].fromX = window.x - area.x
-                        seen[app].fromY = window.y + window.h - area.y
+                        seen[app].fromX = window.x - scene.x
+                        seen[app].fromY = window.y + window.h - scene.y
                     end
                     badges[#badges + 1] = seen[app]
                 else
@@ -627,17 +743,23 @@ local function arrange_desk(key, area, by_id, set, children)
             -- Where it is picked (its slot, which never moves under the
             -- pointer, so a card growing out from under it does not flicker)
             -- and where its icons go (under its front window as drawn).
-            local fx = front.x + dx
-            local fy = front.y + front.h / 2 - front.h * lift / 2 + dy
+            local fx, fy
+            if bottom then
+                fx = front.x + front.w / 2 - front.w * lift / 2 + dx
+                fy = front.y + front.h - front.h * lift + dy
+            else
+                fx = front.x + dx
+                fy = front.y + front.h / 2 - front.h * lift / 2 + dy
+            end
             cards[#cards + 1] = {
                 card = k,
                 key = name,
-                x = box.x - area.x,
-                y = box.y - area.y,
+                x = box.x - scene.x,
+                y = box.y - scene.y,
                 w = box.w,
                 h = box.h,
-                ix = fx - area.x,
-                iy = fy + front.h * lift - area.y,
+                ix = fx - scene.x,
+                iy = fy + front.h * lift - scene.y,
                 badges = badges,
             }
         end
@@ -659,7 +781,7 @@ local function strip_scene(monitor, area, set, properties)
     sol.surface("atrium@" .. monitor, {
         scene = "atrium/Strip.qml",
         layer = "top",
-        on = { x = area.x, y = area.y, w = set.strip + set.reach, h = area.h },
+        on = scene_of(area, set),
         interactive = true,
         properties = properties,
     })
@@ -685,6 +807,7 @@ local function declare_strip(monitor, area, set, drawn)
         hovered = drawn.hovered,
         held = kept.held_badges[monitor] or false,
         strip = set.strip,
+        side = set.side,
         motion = set.motion,
         softMotion = set.hide_motion,
         iconSize = set.icon,
@@ -716,8 +839,8 @@ function atrium.arrange(own_timing)
     end
     reconcile(windows, by_id)
     was_card = {}
-    for key in pairs(kept.carded) do
-        was_card[key] = true
+    for key, said in pairs(kept.carded) do
+        was_card[key] = type(said) == "number"
     end
     if not quiet then
         sol.animate({ easing = { spring = set.motion } })
@@ -746,6 +869,13 @@ function atrium.arrange(own_timing)
             if window and not window.leaving and not window.minimized then
                 sol.present_clear(id)
             end
+        end
+    end
+    -- And a stage window that has left every group is atrium's no longer.
+    for key in pairs(kept.carded) do
+        local id = tonumber(key)
+        if id and not touched[id] then
+            not_card(id)
         end
     end
     quiet = nil
@@ -791,14 +921,13 @@ end
 -- ## Dragging a card out
 
 -- How far a dragged window has turned into a card, from 0 (a window, as any
--- window being dragged is) to 1 (a card), by how near the pointer at `x` is to
--- the strip: 1 over the strip, falling to 0 at `drag.reach` pixels past its
--- edge. One measure for both ways across, so a card pulled out and a window
+-- window being dragged is) to 1 (a card), by how near the pointer at `x`, `y`
+-- is to the strip: 1 over the strip, falling to 0 at `drag.reach` pixels past
+-- its edge towards the stage. One measure for both ways across, so a card pulled out and a window
 -- pushed in change the same way at the same place.
-function atrium.closeness(area, x)
+function atrium.closeness(area, x, y)
     local set = settings()
-    local edge = area.x + set.strip
-    return math.max(0, math.min(1, (edge + set.reach - x) / set.reach))
+    return math.max(0, math.min(1, (set.reach - out_of_strip(area, set, x, y)) / set.reach))
 end
 
 -- Where a group is drawn while it is dragged with its front window's point
@@ -900,7 +1029,7 @@ local function follow(state, pointer, dt, turned, smooth, floor)
         state.eased = eased
         return eased
     end
-    local tau = floor + (smooth - floor) * math.max(turned(eased.x), turned(pointer.x))
+    local tau = floor + (smooth - floor) * math.max(turned(eased), turned(pointer))
     local share = 1
     if tau > 0.0005 then
         share = 1 - math.exp(-dt / tau)
@@ -942,10 +1071,10 @@ local function draw_held(dt)
         kept.hover[held.monitor] = onto
         atrium.arrange()
     end
-    local pointer = follow(held, real, dt or 1 / 120, function(x)
-        return atrium.closeness(it.area, x)
+    local pointer = follow(held, real, dt or 1 / 120, function(point)
+        return atrium.closeness(it.area, point.x, point.y)
     end, set.smooth, set.steady)
-    local t = atrium.closeness(it.area, pointer.x)
+    local t = atrium.closeness(it.area, pointer.x, pointer.y)
     sol.animate({ duration = 0 })
     local rects = lifted(it.rects, held.lift, held.shift)
     local drawn = morph(it.group, it.by_id, rects, pointer.x, pointer.y, held.fx, held.fy, t)
@@ -980,8 +1109,8 @@ local function draw_held(dt)
             keys = keys,
             icons = icons,
             group = name,
-            ix = front.x - it.area.x,
-            iy = front.y + front.h - it.area.y,
+            ix = front.x - scene_of(it.area, set).x,
+            iy = front.y + front.h - scene_of(it.area, set).y,
             fade = math.max(0, math.min(1, (t - 0.3) / 0.5)),
         }
         kept.held_badges[held.monitor] = badges
@@ -1005,7 +1134,8 @@ end
 -- scene last said -- a finger's drag as much as the pointer's.
 local function drag(monitor, card, x, y)
     local area = monitors.named(monitor)
-    local at = area and { x = area.x + (tonumber(x) or 0), y = area.y + (tonumber(y) or 0) } or sol.cursor()
+    local scene = area and scene_of(area, settings())
+    local at = scene and { x = scene.x + (tonumber(x) or 0), y = scene.y + (tonumber(y) or 0) } or sol.cursor()
     local held = kept.drag
     if held and held.monitor == monitor and held.card == tonumber(card) then
         held.at = at
@@ -1054,9 +1184,10 @@ local function drop(monitor, card, x, y)
         atrium.arrange()
         return
     end
-    local gx, gy = it.area.x + (tonumber(x) or 0), it.area.y + (tonumber(y) or 0)
+    local scene = scene_of(it.area, it.set)
+    local gx, gy = scene.x + (tonumber(x) or 0), scene.y + (tonumber(y) or 0)
     kept.hover[monitor] = nil
-    if gx < it.area.x + it.set.strip then
+    if out_of_strip(it.area, it.set, gx, gy) < 0 then
         -- Onto another card: its group takes the dragged one's windows, in
         -- front, so they settle over the windows already there, and the
         -- stage is left as it is. Anywhere else in the strip, it goes back
@@ -1141,7 +1272,7 @@ local function tick(dt)
                 -- How near the strip it was picked up: it turns from there,
                 -- so one picked up close to the strip does not jump smaller
                 -- at its first move.
-                from = area and atrium.closeness(area, pointer.x) or 0,
+                from = area and atrium.closeness(area, pointer.x, pointer.y) or 0,
                 fx = (pointer.x - window.x) / window.w, fy = (pointer.y - window.y) / window.h,
                 misses = 0,
             }
@@ -1173,20 +1304,20 @@ local function tick(dt)
         kept.moving = press.id
     end
     local set = settings()
-    local function turned(x)
+    local function turned(point)
         if press.from >= 1 then
             return 0
         end
-        return math.max(0, (atrium.closeness(area, x) - press.from) / (1 - press.from))
+        return math.max(0, (atrium.closeness(area, point.x, point.y) - press.from) / (1 - press.from))
     end
     -- Drawn by atrium only near the strip, and until the eased point has
     -- caught the pointer up again on the way back out: then the window is
     -- handed back to the compositor's own drag exactly where it is.
     local real = pointer
     local drawn = kept.presented[tostring(press.id)] == true
-    local near = drawn or turned(real.x) > 0
+    local near = drawn or turned(real) > 0
     pointer = follow(press, real, dt, turned, set.smooth, near and set.steady or 0)
-    local t = turned(pointer.x)
+    local t = turned(pointer)
     if t <= 0 and (not drawn or (math.abs(pointer.x - real.x) < 0.5 and math.abs(pointer.y - real.y) < 0.5)) then
         press.eased = nil
         if kept.held_badges[window.monitor] then
@@ -1215,10 +1346,13 @@ local function tick(dt)
     -- At the eased point, drawn there this frame: no spring on top of it.
     sol.animate({ duration = 0 })
     local x, y = pointer.x - press.fx * w, pointer.y - press.fy * h
-    present(press.id, {
-        x = x, y = y, w = w, h = h,
-        rotate_y = set.tilt * t, pivot_x = 0, perspective = set.perspective, z = 300,
-    })
+    local turn = { x = x, y = y, w = w, h = h, perspective = set.perspective, z = 300 }
+    if along_bottom(set) then
+        turn.rotate_x, turn.pivot_y = set.tilt * t, 1
+    else
+        turn.rotate_y, turn.pivot_x = set.tilt * t, 0
+    end
+    present(press.id, turn)
     as_card(press.id, scale)
     -- Its icon comes out at its corner as it turns into a card, held with it
     -- as a card's are, and drawn into a card it is brought near.
@@ -1227,8 +1361,8 @@ local function tick(dt)
             keys = { tostring(press.id) },
             icons = { icon_of(window.app_id) },
             group = -press.id,
-            ix = x - area.x,
-            iy = y + h - area.y,
+            ix = x - scene_of(area, set).x,
+            iy = y + h - scene_of(area, set).y,
             fade = math.max(0, math.min(1, (t - 0.3) / 0.5)),
         }
         kept.held_badges[monitor] = badges
@@ -1255,6 +1389,27 @@ end
 
 -- ## What atrium is told
 
+-- Whether stage window `id` covers the strip now as it did when the strip
+-- was last laid out, and laid out again if not: `own_timing` as `arrange`.
+local function recheck_cover(id, own_timing)
+    if not atrium.running() then
+        return
+    end
+    local key, index = find(id)
+    local area = key and index == 1 and monitors.named(key:match("@(.*)$"))
+    if not area then
+        return
+    end
+    local by_id = {}
+    for _, window in ipairs(sol.windows()) do
+        by_id[window.id] = window
+    end
+    local set = settings()
+    if covering(kept.desks[key], by_id, strip_of(area, set), set) ~= (kept.covered[key] == true) then
+        atrium.arrange(own_timing)
+    end
+end
+
 sol.on("open", function(id)
     if not atrium.running() then
         return
@@ -1277,6 +1432,14 @@ sol.on("open", function(id)
         end
     end
     atrium.arrange()
+    -- A launched window comes in at its launch's size, the work area less a
+    -- margin, which covers any strip, and `floating.lua`'s own `open`, after
+    -- this one, puts it in its place on the stage. So once every listener has
+    -- run, whether it covers the strip is asked again, of where it is: under
+    -- `hide = "overlap"` a strip it does not cover comes back.
+    sol.after(0, function()
+        recheck_cover(id)
+    end)
 end)
 
 sol.on("focus", function(id, source)
@@ -1324,22 +1487,7 @@ end
 -- An edge dragged may take a stage window over the strip, or off it. Told
 -- as the edge moves, so only a change in that is laid out.
 sol.on("resize", function(id)
-    if not atrium.running() then
-        return
-    end
-    local key, index = find(id)
-    local area = key and index == 1 and monitors.named(key:match("@(.*)$"))
-    if not area then
-        return
-    end
-    local by_id = {}
-    for _, window in ipairs(sol.windows()) do
-        by_id[window.id] = window
-    end
-    local set = settings()
-    if covering(kept.desks[key], by_id, strip_of(area, set), set) ~= (kept.covered[key] == true) then
-        atrium.arrange(true)
-    end
+    recheck_cover(id, true)
 end)
 
 -- A stage window let go over the strip leaves its group, as a card of its own

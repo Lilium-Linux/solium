@@ -172,12 +172,15 @@ function snap.zone(x, y)
     end
     local whole = monitor.whole or monitor
     local right_x, bottom_y = whole.x + whole.w, whole.y + whole.h
-    -- While atrium runs, its strip owns the left edge (a window dropped there
-    -- becomes a card), so there is no left zone, and windows snap within its
-    -- stage rather than the whole work area.
+    -- While atrium runs, windows snap within its stage rather than the whole
+    -- work area; and a strip down the left owns the left edge (a window
+    -- dropped there becomes a card), so there is no left zone. A strip along
+    -- the bottom leaves every edge's zone to snapping: it lies above the bar,
+    -- between the bottom corners.
     local strip = atrium().running()
+    local strip_left = strip and atrium().side() == "left"
     -- An edge is outer at this point when no screen lies just past it.
-    local outer_left = not strip and not screen_at(whole.x - 1, y)
+    local outer_left = not strip_left and not screen_at(whole.x - 1, y)
     local outer_right = not screen_at(right_x, y)
     local outer_top = not screen_at(x, whole.y - 1)
     local outer_bottom = not screen_at(x, bottom_y)
