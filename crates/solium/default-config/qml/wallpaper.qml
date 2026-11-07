@@ -36,9 +36,9 @@ Item {
     // Where the picture is going, and where it is: on the workspaces' spring
     // when they have one, from where it is and at the speed it has, so a
     // second switch on the way turns it rather than snapping it round; on
-    // their duration when not. Moved by a FrameAnimation on the compositor's
-    // clock, running only while it is on its way, so a still desktop leaves
-    // the clock still.
+    // their duration when not. Moved on the compositor's clock, by an
+    // animation running only while it is on its way, so a still desktop
+    // leaves the clock still.
     readonly property real target: -height * travel * (count > 1 ? (desk - 1) / (count - 1) : 0)
     readonly property bool springy: stiffness > 0 && damping > 0
     property real panned: target
@@ -70,26 +70,35 @@ Item {
         }
         startFrom = panned - target
         startSpeed = speed
-        pan.reset()
-        pan.start()
+        pan.restart()
     }
 
-    FrameAnimation {
+    // The pan's own time, in seconds of the compositor's clock: a plain
+    // animation of it, which the clock the windows slide on advances, not
+    // FrameAnimation's elapsedTime, which counts the wall's time.
+    property real panTime: 0
+    NumberAnimation {
         id: pan
-        running: false
-        onTriggered: {
-            const t = elapsedTime
-            const off = paper.offsetAt(t, paper.startFrom, paper.startSpeed)
-            const step = 0.001
-            paper.speed = (paper.offsetAt(t + step, paper.startFrom, paper.startSpeed) - off) / step
-            if (Math.abs(off) < 0.25 && Math.abs(paper.speed) < 4) {
-                paper.panned = paper.target
-                paper.speed = 0
-                stop()
-                return
-            }
-            paper.panned = paper.target + off
+        target: paper
+        property: "panTime"
+        from: 0
+        to: 4
+        duration: 4000
+    }
+    onPanTimeChanged: {
+        if (!pan.running) {
+            return
         }
+        const t = panTime
+        const off = offsetAt(t, startFrom, startSpeed)
+        speed = (offsetAt(t + 0.001, startFrom, startSpeed) - off) / 0.001
+        if (Math.abs(off) < 0.25 && Math.abs(speed) < 4) {
+            panned = target
+            speed = 0
+            pan.stop()
+            return
+        }
+        panned = target + off
     }
 
     Rectangle {
