@@ -2985,6 +2985,15 @@ impl Scripts {
         })
     }
 
+    /// The session's lock changed: `(state)`, `"locking"` while Solium's own
+    /// lock comes down over the desktop, `"locked"`, `"unlocking"` while it
+    /// goes, and `"unlocked"`. Nothing else of the lock: not who holds it,
+    /// nothing of what is typed at it.
+    /// `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.
+    pub(crate) fn lock_changed(&mut self, state: &'static str, snapshot: Snapshot) -> Outcome {
+        self.dispatch(snapshot, move |lua, _| call_listeners(lua, "lock", state))
+    }
+
     /// The focused text field changed: `(field, why)`, `field` being what
     /// `sol.text_input()` answers and `why` `"field"`, `"caret"` or
     /// `"framed"`, as `text_input::Why` names it.
@@ -26474,6 +26483,189 @@ mod directions {
             let mut desk = desk();
             desk.drop(2, "DP-1", (100.0, 300.0));
             assert_eq!(groups(&desk), "|2|1");
+        }
+
+        /// **A window let go into a card stays where it was let go until
+        /// it comes back.** Moved out of the strip's way there and then,
+        /// while it was drawn as a card, it glided to that place at its own
+        /// size and its card was undone; it is moved clear of the strip as
+        /// it comes back to the stage instead, on the glide that brings it
+        /// from its card, just past the strip's inner edge.
+        #[test]
+        fn a_window_let_go_into_a_card_is_moved_clear_of_the_strip_as_it_comes_back() {
+            let mut desk = desk();
+            desk.drop(2, "DP-1", (100.0, 700.0));
+            assert_eq!(groups(&desk), "|2,1");
+            let dropped = desk.rect(2);
+            assert_eq!(
+                (dropped.x, dropped.y),
+                (-300.0, 400.0),
+                "where it was let go"
+            );
+
+            let snapshot = desk.snapshot();
+            let outcome = act(&mut desk, "pick", r#"{"card":1}"#, snapshot);
+            desk.apply(&outcome.commands);
+            assert!(groups(&desk).starts_with("2,1"), "{}", groups(&desk));
+            let back = desk.rect(2);
+            assert_eq!(
+                (back.x, back.y, back.w, back.h),
+                (244.0, 400.0, 800.0, 600.0),
+                "clear of the strip, at its own size"
+            );
+            assert_eq!(desk.rect(1).x, 700.0, "the other was clear of it");
+        }
+
+        /// **A card turns no faster than `drag.turn` lets it**: pulled far
+        /// out of the strip in one 50 ms frame it has turned a third of the
+        /// way into its windows, where it would be all the way, the eased
+        /// point already past `drag.reach`; and with `turn = 0`, it is.
+        #[test]
+        fn a_card_pulled_out_in_one_frame_turns_over_several() {
+            let pulled = |turn: Option<u32>| {
+                let mut desk = desk();
+                if let Some(turn) = turn {
+                    desk.scripts.evaluate(&format!(
+                        "require(\"config\").floating.atrium.drag.turn = {turn}\nreturn \"\""
+                    ));
+                }
+                desk.cursor = (100.0, 720.0);
+                let snapshot = desk.snapshot();
+                act(&mut desk, "drag", r#"{"card":1,"x":100,"y":720}"#, snapshot);
+                ticks(&mut desk, 1200.0, 0.05, 1).0
+            };
+            let shipped = pulled(None);
+            assert!(
+                shipped.w > 300.0 && shipped.w < 500.0,
+                "a third of the way: {shipped:?}"
+            );
+            assert_eq!(pulled(Some(0)).w, 800.0, "all of the way at once");
+        }
+
+        /// [`desk`], with the strip a row along the bottom, which on `WIDE`
+        /// is six cards' places, 230 apart, from 590 to 1970 across, its
+        /// inner edge 1220 down.
+        fn desk_along_the_bottom(hide: &str) -> Desk {
+            let mut desk = desk();
+            desk.scripts.evaluate(&format!(
+                "local atrium = require(\"config\").floating.atrium\n\
+                 atrium.side = \"bottom\"\n\
+                 atrium.hide = \"{hide}\"\n\
+                 return \"\""
+            ));
+            let snapshot = desk.snapshot();
+            act(&mut desk, "leave", "{}", snapshot);
+            desk
+        }
+
+        /// **Along the bottom a card stands in the order its group was last
+        /// used, the most recent on the left**, the row centred: a card
+        /// coming or going only slides the others along. From the middle
+        /// out, one side and then the other, a card leaving sent every card
+        /// after it across to the other side, through the cards there.
+        #[test]
+        fn along_the_bottom_the_most_recent_card_is_on_the_left() {
+            let at = |x: f64| Rect {
+                x,
+                y: 100.0,
+                w: 800.0,
+                h: 600.0,
+            };
+            let mut desk = Desk::floating(
+                one_screen(),
+                &[
+                    (4, "DP-1", at(600.0)),
+                    (3, "DP-1", at(700.0)),
+                    (2, "DP-1", at(800.0)),
+                    (1, "DP-1", at(900.0)),
+                ],
+            );
+            desk.scripts.evaluate(
+                "local atrium = require(\"config\").floating.atrium\n\
+                 atrium.side = \"bottom\"\n\
+                 atrium.hide = \"never\"\n\
+                 return \"\"",
+            );
+            let snapshot = desk.snapshot();
+            let outcome = act(&mut desk, "leave", "{}", snapshot);
+            assert_eq!(groups(&desk), "4|3|2|1");
+            let card = |id: u64| {
+                presented(&outcome.commands, id)
+                    .and_then(|drawn| drawn.0)
+                    .expect("the card is drawn")
+            };
+            let (three, two, one) = (card(3), card(2), card(1));
+            assert!(
+                three.x < two.x && two.x < one.x,
+                "{three:?} {two:?} {one:?}"
+            );
+            let middle = (three.x + one.x + one.w) / 2.0;
+            assert!((middle - 1280.0).abs() < 1.0, "centred: {middle}");
+        }
+
+        /// **A window dragged beside the row along the bottom is not turned
+        /// into a card**: past the row's ends the way along counts as well
+        /// as the way up, so a window dragged to a side or a bottom corner
+        /// to snap there stays a window, and one dragged down onto the row
+        /// turns. Measured up from the strip alone, a window dragged to the
+        /// right edge to snap half the screen leaned back as it got there.
+        #[test]
+        fn a_window_dragged_beside_the_row_along_the_bottom_is_not_turned() {
+            let desk = desk_along_the_bottom("never");
+            let closeness = |x: f64, y: f64| -> f64 {
+                desk.scripts
+                    .evaluate(&format!(
+                        "local area = require(\"monitors\").named(\"DP-1\")\n\
+                         return tostring(require(\"atrium\").closeness(area, {x}, {y}))"
+                    ))
+                    .parse()
+                    .expect("a number")
+            };
+            let over = closeness(1280.0, 1120.0);
+            assert!(over > 0.6 && over < 0.8, "over the row: {over}");
+            assert_eq!(closeness(2555.0, 1120.0), 0.0, "at the right edge");
+            assert_eq!(closeness(2500.0, 1435.0), 0.0, "in the bottom corner");
+            assert_eq!(closeness(5.0, 1300.0), 0.0, "at the left edge");
+        }
+
+        /// **Along the bottom too, a hovered card picked up does not move**:
+        /// it is lifted up out of the row about its bottom edge, and held as
+        /// it is drawn. It was held as the strip on the left lifts one,
+        /// sideways, and hopped there as the drag began.
+        #[test]
+        fn a_hovered_card_picked_up_along_the_bottom_does_not_jump() {
+            let mut desk = desk_along_the_bottom("stage");
+            let snapshot = desk.snapshot();
+            act(&mut desk, "edge", "{}", snapshot);
+            let snapshot = desk.snapshot();
+            let hovered = act(&mut desk, "hover", r#"{"card":1}"#, snapshot);
+            let lifted = presented(&hovered.commands, 1)
+                .expect("the hovered card is drawn")
+                .0
+                .expect("a rect");
+            // The strip's scene begins `strip` and `drag.reach` above the
+            // bottom: 1440 - 220 - 320.
+            let (x, y) = (lifted.x + lifted.w / 2.0, lifted.y + lifted.h / 2.0);
+            desk.cursor = (x, y);
+            let snapshot = desk.snapshot();
+            let picked = act(
+                &mut desk,
+                "drag",
+                &format!(r#"{{"card":1,"x":{x},"y":{}}}"#, y - 900.0),
+                snapshot,
+            );
+            let held = presented(&picked.commands, 1)
+                .expect("the picked card is drawn")
+                .0
+                .expect("a rect");
+            for (was, is) in [
+                (lifted.x, held.x),
+                (lifted.y, held.y),
+                (lifted.w, held.w),
+                (lifted.h, held.h),
+            ] {
+                assert!((was - is).abs() < 0.5, "lifted {lifted:?}, held {held:?}");
+            }
         }
 
         /// The stage's group and the cards behind it, as `"3,2|1"`: each

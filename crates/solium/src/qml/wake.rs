@@ -688,6 +688,91 @@ mod tests {
         });
     }
 
+    /// **Nothing on the clock is no walk.** A scene with an animation that is
+    /// not running, once nothing anywhere is on the animation clock, answers
+    /// "not animating" without its census walking a single object, however
+    /// often it is asked: the pointer moving over an idle desktop asks every
+    /// scene on every output on every pass. And the moment its animation
+    /// starts, it is walked and found again.
+    #[test]
+    fn nothing_on_the_clock_is_no_walk() {
+        on_the_qt_thread(|| {
+            let (directory, mut scene) = build(
+                "solium-qml-test-wake-census-idle",
+                r"
+                import QtQuick
+
+                Item {
+                    id: root
+                    property bool going: false
+                    property real turn: 0
+                    Repeater {
+                        model: 20
+                        Item { Rectangle { width: 4; height: 4 } }
+                    }
+                    NumberAnimation on turn {
+                        from: 0
+                        to: 360
+                        duration: 1000
+                        loops: Animation.Infinite
+                        running: root.going
+                    }
+                }
+                ",
+            );
+
+            let _settled = run(Duration::from_millis(200), || {});
+            let clock_idle = !crate::qml::animating();
+            let before = Scene::census_walks_for_test();
+            let mut answers = Vec::new();
+            for _ in 0..50 {
+                answers.push(scene.animation_in_flight());
+            }
+            let walked_idle = Scene::census_walks_for_test() - before;
+
+            scene.set_bool("going", true);
+            let _started = run(Duration::from_millis(50), || {});
+            let found_running = scene.animation_in_flight();
+
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(clock_idle, "the clock was still running in a settled scene");
+            assert!(
+                answers.iter().all(|animating| !animating),
+                "a scene with nothing running answered animating"
+            );
+            assert_eq!(
+                walked_idle, 0,
+                "the census walked a scene while nothing was on the clock"
+            );
+            assert!(found_running, "a started animation was not found");
+        });
+    }
+
+    /// **The census knows QtQuick's classes by pointer** once a scene has
+    /// loaded QtQuick, so every walk the other tests here make is the fast
+    /// one and not the fallback by name.
+    #[test]
+    fn the_census_finds_quicks_classes() {
+        on_the_qt_thread(|| {
+            let (directory, scene) = build(
+                "solium-qml-test-wake-census-classes",
+                r"
+                import QtQuick
+
+                Item {}
+                ",
+            );
+            let found = Scene::census_classes_found_for_test();
+            drop(scene);
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                found,
+                "QQuickFlickable, QQuickAbstractAnimation or QQuickTransition was not found"
+            );
+        });
+    }
+
     /// **An animation a `Timer` starts between frames starts where the Timer
     /// fired**, not at the last frame drawn.
     ///

@@ -203,11 +203,19 @@ Item {
 
     // ---- drawing -----------------------------------------------------------
 
-    // How fast it is moving, 0..1, eased back down when it slows.
+    // How fast it is moving, 0..1, eased back down when it slows: 0 at an
+    // ordinary pace, rising from `brisk` pixels a second to full at `fast`.
+    // In tenths, so a pointer moving at an even speed changes nothing here:
+    // the velocity changes with every motion event, and a glow that followed
+    // it exactly re-drew the pointer, its outline and its blur on every one,
+    // a quarter of a frame at 260 Hz, while the glow was too faint to see.
+    readonly property real brisk: 900
+    readonly property real fast: 2500
     readonly property real speed: {
         const v = Solium.cursor.velocity
         const s = v ? Math.hypot(v.x || 0, v.y || 0) : 0
-        return Math.min(1, s / 2500)
+        const share = Math.max(0, Math.min(1, (s - brisk) / (fast - brisk)))
+        return Math.round(share * 10) / 10
     }
     property real glow: speed
     Behavior on glow { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
@@ -215,7 +223,7 @@ Item {
     MultiEffect {
         source: drawing
         anchors.fill: drawing
-        visible: root.glow > 0.02
+        visible: root.glow > 0.01
         shadowEnabled: true
         shadowColor: root.edge
         shadowBlur: 1.0

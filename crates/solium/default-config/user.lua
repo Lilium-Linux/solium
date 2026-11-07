@@ -23,6 +23,8 @@ require("search")
 local screenshot = require("screenshot")
 -- Screens off on a key, or from outside (screens.lua).
 local screens = require("screens")
+-- How things move, by what they mean (motion.lua).
+local motion = require("motion")
 
 -- This directory, found as Solium finds it: $XDG_CONFIG_HOME/solium when
 -- that is set, ~/.config/solium otherwise. The scenes below are named from
@@ -53,7 +55,18 @@ return {
     workspaces = {
         arrangement = "vertical",
         rows = 4,
+        motion = motion.travel,
     },
+
+    -- How windows move, each kind on its own curve (motion.lua): the view
+    -- travelling, windows reflowing where they are, a window settling after
+    -- a drag, one appearing, one going into the taskbar.
+    scrolling = { motion = motion.travel, snap = motion.settle },
+    tiling = { motion = motion.reflow, snap = motion.settle },
+    maximize = { animate = motion.reflow },
+    fullscreen = { animate = motion.reflow },
+    open = { motion = motion.appear, scale = 0.9 },
+    minimize = { motion = motion.journey },
 
     -- The pointer: cursor/Cursor.qml beside this file, violet like the rest.
     cursor = { scene = here .. "/cursor/Cursor.qml", size = 24 },
@@ -69,13 +82,21 @@ return {
     -- monitor's own refresh rate rather than 60 a second.
     effects = { motion_hz = 0 },  -- every pass: effects follow each monitor's own rate
     -- Atrium, Stage Manager on the floating desktop: the window in use
-    -- and its app's other windows on the stage, every other app a live,
-    -- tilted card in a strip down the left, most recent at the top. A card
+    -- and its app's other windows on the stage, every other app a live card
+    -- in a row along the bottom, above the bar, most recent on the left,
+    -- leaning back a little (a landscape card turned as far as a portrait one
+    -- down the left is mostly lost), its app's icon on its corner. A card
     -- click brings it forward, shift+click or a drag onto the stage joins it,
     -- a window dropped on the strip leaves its group; super+a turns it off
-    -- and on. The strip slides away while a window covers it.
+    -- and on. The strip slides away only while a window covers it, and the
+    -- edges and bottom corners are free for snapping.
     floating = {
-        atrium = { enabled = true, key = "super+a" },
+        atrium = {
+            enabled = true, key = "super+a",
+            side = "bottom", strip = 180, hide = "overlap",
+            tilt = 12, perspective = 520,
+            card = { spacing = 30, icon = 40 },
+        },
     },
 
     -- Resizing as KDE does: every app always at its window's border. A

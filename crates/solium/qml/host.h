@@ -380,9 +380,18 @@ int solium_qml_scene_dirty(const SoliumQmlScene *scene);
  * both: a running animation leaves the scene clean on any tick that does not
  * move a rendered property, including the tick that starts it. See the long
  * note at the definition for what was measured, and for why
- * QAnimationDriver::isRunning() is not the answer.
+ * QAnimationDriver::isRunning() is not the answer on its own: it is the
+ * process's, and only its "no" answers for every scene. `still` non-zero
+ * says the caller knows nothing can be on the clock (the clock was still
+ * after Qt last ran its queue, and Qt has not been touched since): then this
+ * walks nothing and answers 0.
  */
-int solium_qml_scene_animating(const SoliumQmlScene *scene);
+int solium_qml_scene_animating(const SoliumQmlScene *scene, int still);
+
+/* For the tests: how many scenes solium_qml_scene_animating has walked, and
+ * whether it found QtQuick's classes to look for by pointer. */
+unsigned long long solium_qml_census_walks(void);
+int solium_qml_census_classes_found(void);
 
 /*
  * Keep a scene but stop it ticking (`quiet` non-zero), or start it again: its

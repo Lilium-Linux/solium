@@ -28,8 +28,8 @@ local recents = { active = false }
 -- Window ids, the one focused last first. Across reloads.
 local kept = sol.keep("recents", { order = {} })
 
-local SLIDE = { duration = 220, easing = "outCubic" }
-local LEAVE = { duration = 200, easing = "outCubic" }
+local SLIDE = require("motion").travel
+local LEAVE = require("motion").reflow
 local CARD_HEIGHT = 0.62 -- of the screen
 local CARD_WIDTH = 0.6
 local GAP = 40

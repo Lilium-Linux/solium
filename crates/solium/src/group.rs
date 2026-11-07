@@ -166,6 +166,38 @@ impl Blend for Shift {
     }
 }
 
+impl crate::present::Carried for Shift {
+    fn measures(self) -> crate::present::Rate {
+        [
+            self.dx,
+            self.dy,
+            f64::from(self.opacity),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an opacity is a small float either way"
+    )]
+    fn with_measures(self, [dx, dy, opacity, ..]: crate::present::Rate) -> Self {
+        Self {
+            dx,
+            dy,
+            opacity: opacity.clamp(0.0, 1.0) as f32,
+            ..self
+        }
+    }
+
+    fn drawn(transform: &Transform<Self>, now: Duration) -> Self {
+        transform.at(now)
+    }
+}
+
 /// One thing a selection can name.
 ///
 /// The vocabulary from the design's table, less the two that are not addressable
@@ -409,10 +441,15 @@ impl Groups {
         let from = group
             .travel
             .map_or(Shift::NONE, |transform| transform.at(now));
+        // At the speed it was going: a desk sliding away when another switch
+        // comes slows and turns, rather than turning in a frame
+        // (`tests::a_desk_switched_again_mid_slide_keeps_its_speed`).
+        let velocity = group.travel.and_then(|transform| transform.velocity(now));
         // Never released: a selection asked to sit a screen to the left has to
         // stay there. What releases is `clear`, which is the call that means
         // "back to nothing".
-        group.travel = Some(Transform::new(from, to, now, duration, easing, false));
+        group.travel =
+            Some(Transform::new(from, to, now, duration, easing, false).carrying(velocity));
         true
     }
 
@@ -430,14 +467,10 @@ impl Groups {
         let Some(current) = group.travel else {
             return false;
         };
-        group.travel = Some(Transform::new(
-            current.at(now),
-            Shift::NONE,
-            now,
-            duration,
-            easing,
-            true,
-        ));
+        group.travel = Some(
+            Transform::new(current.at(now), Shift::NONE, now, duration, easing, true)
+                .carrying(current.velocity(now)),
+        );
         true
     }
 
@@ -666,6 +699,44 @@ mod tests {
         );
     }
 
+    /// **A desk switched again mid-slide keeps its speed.** Half way through a
+    /// slide to the left, the switch is undone: the desk was moving left at
+    /// its fastest, and in the next millisecond it must still be moving left
+    /// at that speed, not already rushing right, as a slide restarted from
+    /// rest did. And it still lands back where it started, and stops there.
+    #[test]
+    fn a_desk_switched_again_mid_slide_keeps_its_speed() {
+        let spring = Curve::Spring(solium_animation::Spring {
+            stiffness: 420.0,
+            damping: 2.0 * 420.0_f64.sqrt(),
+            ..solium_animation::Spring::default()
+        });
+        let mut groups = Groups::default();
+        groups.declare("desk-2", desk(&[3], &[]), at(0));
+        groups.present("desk-2", by(-2560.0, 0.0), at(0), at(0), spring);
+        let speed = |groups: &Groups, millis: u64| {
+            let before = groups.on_window(3, None, at(millis)).offset().0;
+            let after = groups.on_window(3, None, at(millis + 1)).offset().0;
+            (after - before) * 1000.0
+        };
+
+        let going = speed(&groups, 60);
+        groups.present("desk-2", by(0.0, 0.0), at(61), at(0), spring);
+        let turned = speed(&groups, 61);
+
+        assert!(
+            going < -1000.0,
+            "the first slide was not under way: {going} px/s"
+        );
+        assert!(
+            (turned - going).abs() < 0.05 * going.abs(),
+            "switched back mid-slide, the desk went from {going} to {turned} px/s in a millisecond"
+        );
+        let end = at(1500);
+        assert!(groups.on_window(3, None, end).offset().0.abs() < 0.5);
+        assert!(speed(&groups, 1500).abs() < 1.0, "it did not come to rest");
+    }
+
     /// **A surface a group narrows to one monitor moves only there.**
     ///
     /// `on = "every-monitor"` makes one name into several things, and a desk is
@@ -876,14 +947,14 @@ mod tests {
     }
 
     /// **A selection cleared on a spring is bound for nothing before it gets
-    /// there**, and it does not get there exactly until it is retired.
+    /// there**, and gets there exactly.
     ///
-    /// The desk a workspace switch goes to is cleared from a screen away. On
-    /// `outCubic` its progress at the end is exactly 1, so it is carried by
-    /// exactly nothing however late it is asked; on a spring it is the
-    /// spring's value at its settling time, which is within its epsilon of 1
-    /// and no closer -- so asked an hour later it is still a pixel or two off,
-    /// until `settle` drops the travel. Its target is nothing from the start.
+    /// The desk a workspace switch goes to is cleared from a screen away. Its
+    /// target is nothing from the start. On `outCubic` its progress at the
+    /// end is exactly 1, and on a spring now too: it was the spring's value at
+    /// its settling time, within its epsilon of 1 and no closer, so asked an
+    /// hour later a desk was still a pixel or two off until `settle` dropped
+    /// the travel (`solium_animation`'s `a_spring_lands_exactly_on_its_target`).
     #[test]
     fn a_selection_cleared_on_a_spring_is_bound_for_nothing_before_it_gets_there() {
         let spring = Curve::Spring(solium_animation::Spring::default());
@@ -900,9 +971,8 @@ mod tests {
         let an_hour_on = Duration::from_secs(60 * 60);
         let (late, _) = groups.on_window(1, None, an_hour_on).offset();
         assert!(
-            late != 0.0 && late.abs() < 3.0,
-            "the premise: a spring is still a pixel or two off at any instant before it is \
-             retired, and here it is {late}"
+            late.abs() < f64::EPSILON,
+            "a spring cleared an hour ago is still {late} off"
         );
         assert_eq!(
             groups.bound_for_window(1, None),

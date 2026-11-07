@@ -1852,8 +1852,15 @@ local defaults = {
             -- again until you restart (it survives `super+shift+r`).
             enabled = true,
             key = "super+a",
-            -- The strip's width, in logical pixels (80 or more), and how many
-            -- cards it shows; older groups wait off the edge.
+            -- Where the strip is: "left", a column down the work area, most
+            -- recent card at the top; or "bottom", a row centred along it
+            -- above the bar, most recent on the left, which leaves the edges
+            -- and the bottom corners to window snapping (a strip on the left
+            -- takes the left edge).
+            side = "left",
+            -- The strip's depth, in logical pixels (80 or more): its width
+            -- down the left, its height along the bottom. And how many cards
+            -- it shows; older groups wait off the edge.
             strip = 220,
             cards = 6,
             -- How the cards stand: degrees turned about their left edge, and
@@ -1888,13 +1895,17 @@ local defaults = {
             -- milliseconds while it is flat -- a mouse is heard every 8 ms or
             -- so, and a fast screen draws two or three frames between, so a
             -- window drawn exactly on it moves in steps -- and more the more
-            -- it has turned, up to `smooth` as a full card. Letting go rides
-            -- `motion`.
+            -- it has turned, up to `smooth` as a full card. And it takes at
+            -- least `turn` milliseconds to turn all the way, so a turn the
+            -- pointer would make in a frame -- past the end of a row along
+            -- the bottom, where the way on to a snapping corner is short --
+            -- is drawn over several. Letting go rides `motion`.
             drag = {
                 threshold = 8,
                 reach = 320,
                 steady = 12,
                 smooth = 70,
+                turn = 150,
             },
             -- "stage": the strip slides off the edge while the stage holds a
             -- window, and comes back while the pointer is at the edge, going
