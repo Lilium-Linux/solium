@@ -291,11 +291,35 @@ Item {
             root.aimKey = null
         }
     }
-    FrameAnimation {
-        running: root.near !== null
-        onTriggered: {
+    // The compositor's clock, in seconds, for the icons' springs: a plain
+    // animation of it, which the clock the cards move on advances, running
+    // only while one of those springs is (`springing` counts them).
+    // FrameAnimation's frameTime counts the wall's time, so under
+    // SOLIUM_CLOCK_RATE, or across a stalled frame, the icons left the cards
+    // they belong to behind.
+    property int springing: 0
+    property real clock: 0
+    NumberAnimation on clock {
+        running: root.springing > 0
+        from: 0
+        to: 1000
+        duration: 1000000
+        loops: Animation.Infinite
+    }
+    readonly property bool aiming: root.near !== null
+    property real aimClock: 0
+    onAimingChanged: {
+        aimClock = clock
+        springing += aiming ? 1 : -1
+    }
+    onClockChanged: {
+        if (!root.aiming)
+            return
+        const now = root.clock
+        let left = Math.min(Math.max(0, now - root.aimClock), 0.05)
+        root.aimClock = now
+        {
             const k = root.motion.stiffness, c = root.motion.damping
-            let left = Math.min(frameTime, 0.05)
             while (left > 0) {
                 const dt = Math.min(left, 0.004)
                 root.aimVx += (k * (root.near.ix - root.aimX) - c * root.aimVx) * dt
@@ -499,18 +523,30 @@ Item {
                 }
                 if (inHand) {
                     px = tx; py = ty; vx = 0; vy = 0
-                } else if (!settled()) {
-                    spring.running = true
+                } else if (!settled() && !springing) {
+                    lastClock = root.clock
+                    springing = true
                 }
             }
-            FrameAnimation {
-                id: spring
-                onTriggered: {
+            // On the scene's clock (`root.clock`), a step each time it moves.
+            property bool springing: false
+            property real lastClock: 0
+            onSpringingChanged: root.springing += springing ? 1 : -1
+            Component.onDestruction: {
+                if (springing)
+                    root.springing -= 1
+            }
+            Connections {
+                target: root
+                enabled: badge.springing
+                function onClockChanged() {
                     if (isNaN(badge.tx) || isNaN(badge.ty))
                         return
+                    const now = root.clock
+                    let left = Math.min(Math.max(0, now - badge.lastClock), 0.05)
+                    badge.lastClock = now
                     const m = badge.away ? root.softMotion : root.motion
                     const k = m.stiffness, c = m.damping
-                    let left = Math.min(frameTime, 0.05)
                     while (left > 0) {
                         const dt = Math.min(left, 0.004)
                         badge.vx += (k * (badge.tx - badge.px) - c * badge.vx) * dt
@@ -521,7 +557,7 @@ Item {
                     }
                     if (badge.settled()) {
                         badge.px = badge.tx; badge.py = badge.ty; badge.vx = 0; badge.vy = 0
-                        running = false
+                        badge.springing = false
                     }
                 }
             }
