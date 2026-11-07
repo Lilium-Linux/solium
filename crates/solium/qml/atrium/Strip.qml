@@ -86,12 +86,21 @@ Item {
     // pointer is. The compositor moves a window and says nothing until it is
     // let go, and this scene's own pointer events arrive unevenly between
     // frames, so while a button is held over this monitor, or a card is held
-    // anywhere, by the pointer or a finger, the Lua is asked to draw once a frame, on the compositor's
-    // clock, with how long the frame was, which a turned window's easing
-    // after the pointer is measured in, and told when the button comes up.
+    // anywhere, by the pointer or a finger, the Lua is asked to draw once a
+    // frame, with how long the frame was by the compositor's clock (`clock`
+    // below), which a turned window's easing after the pointer and how fast
+    // it turns are measured in, and told when the button comes up.
+    readonly property bool ticking: (Solium.cursor.pressed && Solium.monitor.pointer) || column.dragging
+    property real tickedAt: -1
+    onTickingChanged: tickedAt = -1
     FrameAnimation {
-        running: (Solium.cursor.pressed && Solium.monitor.pointer) || column.dragging
-        onTriggered: Solium.send("tick", { dt: frameTime })
+        running: root.ticking
+        onTriggered: {
+            const now = root.clock
+            const dt = root.tickedAt < 0 ? -1 : now - root.tickedAt
+            root.tickedAt = now
+            Solium.send("tick", dt > 0 ? { dt: dt } : {})
+        }
     }
     Connections {
         target: Solium.cursor
@@ -291,16 +300,17 @@ Item {
             root.aimKey = null
         }
     }
-    // The compositor's clock, in seconds, for the icons' springs: a plain
-    // animation of it, which the clock the cards move on advances, running
-    // only while one of those springs is (`springing` counts them).
-    // FrameAnimation's frameTime counts the wall's time, so under
-    // SOLIUM_CLOCK_RATE, or across a stalled frame, the icons left the cards
-    // they belong to behind.
+    // The compositor's clock, in seconds, for the icons' springs and the
+    // drag's ticks: a plain animation of it, which the clock the cards move
+    // on advances, running only while one of those springs is (`springing`
+    // counts them) or a drag ticks. FrameAnimation's frameTime counts the
+    // wall's time, so under SOLIUM_CLOCK_RATE, or across a stalled frame, the
+    // icons left the cards they belong to behind, and a window in the hand
+    // eased and turned as many times faster.
     property int springing: 0
     property real clock: 0
     NumberAnimation on clock {
-        running: root.springing > 0
+        running: root.springing > 0 || root.ticking
         from: 0
         to: 1000
         duration: 1000000

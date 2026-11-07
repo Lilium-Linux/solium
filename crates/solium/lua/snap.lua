@@ -162,6 +162,14 @@ function snap.rect(area, kind)
     return rect
 end
 
+-- How far along an edge from a screen's corner its corner zone reaches, 0
+-- while dragging to snap is off: what atrium's strip along the bottom keeps
+-- clear of.
+function snap.corner()
+    local s = settings()
+    return s.enabled and s.corner or 0
+end
+
 -- The zone the pointer at `x, y` is in, or nil: `{ monitor, kind, rect }`,
 -- `rect` where a window let go there goes, in the global space.
 function snap.zone(x, y)
