@@ -114,6 +114,49 @@ impl Spring {
         1.0 + offset
     }
 
+    /// Where a spring resting on its target is, `seconds` after it is struck
+    /// at one unit a second: the part of [`Self::value_at`] the initial
+    /// velocity makes, on its own. It starts at 0 rising at 1, swings out and
+    /// comes back to rest, in seconds of travel per unit of velocity.
+    ///
+    /// The difference of two `value_at`s rather than a formula of its own,
+    /// because `value_at` is linear in `initial_velocity` in all three of its
+    /// regimes, so this is exactly what a velocity adds to it, and a spring
+    /// carrying a velocity into a new target is the spring's own pull plus
+    /// this, scaled ([`Coast`]).
+    #[must_use]
+    pub fn impulse_at(&self, seconds: f64) -> f64 {
+        let struck = Self {
+            initial_velocity: 1.0,
+            ..*self
+        };
+        let still = Self {
+            initial_velocity: 0.0,
+            ..*self
+        };
+        struck.value_at(seconds) - still.value_at(seconds)
+    }
+
+    /// When a velocity carried into this spring has died away: when
+    /// [`Self::impulse_at`] stays within `COAST_EPSILON` seconds of travel,
+    /// which at 5000 pixels a second is a tenth of a pixel.
+    fn coast_time(&self) -> Duration {
+        const STEP: f64 = 1.0 / 240.0;
+        const LIMIT: f64 = 10.0;
+        const COAST_EPSILON: f64 = 2e-5;
+
+        let mut seconds = 0.0;
+        while seconds < LIMIT {
+            seconds += STEP;
+            if self.impulse_at(seconds).abs() <= COAST_EPSILON
+                && self.impulse_at(seconds + STEP).abs() <= COAST_EPSILON
+            {
+                return Duration::from_secs_f64(seconds);
+            }
+        }
+        Duration::from_secs_f64(LIMIT)
+    }
+
     /// Roughly when it stops moving, so a caller knows when to stop asking.
     ///
     /// Found by walking forward rather than solved, because the exact answer
@@ -262,6 +305,11 @@ impl Curve {
             // A spring is described in seconds, not in fractions of a fixed
             // duration, so a normalised time has to be given one: its own
             // settling time.
+            // Landed when it has settled, exactly: `value_at` is only within
+            // `epsilon` of the target there, and a desk held where a spring
+            // left it sat that far short of its place for as long as it was
+            // held.
+            Self::Spring(_) if t >= 1.0 => 1.0,
             Self::Spring(spring) => spring.value_at(t * spring.settle_time().as_secs_f64()),
         }
     }
@@ -343,6 +391,12 @@ impl Animation {
         self.duration
     }
 
+    /// When it started.
+    #[must_use]
+    pub fn start(&self) -> Duration {
+        self.start
+    }
+
     #[must_use]
     pub fn curve(&self) -> Curve {
         self.curve
@@ -355,7 +409,15 @@ impl Animation {
             return 1.0;
         }
         let elapsed = now.saturating_sub(self.start).as_secs_f64();
-        self.curve.at(elapsed / self.duration.as_secs_f64())
+        match self.curve {
+            // The duration is the spring's settle time already (`new`), so
+            // the spring is asked at the time itself: `Curve::at` would walk
+            // that settle time out again, two hundred evaluations a call, for
+            // every animating window on every frame.
+            Curve::Spring(spring) if !self.done(now) => spring.value_at(elapsed),
+            Curve::Spring(_) => 1.0,
+            curve => curve.at(elapsed / self.duration.as_secs_f64()),
+        }
     }
 
     /// How long is left of it at `now`; nothing once it is done.
@@ -375,6 +437,82 @@ impl Animation {
 /// Takes progress rather than time, so overshoot passes through: a curve that
 /// goes past 1 moves the value past its target and back, which is the whole
 /// point of `OutBack` and of an underdamped spring.
+/// What a velocity carried into an animation adds to it.
+///
+/// An animation that takes over from one in flight starts where the old one
+/// was drawn, and if it starts from rest as well, whatever was moving stops
+/// dead and sets off again on the new curve: a window easing to a stop
+/// shoots off at the curve's own speed, one going the other way turns round
+/// in a frame. The speed it had is part of where it is.
+///
+/// So the new animation carries the old one's velocity, as much of it as its
+/// own start does not already have, and this is how that excess plays out:
+/// `at` is how far something moving at one unit a second when the animation
+/// starts has coasted by `now`, in seconds of travel. It starts at 0 rising
+/// at exactly 1, so the velocity is continuous, and it is back at 0, at rest,
+/// when it is done, so the animation still lands where it was aimed.
+///
+/// - For a spring it is the spring's own answer to being struck
+///   ([`Spring::impulse_at`]): physics, carried exactly, settling at the
+///   spring's own rate, and done when that has died away.
+/// - For a curve it is `D · u · (1 − u)²` over the animation's own duration
+///   `D`, `u` the share of it gone: the cubic that leaves at unit speed and
+///   arrives at rest, so it ends with the curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Coast {
+    start: Duration,
+    duration: Duration,
+    spring: Option<Spring>,
+}
+
+impl Coast {
+    /// The coast of an animation started at `start`, for `duration`, on
+    /// `curve`: what [`Animation::new`] was given.
+    #[must_use]
+    pub fn new(start: Duration, duration: Duration, curve: Curve) -> Self {
+        match curve {
+            Curve::Spring(spring) => Self {
+                start,
+                duration: spring.coast_time(),
+                spring: Some(spring),
+            },
+            _ => Self {
+                start,
+                duration,
+                spring: None,
+            },
+        }
+    }
+
+    /// Seconds of travel per unit of carried velocity, at `now`.
+    #[must_use]
+    pub fn at(&self, now: Duration) -> f64 {
+        let elapsed = now.saturating_sub(self.start).as_secs_f64();
+        match self.spring {
+            Some(spring) => {
+                if self.done(now) {
+                    return 0.0;
+                }
+                spring.impulse_at(elapsed)
+            }
+            None => {
+                let duration = self.duration.as_secs_f64();
+                if duration <= 0.0 || elapsed >= duration {
+                    return 0.0;
+                }
+                let u = elapsed / duration;
+                let rest = 1.0 - u;
+                duration * u * rest * rest
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn done(&self, now: Duration) -> bool {
+        now.saturating_sub(self.start) >= self.duration
+    }
+}
+
 #[must_use]
 pub fn lerp(from: f64, to: f64, progress: f64) -> f64 {
     from + (to - from) * progress
@@ -597,6 +735,117 @@ mod tests {
         let animation = Animation::new(Duration::ZERO, Duration::ZERO, Curve::OutCubic);
         assert_eq!(animation.progress(Duration::ZERO), 1.0);
         assert!(animation.done(Duration::ZERO));
+    }
+
+    /// The slope of `f` at `seconds`, from either side of it.
+    fn slope_at(f: impl Fn(Duration) -> f64, seconds: f64) -> f64 {
+        const H: f64 = 1e-5;
+        (f(Duration::from_secs_f64(seconds + H))
+            - f(Duration::from_secs_f64((seconds - H).max(0.0))))
+            / (seconds + H - (seconds - H).max(0.0))
+    }
+
+    #[test]
+    fn a_curves_coast_leaves_at_unit_speed_and_ends_at_rest() {
+        let coast = Coast::new(Duration::ZERO, Duration::from_millis(300), Curve::OutCubic);
+        let at = |now: Duration| coast.at(now);
+        assert!(coast.at(Duration::ZERO).abs() < 1e-12);
+        assert!(
+            (slope_at(at, 0.0) - 1.0).abs() < 1e-3,
+            "{}",
+            slope_at(at, 0.0)
+        );
+        assert!(coast.at(Duration::from_millis(300)).abs() < 1e-12);
+        assert!(slope_at(at, 0.2999).abs() < 1e-3);
+        assert!(coast.done(Duration::from_millis(300)));
+        assert!(!coast.done(Duration::from_millis(299)));
+        // It swings out and back, never past where it started.
+        for ms in 1..300 {
+            assert!(coast.at(Duration::from_millis(ms)) > 0.0);
+        }
+    }
+
+    #[test]
+    fn a_springs_coast_is_what_a_thrown_spring_adds() {
+        let spring = Spring {
+            stiffness: 420.0,
+            damping: 2.0 * 420.0_f64.sqrt(),
+            ..Spring::default()
+        };
+        let thrown = Spring {
+            initial_velocity: 2.5,
+            ..spring
+        };
+        for seconds in [0.004, 0.02, 0.1, 0.25, 0.6] {
+            let sum = spring.value_at(seconds) + 2.5 * spring.impulse_at(seconds);
+            assert!(
+                (thrown.value_at(seconds) - sum).abs() < 1e-9,
+                "at {seconds}"
+            );
+        }
+        for zeta in [0.6, 1.0, 1.8] {
+            let spring = Spring {
+                stiffness: 300.0,
+                damping: zeta * 2.0 * 300.0_f64.sqrt(),
+                ..Spring::default()
+            };
+            let thrown = Spring {
+                initial_velocity: -3.0,
+                ..spring
+            };
+            for seconds in [0.01, 0.07, 0.3] {
+                let sum = spring.value_at(seconds) - 3.0 * spring.impulse_at(seconds);
+                assert!(
+                    (thrown.value_at(seconds) - sum).abs() < 1e-9,
+                    "zeta {zeta} at {seconds}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_springs_coast_leaves_at_unit_speed_and_settles() {
+        let spring = Spring {
+            stiffness: 420.0,
+            damping: 2.0 * 420.0_f64.sqrt(),
+            ..Spring::default()
+        };
+        let coast = Coast::new(Duration::ZERO, Duration::ZERO, Curve::Spring(spring));
+        let at = |now: Duration| coast.at(now);
+        assert!(
+            (slope_at(at, 0.0) - 1.0).abs() < 1e-3,
+            "{}",
+            slope_at(at, 0.0)
+        );
+        let end = (0..2000)
+            .map(Duration::from_millis)
+            .find(|&now| coast.done(now))
+            .unwrap_or(Duration::MAX);
+        assert!(
+            end < Duration::from_secs(1),
+            "a critically damped coast took {end:?}"
+        );
+        assert!(coast.at(end).abs() <= 2e-5);
+    }
+
+    #[test]
+    fn a_spring_lands_exactly_on_its_target() {
+        let animation = Animation::new(
+            Duration::ZERO,
+            Duration::ZERO,
+            Curve::Spring(Spring::default()),
+        );
+        assert!((animation.progress(animation.duration()) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn an_animation_says_when_it_started() {
+        let animation = Animation::new(
+            Duration::from_millis(40),
+            Duration::from_millis(200),
+            Curve::OutCubic,
+        );
+        assert_eq!(animation.start(), Duration::from_millis(40));
     }
 
     #[test]
