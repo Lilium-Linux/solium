@@ -5,25 +5,29 @@ import QtQuick
 // Atrium tells the frame `atrium = { card, scale, stiffness, damping }`:
 // whether the window is a card or on the stage, how small it is drawn (1 on
 // the stage), and the spring it flies there on. The shadow is laid out in the
-// window's own pixels, so it is spread by 1 / scale to come out the same on
-// screen whatever the window's size. Nothing is drawn outside atrium.
+// window's own pixels, so it is sized by 1 / scale to come out as wanted on
+// screen whatever the window's size.
 //
-// Soft rather than banded: many faint rings, each a little further out and
-// fainter than the last, so their edges blend into one falloff.
+// Soft, as a blurred one is: rings, each a rectangle a little larger or
+// smaller than the window, faint and stacked, set where a normal
+// distribution's quantiles fall, so how dark a point is falls off across the
+// window's edge as a blur's does -- half its darkness at the edge, none
+// two widths out -- with no band where the rings end. A card's is small and
+// close, a stage window's larger and further down, from its drawn size; and
+// it always ends inside the layer's bleed, since one cut off there would end
+// in a straight line, and the row's lines would join into one under it.
 //
 // One shadow, never two and never none. As a window flies from the stage into
 // its card the shadow shrinks with it on the same spring, from where it is and
-// at the speed it has, so on screen it stays the shadow it was: it used to be
-// laid out for the card the instant the flight began, several times its size
-// around a window still at its own (218 000 pixels darkened in one frame, in
-// a nested capture), and to drop away the instant a card came back. It fades
-// in only as atrium first draws a window, and out as it stops.
+// at the speed it has, so on screen it stays the shadow it was. It fades in
+// only as atrium first draws a window, and out as it stops.
 Item {
     id: cast
 
     property var windowValues: ({})
     property int bleedTop: 0
     property int bleedLeft: 0
+    property int clientRadius: 0
 
     readonly property var atrium: windowValues.atrium || null
     readonly property real target: atrium && atrium.scale > 0 ? atrium.scale : 1
@@ -95,10 +99,26 @@ Item {
         scaleNow = Math.max(0.02, target + off)
     }
 
-    // Screen pixels: how far the shadow spreads, and how far down it falls.
-    readonly property real spread: 30 / scaleNow
-    readonly property real drop: 9 / scaleNow
-    readonly property int rings: 16
+    // On screen: how soft it is (the blur's spread, one standard deviation),
+    // how far down it falls, and how dark it is at its darkest, under the
+    // window. Larger as the window is drawn larger.
+    readonly property real drawn: Math.min(1, scaleNow)
+    readonly property real softOnScreen: 5 + 11 * drawn
+    readonly property real dropOnScreen: 2 + 6 * drawn
+    readonly property real darkest: 0.3
+    // Scaled down as one, where it would reach past the bleed.
+    readonly property real fits: Math.min(1, Math.min(bleedTop, bleedLeft) * scaleNow
+        / (steps[0] * softOnScreen + dropOnScreen))
+    readonly property real soft: softOnScreen * fits / scaleNow
+    readonly property real drop: dropOnScreen * fits / scaleNow
+
+    // Each ring's edge, in standard deviations out from the window's (in,
+    // where negative): the quantiles of a normal distribution at the middle
+    // of each sixteenth.
+    readonly property var steps: [1.863, 1.318, 1.01, 0.776, 0.579, 0.402, 0.237, 0.078,
+        -0.078, -0.237, -0.402, -0.579, -0.776, -1.01, -1.318, -1.863]
+    // Each ring's opacity: all of them over one another are `darkest`.
+    readonly property real ink: 1 - Math.pow(1 - darkest, 1 / steps.length)
 
     // How much of it is cast, 0 to 1: in as atrium first draws the window,
     // out as it stops.
@@ -109,23 +129,22 @@ Item {
     visible: cast.strength > 0
 
     Repeater {
-        model: cast.rings
+        model: cast.steps.length
 
         Rectangle {
             required property int index
 
-            // Out from the window's edge, the rings crowd near it and thin
-            // out further away, which is where a real shadow fades.
-            readonly property real share: (index + 1) / cast.rings
-            readonly property real out: cast.spread * share * share
+            readonly property real out: cast.soft * cast.steps[index]
 
+            // One drawn wholly under the window would only be hidden.
+            visible: out > -cast.drop
             x: cast.bleedLeft - out
-            y: cast.bleedTop - out + cast.drop * share
+            y: cast.bleedTop - out + cast.drop
             width: cast.width - 2 * cast.bleedLeft + 2 * out
             height: cast.height - 2 * cast.bleedTop + 2 * out
-            radius: 12 / cast.scaleNow + out
+            radius: Math.max(0, cast.clientRadius + out)
             color: "#000000"
-            opacity: 0.045 * cast.strength
+            opacity: cast.ink * cast.strength
         }
     }
 }
