@@ -23,6 +23,8 @@ require("search")
 local screenshot = require("screenshot")
 -- Screens off on a key, or from outside (screens.lua).
 local screens = require("screens")
+-- How things move, by what they mean (motion.lua).
+local motion = require("motion")
 
 -- This directory, found as Solium finds it: $XDG_CONFIG_HOME/solium when
 -- that is set, ~/.config/solium otherwise. The scenes below are named from
@@ -53,7 +55,18 @@ return {
     workspaces = {
         arrangement = "vertical",
         rows = 4,
+        motion = motion.travel,
     },
+
+    -- How windows move, each kind on its own curve (motion.lua): the view
+    -- travelling, windows reflowing where they are, a window settling after
+    -- a drag, one appearing, one going into the taskbar.
+    scrolling = { motion = motion.travel, snap = motion.settle },
+    tiling = { motion = motion.reflow, snap = motion.settle },
+    maximize = { animate = motion.reflow },
+    fullscreen = { animate = motion.reflow },
+    open = { motion = motion.appear, scale = 0.9 },
+    minimize = { motion = motion.journey },
 
     -- The pointer: cursor/Cursor.qml beside this file, violet like the rest.
     cursor = { scene = here .. "/cursor/Cursor.qml", size = 24 },

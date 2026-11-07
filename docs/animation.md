@@ -60,13 +60,34 @@ its bottom edge as it minimizes it (`minimize.motion` in `config.lua`), and
 wants to feel like it — and for `inOutQuad` when a window
 is only moving between two slots.
 
-`spring` ignores `duration` entirely; a spring arrives when it arrives. Its
-parameters (stiffness, damping, mass, initial velocity) are not settable from
-Lua yet — you get the default, which settles in a little under half a second
-(445 ms) with a small overshoot. A gesture's throw speed belongs in its initial
-velocity and that is why the parameter exists; wiring it to a real gesture
-belongs to the touch and gestures epic,
-[#7](https://github.com/Lilium-Linux/solium/issues/7), after v0.1.0.
+`spring` ignores `duration` entirely; a spring arrives when it arrives. The
+name alone is the default spring, which settles in a little under half a
+second (445 ms) with a small overshoot. A table sets its parameters:
+
+```lua
+sol.animate({ easing = { spring = { stiffness = 600, damping = 49, epsilon = 0.0003 } } })
+```
+
+`stiffness` is how hard it pulls, `damping` how much it resists, `mass` how
+heavy it is, `initial_velocity` a throw (a share of the distance a second),
+and `epsilon` how close counts as landed, as a share of the distance: the
+last step there is that small, since a spring lands on its target exactly
+when it settles. A damping of twice the square root of `stiffness × mass` is
+critical, the fastest that never overshoots; below it, it rings.
+
+## Interrupted, it carries on
+
+A motion taken over before it lands, by a key pressed again, a mode left on
+the way in, a layout changing under a gliding window, starts where the window
+is drawn and at the speed it is moving. On a spring, or a curve that starts
+from rest (`inOutQuad`, `inOutCubic`), it carries that speed exactly: a desk
+sent back half way through a slide slows, turns and comes back, rather than
+reversing in a frame or stopping dead. A curve that starts with a kick
+(`outCubic`, `outBack`, `linear`, most beziers) still kicks a window that was
+slower, so taking over never answers slower than starting fresh, and its kick
+is less by whatever speed the window had the other way. Either way the
+difference dies away on the new motion's own timing, so it lands where it is
+sent, at rest. That is a reason to put anything a key can repeat on a spring.
 
 ## Any curve at all
 
@@ -177,8 +198,19 @@ whole reason these are here rather than in the Lua that uses them. `tiling.lua`
 takes `config.tiling.motion` and passes it straight to `sol.animate`; that is
 the pattern to copy.
 
-Two of them are worth explaining because the *reason* for the number is not
-obvious:
+The shipped desktop (`crates/solium/default-config`) does not take these
+defaults: its `motion.lua` names each kind of motion once, and `user.lua` and
+the desktop's own modules move with them. The view travelling (a workspace
+switch, scrolling, Alt+Tab, the overview) and windows reflowing where they are
+(tiling, maximise, fullscreen) ride critically damped springs, so a key
+pressed again on the way turns them; a window let go after a drag settles on a
+softer one; a window opening decelerates into place without overshooting; a
+change in place, such as how see-through a window is, fades on `inOutQuad`;
+and a window going into the taskbar takes the journey on `inOutCubic`. The
+wallpaper pans on the workspaces' own spring, so it lands with the windows.
+
+Two of the defaults are worth explaining because the *reason* for the number
+is not obvious:
 
 - **`snap` is shorter than `motion`.** A window returning after a drag is
   answering something you just did with your hand, and a long animation there

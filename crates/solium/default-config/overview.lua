@@ -16,8 +16,8 @@ local kept = sol.keep("overview", { active = false })
 local overview = { active = kept.active }
 
 local PADDING = 24
-local ENTER = { duration = 260, easing = "outCubic" }
-local LEAVE = { duration = 200, easing = "outCubic" }
+local ENTER = require("motion").travel
+local LEAVE = require("motion").reflow
 
 local function showing(active)
     overview.active = active
