@@ -231,13 +231,21 @@ Item {
 
     // Over the bar's own clock while the lock's flies out of it or back
     // into it, so there is one clock and not two; the wallpaper fading in
-    // covers it.
+    // covers it. It comes as the lock's clock leaves the bar's: nothing
+    // while the two lie one on the other, all of it once the lock's has
+    // moved a quarter of its height, before the two can be seen apart, so it
+    // is not seen to appear, and going home it goes as the clock lands. In the bar's own hover colour
+    // (shell/Bar.qml), so what is seen is the clock's button lit while its
+    // clock is away, not a box the bar does not have.
+    readonly property real barClockTravel: Math.hypot(root.width / 2 - (root.barClockX + root.barClockW / 2),
+                                                      root.height * 0.16 - root.barColumnTop)
     Rectangle {
         visible: root.down < 1 && (Lock.locked || Lock.state === "unlocking" || Lock.state === "peeking")
         x: root.barClockX; y: root.barClockY
         width: root.barClockW; height: 32
         radius: 6
-        color: "#1c1b1d"
+        color: "#2b2a2e"
+        opacity: Math.min(1, root.down * root.barClockTravel / Math.max(1, barTime.implicitHeight / 4))
     }
 
     // The sheet: everything below moves with it.
@@ -613,9 +621,12 @@ Item {
             Text {
                 x: -implicitWidth / 2; y: -implicitHeight / 2
                 text: Qt.formatDate(root.now, "dd.MM.yyyy")
-                color: Theme.text
+                // The bar's date colour (shell/Bar.qml's textDim), so the
+                // hand-over to the bar's own date, at either end, is not a
+                // step in brightness.
+                color: "#9c9aa3"
                 // Gone before it reaches the time it would cross.
-                opacity: Math.max(0, 1 - clock.t * 4) * 0.8
+                opacity: Math.max(0, 1 - clock.t * 4)
                 font { pixelSize: 22; family: root.font }
             }
             Text {
