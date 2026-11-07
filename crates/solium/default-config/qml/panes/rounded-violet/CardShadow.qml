@@ -9,6 +9,14 @@ import QtQuick
 //
 // Soft rather than banded: many faint rings, each a little further out and
 // fainter than the last, so their edges blend into one falloff.
+//
+// It comes and goes, never at once. Atrium names the card's size as the
+// window starts for the strip, while the window is still drawn at its own;
+// laid out for the card, the shadow was then several times its size on
+// screen, cast in full in one frame (218 000 pixels darkened, from none, in a
+// nested capture). So it fades in over the flight, faint while the window is
+// still large, and out as a card goes back to the stage, at the size it had;
+// and a card resized as the strip changes eases to its new size.
 Item {
     id: cast
 
@@ -17,14 +25,32 @@ Item {
     property int bleedLeft: 0
 
     readonly property var card: windowValues.atrium || null
-    readonly property real scale: card && card.scale > 0 ? card.scale : 1
+    // The card's size, kept while the shadow fades after the window leaves
+    // the strip, and eased from one size to the next.
+    property real cardScale: card && card.scale > 0 ? card.scale : 1
+    onCardChanged: {
+        if (card && card.scale > 0) {
+            cardScale = card.scale
+        }
+    }
+    Behavior on cardScale { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
     // Screen pixels: how far the shadow spreads, and how far down it falls.
-    readonly property real spread: 30 / scale
-    readonly property real drop: 9 / scale
+    readonly property real spread: 30 / cardScale
+    readonly property real drop: 9 / cardScale
     readonly property int rings: 16
 
-    property bool dormant: !card
-    visible: !!card
+    // How much of it is cast, 0 to 1: in over Atrium's flight to the strip,
+    // slowly at first, out quickly as the card goes back.
+    property real strength: card ? 1 : 0
+    Behavior on strength {
+        NumberAnimation {
+            duration: cast.card ? 420 : 200
+            easing.type: cast.card ? Easing.InQuad : Easing.OutQuad
+        }
+    }
+
+    property bool dormant: cast.strength <= 0
+    visible: cast.strength > 0
 
     Repeater {
         model: cast.rings
@@ -43,7 +69,7 @@ Item {
             height: cast.height - 2 * cast.bleedTop + 2 * out
             radius: 12 / cast.scale + out
             color: "#000000"
-            opacity: 0.045
+            opacity: 0.045 * cast.strength
         }
     }
 }
