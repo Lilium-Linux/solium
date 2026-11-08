@@ -62,39 +62,7 @@ pub(crate) fn which(program: &str) -> bool {
     std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
-/// Put a key combination into one canonical form.
-///
-/// So that `shift+super+q` and `super+shift+q` are the same binding. Done in
-/// one place and used both when binding and when dispatching, because two
-/// spellings of the same key is a bug that only shows up for whoever spelled it
-/// the other way.
-pub(crate) fn normalise_combo(combo: &str) -> String {
-    let mut modifiers = Vec::new();
-    let mut key = String::new();
-
-    for part in combo.split('+') {
-        let part = part.trim().to_ascii_lowercase();
-        match part.as_str() {
-            "" => {}
-            "ctrl" | "control" => modifiers.push("ctrl"),
-            "alt" | "meta" => modifiers.push("alt"),
-            "shift" => modifiers.push("shift"),
-            "super" | "logo" | "win" | "cmd" => modifiers.push("super"),
-            _ => key = part,
-        }
-    }
-
-    // A fixed order, and each modifier once.
-    let mut canonical = String::new();
-    for name in ["ctrl", "alt", "shift", "super"] {
-        if modifiers.contains(&name) {
-            canonical.push_str(name);
-            canonical.push('+');
-        }
-    }
-    canonical.push_str(&key);
-    canonical
-}
+pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
 
 // The generated reference pages check their sources against the code here.
 // Declared right above the tests, never higher: two tests read this file's
