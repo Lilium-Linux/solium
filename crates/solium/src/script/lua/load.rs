@@ -547,6 +547,10 @@ impl Scripts {
         let bound = bindings.pairs::<Value, Value>().count();
         tracing::info!(config = %config.display(), bindings = bound, "scripts loaded");
 
-        Ok(Self { lua })
+        Ok(Self {
+            lua,
+            told: crate::wm::diff::Told::new(),
+            mirror: solium_wm_protocol::mirror::Mirror::new(),
+        })
     }
 }

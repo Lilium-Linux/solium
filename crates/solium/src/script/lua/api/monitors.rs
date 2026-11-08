@@ -15,8 +15,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let Some(rows) = options else {
                 let monitors = lua.create_table()?;
-                for (index, monitor) in snapshot(lua)?.monitors.iter().enumerate() {
-                    let entry = lua::convert::rect_table(monitor.area, lua)?;
+                for (index, monitor) in mirror(lua).monitors.iter().enumerate() {
+                    let entry = lua::convert::rect_table(&monitor.area, lua)?;
                     entry.set("name", monitor.name.clone())?;
                     entry.set("scale", monitor.scale)?;
                     entry.set("focused", monitor.focused)?;
@@ -29,7 +29,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     // The whole monitor as well as the usable part: a
                     // wallpaper and a fullscreen window want the one a bar has
                     // not taken a bite out of.
-                    entry.set("whole", lua::convert::rect_table(monitor.whole, lua)?)?;
+                    entry.set("whole", lua::convert::rect_table(&monitor.whole, lua)?)?;
                     monitors.set(index + 1, entry)?;
                 }
                 return Ok(Value::Table(monitors));
@@ -82,17 +82,26 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "monitor",
         lua.create_function(|lua, id: Option<u64>| {
-            let snapshot = snapshot(lua)?;
+            let mirror = mirror(lua);
             let named = id
-                .and_then(|id| snapshot.windows.iter().find(|window| window.id == id))
+                .and_then(|id| mirror.window(id))
                 .and_then(|window| {
-                    snapshot
+                    mirror
                         .monitors
                         .iter()
                         .find(|monitor| monitor.name == window.monitor)
                 })
-                .map(|monitor| monitor.area);
-            lua::convert::rect_table(named.unwrap_or(snapshot.work_area), lua)
+                .map(|monitor| monitor.area.clone());
+            let area =
+                named
+                    .or_else(|| mirror.work_area.clone())
+                    .unwrap_or(solium_wm_protocol::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.0,
+                        h: 0.0,
+                    });
+            lua::convert::rect_table(&area, lua)
         })?,
     )?;
 

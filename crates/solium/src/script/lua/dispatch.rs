@@ -843,7 +843,8 @@ impl Scripts {
         call: impl FnOnce(&Lua, &Table) -> mlua::Result<bool>,
     ) -> Outcome {
         let at_the_lock = source == FocusSource::Binding && snapshot.locked;
-        self.lua.set_app_data(snapshot);
+        self.tell(&snapshot);
+        self.lua.set_app_data(Asker(Box::new(Answers(snapshot))));
         self.lua.set_app_data(Pending {
             source,
             at_the_lock,
@@ -868,6 +869,7 @@ impl Scripts {
             }
         };
         set_deadline(&self.lua, None);
+        self.lua.remove_app_data::<Asker>();
 
         let pending = self.lua.remove_app_data::<Pending>().unwrap_or_default();
 
@@ -888,4 +890,51 @@ pub(crate) fn applied(queued: Vec<solium_wm_protocol::Command>) -> Vec<Command> 
         .into_iter()
         .flat_map(crate::wm::convert::commands_of)
         .collect()
+}
+
+impl Scripts {
+    /// Bring the scripts' mirror up to `snapshot`, with the changes a
+    /// window manager in another process would be sent, and hand the Lua
+    /// state its copy for the dispatch.
+    pub(crate) fn tell(&mut self, snapshot: &Snapshot) {
+        self.mirror.apply_all(self.told.changes(snapshot));
+        self.lua.set_app_data(self.mirror.clone());
+    }
+}
+
+/// The compositor's answers, in the same process: its own predicates over
+/// the snapshot a dispatch was handed.
+pub(crate) struct Answers(pub(crate) Snapshot);
+
+impl Ask for Answers {
+    fn ask(&self, query: solium_wm_protocol::Query) -> Option<solium_wm_protocol::Reply> {
+        match query {
+            // Asked exactly as the compositor asks it, through
+            // `crate::state::owns`, the predicate `Solium::window_under`
+            // walks with: on a screen that draws the window, and inside what
+            // it paints there. No row of a snapshot is what is left of a
+            // window whose client has gone, and a minimized window is under
+            // no point, even while a present on it plays out (#30).
+            solium_wm_protocol::Query::WindowAt((x, y, skip)) => {
+                let point = smithay::utils::Point::<f64, smithay::utils::Logical>::from((x, y));
+                Some(solium_wm_protocol::Reply::Window(
+                    self.0
+                        .windows
+                        .iter()
+                        .find(|window| {
+                            Some(window.id) != skip
+                                && !window.minimized
+                                && crate::state::owns(
+                                    window.drawn.slot,
+                                    false,
+                                    window.drawn.frame,
+                                    point,
+                                    &self.0.screens,
+                                )
+                        })
+                        .map(|window| window.id),
+                ))
+            }
+        }
+    }
 }

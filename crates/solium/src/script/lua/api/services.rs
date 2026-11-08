@@ -18,30 +18,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "notifications",
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
-                let snapshot = snapshot(lua)?;
-                let view = &snapshot.notifications;
-                let table = lua.create_table()?;
-                table.set("available", view.available)?;
-                table.set("serving", view.serving)?;
-                table.set("dnd", view.dnd)?;
-                for (key, rows) in [("banners", &view.banners), ("history", &view.history)] {
-                    let list = lua.create_table()?;
-                    for (index, row) in rows.iter().enumerate() {
-                        list.set(
-                            index + 1,
-                            crate::services::notifications::object(row).to_lua(lua)?,
-                        )?;
-                    }
-                    table.set(key, list)?;
-                }
-                if let Some(owner) = &view.owner {
-                    let row = lua.create_table()?;
-                    row.set("name", owner.name.clone())?;
-                    row.set("pid", owner.pid)?;
-                    row.set("program", owner.program.clone())?;
-                    table.set("owner", row)?;
-                }
-                return Ok(Value::Table(table));
+                return match mirror(lua).services.get("notifications") {
+                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    None => Ok(Value::Nil),
+                };
             };
             super::settings::configure(
                 lua,
@@ -63,27 +43,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "tray",
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
-                let snapshot = snapshot(lua)?;
-                let view = &snapshot.tray;
-                let table = lua.create_table()?;
-                table.set("available", view.available)?;
-                table.set("serving", view.serving)?;
-                let items = lua.create_table()?;
-                for (index, row) in view.items.iter().enumerate() {
-                    items.set(
-                        index + 1,
-                        crate::services::notifications::object(row).to_lua(lua)?,
-                    )?;
-                }
-                table.set("items", items)?;
-                if let Some(owner) = &view.owner {
-                    let row = lua.create_table()?;
-                    row.set("name", owner.name.clone())?;
-                    row.set("pid", owner.pid)?;
-                    row.set("program", owner.program.clone())?;
-                    table.set("owner", row)?;
-                }
-                return Ok(Value::Table(table));
+                return match mirror(lua).services.get("tray") {
+                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    None => Ok(Value::Nil),
+                };
             };
             super::settings::configure(lua, "tray", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
@@ -100,8 +63,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "media",
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
-                let snapshot = snapshot(lua)?;
-                return snapshot.media.to_json().to_lua(lua);
+                return match mirror(lua).services.get("media") {
+                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    None => Ok(Value::Nil),
+                };
             };
             super::settings::configure(lua, "media", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
@@ -121,42 +86,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
                 super::settings::configure(lua, "audio", vec![solium_wm_protocol::DocNode::Nil])?;
-                let snapshot = snapshot(lua)?;
-                let view = &snapshot.audio;
-                let table = lua.create_table()?;
-                table.set("available", view.available)?;
-                table.set("ready", view.ready)?;
-                for (key, row) in [("output", &view.output), ("input", &view.input)] {
-                    if let Some(row) = row {
-                        table.set(
-                            key,
-                            crate::services::notifications::object(row).to_lua(lua)?,
-                        )?;
-                    }
-                }
-                for (key, rows) in [
-                    ("outputs", &view.outputs),
-                    ("inputs", &view.inputs),
-                    ("streams", &view.streams),
-                ] {
-                    let list = lua.create_table()?;
-                    for (index, row) in rows.iter().enumerate() {
-                        list.set(
-                            index + 1,
-                            crate::services::notifications::object(row).to_lua(lua)?,
-                        )?;
-                    }
-                    table.set(key, list)?;
-                }
-                let windows = lua.create_table()?;
-                for (id, row) in &view.windows {
-                    windows.set(
-                        *id,
-                        crate::services::notifications::object(row).to_lua(lua)?,
-                    )?;
-                }
-                table.set("windows", windows)?;
-                return Ok(Value::Table(table));
+                return match mirror(lua).services.get("audio") {
+                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    None => Ok(Value::Nil),
+                };
             };
             super::settings::configure(lua, "audio", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)

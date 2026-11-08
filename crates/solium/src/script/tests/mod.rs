@@ -579,7 +579,12 @@ impl Scripts {
     /// what the compositor asks in Rust --
     /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
     pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
-        self.lua.set_app_data(snapshot);
+        let mut mirror = solium_wm_protocol::mirror::Mirror::new();
+        mirror.apply_all(crate::wm::diff::Told::new().changes(&snapshot));
+        self.lua.set_app_data(mirror);
+        self.lua.set_app_data(crate::script::lua::Asker(Box::new(
+            crate::script::lua::dispatch::Answers(snapshot),
+        )));
         self.evaluate(chunk)
     }
 }

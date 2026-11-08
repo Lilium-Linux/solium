@@ -1,7 +1,6 @@
 //! The windows: listing them, focusing, placing, moving and closing them.
 
 use mlua::{Lua, Table, Value};
-use smithay::utils::{Logical, Point};
 
 use crate::script::lua::*;
 use crate::script::*;
@@ -41,9 +40,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "windows",
         lua.create_function(|lua, ()| {
-            let snapshot = snapshot(lua)?;
+            let mirror = mirror(lua);
             let windows = lua.create_table()?;
-            for (index, window) in snapshot.windows.iter().enumerate() {
+            for (index, window) in mirror.windows().enumerate() {
                 let entry = lua.create_table()?;
                 entry.set("id", window.id)?;
                 entry.set("x", window.rect.x)?;
@@ -60,11 +59,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 entry.set("focused", window.focused)?;
                 entry.set("monitor", window.monitor.clone())?;
                 entry.set("modal", window.modal)?;
-                entry.set("parent", lua::convert::parentage_value(window.parent, lua)?)?;
+                entry.set(
+                    "parent",
+                    lua::convert::parentage_value(&window.parent, lua)?,
+                )?;
                 entry.set("leaving", window.leaving)?;
                 entry.set("minimized", window.minimized)?;
                 entry.set("above", window.above)?;
-                if let Some(icon) = window.icon {
+                if let Some(icon) = &window.icon {
                     let rect = lua.create_table()?;
                     rect.set("x", icon.x)?;
                     rect.set("y", icon.y)?;
@@ -73,8 +75,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     entry.set("icon", rect)?;
                 }
                 entry.set("app_id", window.app_id.clone())?;
-                entry.set("min", size_table(lua, window.min)?)?;
-                entry.set("max", size_table(lua, window.max)?)?;
+                entry.set("min", size_table(lua, window.min.as_ref())?)?;
+                entry.set("max", size_table(lua, window.max.as_ref())?)?;
                 entry.set("cramped", window.cramped)?;
                 entry.set("shown", window.shown)?;
                 entry.set("fullscreen", window.fullscreen)?;
@@ -86,7 +88,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 entry.set("accepts_input", window.accepts_input)?;
                 entry.set("class", window.class.clone())?;
                 entry.set("instance", window.instance.clone())?;
-                entry.set("content_type", window.content_type)?;
+                entry.set("content_type", window.content_type.clone())?;
                 entry.set("pid", window.pid)?;
                 windows.set(index + 1, entry)?;
             }
@@ -101,23 +103,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // list at once reads `Solium.Apps`, live, instead).
     sol.set(
         "apps",
-        lua.create_function(|lua, ()| {
-            let snapshot = snapshot(lua)?;
-            let apps = lua.create_table()?;
-            for (index, app) in snapshot.apps.iter().enumerate() {
-                let entry = lua.create_table()?;
-                entry.set("id", app.id.clone())?;
-                entry.set("name", app.name.clone())?;
-                entry.set("generic_name", app.generic_name.clone())?;
-                entry.set("icon", app.icon.clone())?;
-                let categories = lua.create_table()?;
-                for (n, category) in app.categories.iter().enumerate() {
-                    categories.set(n + 1, category.clone())?;
-                }
-                entry.set("categories", categories)?;
-                apps.set(index + 1, entry)?;
-            }
-            Ok(apps)
+        lua.create_function(|lua, ()| match mirror(lua).services.get("apps") {
+            Some(view) => lua::convert::doc_to_lua(view, lua),
+            None => Ok(Value::Table(lua.create_table()?)),
         })?,
     )?;
 
@@ -351,36 +339,16 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "window_at",
         lua.create_function(|lua, (x, y, skip): (f64, f64, Option<u64>)| {
-            let snapshot = snapshot(lua)?;
-            let point = Point::<f64, Logical>::from((x, y));
             // `skip` is what makes this usable while dragging. A dragged
             // window follows the cursor, so it is always the topmost thing
-            // under it — ask without skipping and the answer is always the
+            // under it -- ask without skipping and the answer is always the
             // window in your hand, which is why dropping one onto another
-            // never swapped anything.
-            //
-            // `false`: no row of a snapshot is what is left of a window whose
-            // client has gone -- `Solium::snapshot` lists none, which
-            // `a_window_that_left_is_nobodys_to_find` asks.
-            //
-            // A minimized window is under no point, even while a present on
-            // it plays out, as the press walks have it (#30):
-            // `real_client::reflow_on_close::minimize::a_press_on_a_minimized_window_reaches_what_is_under_it`.
-            Ok(snapshot
-                .windows
-                .iter()
-                .find(|window| {
-                    Some(window.id) != skip
-                        && !window.minimized
-                        && crate::state::owns(
-                            window.drawn.slot,
-                            false,
-                            window.drawn.frame,
-                            point,
-                            &snapshot.screens,
-                        )
-                })
-                .map(|window| window.id))
+            // never swapped anything. Answered by the compositor, which
+            // finds a window as the pointer does.
+            match ask(lua, solium_wm_protocol::Query::WindowAt((x, y, skip))) {
+                Some(solium_wm_protocol::Reply::Window(id)) => Ok(id),
+                None => Ok(None),
+            }
         })?,
     )?;
 

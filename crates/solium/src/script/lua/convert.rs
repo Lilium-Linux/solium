@@ -2,13 +2,13 @@
 
 use mlua::{IntoLua, Lua, Table, Value};
 
+use crate::script::Kept;
 use crate::script::doc::{self, Doc};
 use crate::script::lua::*;
 use crate::script::*;
-use crate::script::{Kept, Parentage, Rect};
 
 /// A rectangle as a Lua table: `{ x, y, w, h }`.
-pub(crate) fn rect_table(rect: Rect, lua: &Lua) -> mlua::Result<Table> {
+pub(crate) fn rect_table(rect: &solium_wm_protocol::Rect, lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("x", rect.x)?;
     table.set("y", rect.y)?;
@@ -26,12 +26,60 @@ pub(crate) fn rect_table(rect: Rect, lua: &Lua) -> mlua::Result<Table> {
 /// distinguish "named but lost" from "never named" can still ask
 /// `window.parent == false`. An `Option<u64>` flattened to nil-or-number
 /// would have thrown the distinction away at the boundary.
-pub(crate) fn parentage_value(parentage: Parentage, lua: &Lua) -> mlua::Result<Value> {
+pub(crate) fn parentage_value(
+    parentage: &solium_wm_protocol::Parentage,
+    lua: &Lua,
+) -> mlua::Result<Value> {
+    use solium_wm_protocol::Parentage;
     match parentage {
         Parentage::None => Ok(Value::Nil),
         Parentage::Unknown => Ok(Value::Boolean(false)),
         Parentage::Window(id) => id.into_lua(lua),
     }
+}
+
+/// A document from the compositor, a service's view, as the Lua table its
+/// getter answers: a list part, named and numbered keys, whole numbers as
+/// integers.
+pub(crate) fn doc_to_lua(nodes: &solium_wm_protocol::Doc, lua: &Lua) -> mlua::Result<Value> {
+    node_to_lua(nodes, 0, 0, lua)
+}
+
+fn node_to_lua(
+    nodes: &solium_wm_protocol::Doc,
+    at: u32,
+    depth: usize,
+    lua: &Lua,
+) -> mlua::Result<Value> {
+    use solium_wm_protocol::DocNode;
+    if depth > DOC_DEPTH {
+        return Err(mlua::Error::runtime(format!(
+            "a view nested deeper than {DOC_DEPTH}"
+        )));
+    }
+    let Some(node) = nodes.get(at as usize) else {
+        return Ok(Value::Nil);
+    };
+    Ok(match node {
+        DocNode::Nil | DocNode::Other(_) => Value::Nil,
+        DocNode::Boolean(on) => Value::Boolean(*on),
+        DocNode::Integer(whole) => Value::Integer(*whole),
+        DocNode::Number(number) => Value::Number(*number),
+        DocNode::Text(text) => Value::String(lua.create_string(text)?),
+        DocNode::Table(table) => {
+            let read = lua.create_table()?;
+            for (index, item) in table.list.iter().enumerate() {
+                read.set(index + 1, node_to_lua(nodes, *item, depth + 1, lua)?)?;
+            }
+            for (key, item) in &table.numbered {
+                read.set(*key, node_to_lua(nodes, *item, depth + 1, lua)?)?;
+            }
+            for (name, item) in &table.fields {
+                read.set(name.as_str(), node_to_lua(nodes, *item, depth + 1, lua)?)?;
+            }
+            Value::Table(read)
+        }
+    })
 }
 
 /// What a warning shows of a Lua value that was not what a setting wanted.

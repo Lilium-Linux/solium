@@ -4,7 +4,7 @@ mod api;
 mod bindings;
 pub(crate) mod convert;
 mod deadline;
-mod dispatch;
+pub(crate) mod dispatch;
 mod files;
 mod layouts;
 mod load;
@@ -26,4 +26,10 @@ pub(crate) use runs::*;
 #[derive(Debug)]
 pub(crate) struct Scripts {
     pub(crate) lua: mlua::Lua,
+    /// What the scripts were last told of the desktop, so each dispatch
+    /// tells them only what changed.
+    pub(crate) told: crate::wm::diff::Told,
+    /// The desktop as the scripts know it: what `sol.windows()` and the
+    /// other reads answer from.
+    pub(crate) mirror: solium_wm_protocol::mirror::Mirror,
 }

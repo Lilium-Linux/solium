@@ -22,11 +22,28 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "keyboard",
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let Some(options) = options else {
-                let snapshot = snapshot(lua)?;
-                let keyboard = snapshot.keyboard;
+                let mirror = mirror(lua);
+                let keyboard = mirror
+                    .keyboard
+                    .clone()
+                    .unwrap_or(solium_wm_protocol::Keyboard {
+                        layouts: Vec::new(),
+                        short_names: Vec::new(),
+                        active: 0,
+                        caps: false,
+                        num: false,
+                        repeat_rate: 0,
+                        repeat_delay: 0,
+                    });
+                let live = |names: &[String]| -> String {
+                    names
+                        .get((keyboard.active as usize).saturating_sub(1))
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 let table = lua.create_table()?;
-                table.set("shortcuts_inhibited", snapshot.shortcuts_owner.is_some())?;
-                table.set("shortcuts_owner", snapshot.shortcuts_owner)?;
+                table.set("shortcuts_inhibited", mirror.shortcuts_owner.is_some())?;
+                table.set("shortcuts_owner", mirror.shortcuts_owner)?;
                 let layouts = lua.create_table()?;
                 for (index, name) in keyboard.layouts.iter().enumerate() {
                     layouts.set(index + 1, name.clone())?;
@@ -39,8 +56,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 // `sol.keyboard{ ... }` compiles no keymap.
                 // `tests::sol_keyboard_handed_back_what_it_read_compiles_no_keymap`,
                 // `keyboard_change::tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
-                table.set("layout_name", keyboard.layout())?;
-                table.set("layout_short", keyboard.short_name())?;
+                table.set("layout_name", live(&keyboard.layouts))?;
+                table.set("layout_short", live(&keyboard.short_names))?;
                 table.set("caps", keyboard.caps)?;
                 table.set("num", keyboard.num)?;
                 table.set("repeat_rate", keyboard.repeat_rate)?;
@@ -65,17 +82,17 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "text_input",
         lua.create_function(|lua, ()| {
-            let Some(field) = snapshot(lua)?.text_input else {
+            let Some(field) = mirror(lua).text_field else {
                 return Ok(Value::Nil);
             };
             let table = lua.create_table()?;
             table.set("window", field.window)?;
             table.set("framed", field.framed)?;
             if let Some(caret) = field.caret {
-                table.set("x", caret.loc.x)?;
-                table.set("y", caret.loc.y)?;
-                table.set("w", caret.size.w)?;
-                table.set("h", caret.size.h)?;
+                table.set("x", caret.x)?;
+                table.set("y", caret.y)?;
+                table.set("w", caret.w)?;
+                table.set("h", caret.h)?;
             }
             Ok(Value::Table(table))
         })?,
@@ -84,7 +101,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "cursor",
         lua.create_function(|lua, ()| {
-            let (x, y) = snapshot(lua)?.cursor;
+            let (x, y) = mirror(lua).cursor;
             let table = lua.create_table()?;
             table.set("x", x)?;
             table.set("y", y)?;
@@ -169,16 +186,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let Some(id) = id.or_else(|| focused_id(lua)) else {
                 return Ok(());
             };
-            let refusal =
-                lua.app_data_ref::<Snapshot>()
-                    .map_or(Some("is not a window"), |snapshot| {
-                        match snapshot.windows.iter().find(|window| window.id == id) {
-                            None => Some("is not a window"),
-                            Some(window) if window.leaving => Some("is leaving"),
-                            Some(window) if window.minimized => Some("is minimized"),
-                            Some(_) => None,
-                        }
-                    });
+            let refusal = match mirror(lua).window(id) {
+                None => Some("is not a window"),
+                Some(window) if window.leaving => Some("is leaving"),
+                Some(window) if window.minimized => Some("is minimized"),
+                Some(_) => None,
+            };
             if let Some(why) = refusal {
                 return Err(mlua::Error::runtime(format!("sol.press: {id} {why}")));
             }

@@ -66,16 +66,16 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "problems",
         lua.create_function(|lua, ()| {
-            let snapshot = snapshot(lua)?;
+            let mirror = mirror(lua);
             let rows = lua.create_table()?;
-            for (index, problem) in snapshot.problems.iter().enumerate() {
+            for (index, problem) in mirror.problems.iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("effect", problem.effect.clone())?;
                 row.set("file", problem.file.clone())?;
                 row.set("line", problem.line)?;
                 row.set("column", problem.column)?;
                 row.set("message", problem.message.clone())?;
-                row.set("severity", problem.severity)?;
+                row.set("severity", problem.severity.clone())?;
                 rows.set(index + 1, row)?;
             }
             Ok(rows)

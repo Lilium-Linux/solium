@@ -24,6 +24,7 @@ pub(crate) struct Told {
     text_field: Option<Option<wire::TextField>>,
     problems: Option<Vec<wire::Problem>>,
     locked: Option<bool>,
+    services: HashMap<&'static str, wire::Doc>,
 }
 
 impl Told {
@@ -107,6 +108,12 @@ impl Told {
         if self.locked != Some(snapshot.locked) {
             self.locked = Some(snapshot.locked);
             changes.push(Change::Locked(snapshot.locked));
+        }
+        for (name, view) in convert::services(snapshot) {
+            if self.services.get(name) != Some(&view) {
+                self.services.insert(name, view.clone());
+                changes.push(Change::Service((name.to_owned(), view)));
+            }
         }
         changes
     }

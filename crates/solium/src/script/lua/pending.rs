@@ -2,7 +2,7 @@
 //! the Lua state's app data for the length of the dispatch.
 
 use mlua::{Lua, Value};
-use smithay::utils::{Logical, Size};
+use solium_wm_protocol::mirror::Mirror;
 
 use crate::script::*;
 
@@ -42,7 +42,10 @@ pub(crate) struct Pending {
 pub(crate) struct Carried(pub(crate) Keep);
 
 /// A size as a script reads one, `{ w = ..., h = ... }`, or nil for none.
-pub(crate) fn size_table(lua: &Lua, size: Option<Size<i32, Logical>>) -> mlua::Result<Value> {
+pub(crate) fn size_table(
+    lua: &Lua,
+    size: Option<&solium_wm_protocol::Size>,
+) -> mlua::Result<Value> {
     let Some(size) = size else {
         return Ok(Value::Nil);
     };
@@ -52,22 +55,45 @@ pub(crate) fn size_table(lua: &Lua, size: Option<Size<i32, Logical>>) -> mlua::R
     Ok(Value::Table(table))
 }
 
-pub(crate) fn snapshot(lua: &Lua) -> mlua::Result<Snapshot> {
-    Ok(lua
-        .app_data_ref::<Snapshot>()
-        .map(|snapshot| snapshot.clone())
-        .unwrap_or_default())
+/// The desktop as this window manager's mirror has it: the windows, the
+/// monitors and the rest the compositor told it, as the protocol's rows.
+pub(crate) fn mirror(lua: &Lua) -> Mirror {
+    lua.app_data_ref::<Mirror>()
+        .map(|mirror| mirror.clone())
+        .unwrap_or_default()
 }
 
-/// The window with the keyboard in this dispatch's snapshot, if any.
+/// The window with the keyboard, as the mirror has it.
 pub(crate) fn focused_id(lua: &Lua) -> Option<u64> {
-    lua.app_data_ref::<Snapshot>().and_then(|snapshot| {
-        snapshot
-            .windows
-            .iter()
-            .find(|window| window.focused)
-            .map(|window| window.id)
-    })
+    lua.app_data_ref::<Mirror>()
+        .and_then(|mirror| mirror.focused().map(|window| window.id))
+}
+
+/// Who answers a question only the compositor can: in the same process,
+/// the compositor's own predicates over its snapshot; across a socket, a
+/// query and its reply.
+pub(crate) trait Ask {
+    fn ask(&self, query: solium_wm_protocol::Query) -> Option<solium_wm_protocol::Reply>;
+}
+
+/// The [`Ask`] a handler's questions go to, in the Lua state's app data
+/// while it runs.
+pub(crate) struct Asker(pub(crate) Box<dyn Ask>);
+
+impl std::fmt::Debug for Asker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Asker")
+    }
+}
+
+/// Ask the compositor, or `None` when there is nobody to ask: outside a
+/// dispatch.
+pub(crate) fn ask(
+    lua: &Lua,
+    query: solium_wm_protocol::Query,
+) -> Option<solium_wm_protocol::Reply> {
+    lua.app_data_ref::<Asker>()
+        .and_then(|asker| asker.0.ask(query))
 }
 
 impl Pending {

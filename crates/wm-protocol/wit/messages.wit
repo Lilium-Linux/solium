@@ -40,9 +40,10 @@ interface messages {
         text-field(option<text-field>),
         problems(list<problem>),
         locked(bool),
-        /// A session service's view (`notifications`, `audio`, `tray`,
-        /// `media`, `apps`), as JSON text.
-        service(tuple<string, string>),
+        /// A view of a session service, or of the installed applications:
+        /// `notifications`, `audio`, `tray`, `media` and `apps`, each a
+        /// document of the rows the service has.
+        service(tuple<string, doc>),
     }
 
     /// Why the keyboard moved.
@@ -172,12 +173,28 @@ interface messages {
         commands: list<command>,
     }
 
+    /// A question only the compositor can answer, asked by a window
+    /// manager in the middle of a batch, and answered before anything else.
+    variant query {
+        /// The topmost window drawn at a point, as the pointer finds it,
+        /// passing over the one named.
+        window-at(tuple<f64, f64, option<u64>>),
+    }
+
+    variant reply {
+        window(option<u64>),
+    }
+
     variant message {
         hello(hello),
         hello-answer(hello-answer),
         batch(batch),
         answer(answer),
         submit(list<command>),
+        /// A question, and its serial.
+        query(tuple<u64, query>),
+        /// The answer to the query of that serial.
+        reply(tuple<u64, reply>),
         /// Either side is closing the connection, and says why.
         goodbye(string),
     }

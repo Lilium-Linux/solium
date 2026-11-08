@@ -4,7 +4,5 @@
 //! for, converted to the compositor's commands.
 
 pub(crate) mod convert;
-#[cfg(test)]
 pub(crate) mod diff;
-#[cfg(test)]
 pub(crate) mod rows;
