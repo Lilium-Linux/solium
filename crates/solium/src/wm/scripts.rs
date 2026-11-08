@@ -6,8 +6,12 @@ use std::path::Path;
 use anyhow::Result;
 use solium_wm_protocol as wire;
 
-use crate::script::lua::Host;
+use std::rc::Rc;
+
+use crate::script::lua::{Ask, Host};
 use crate::script::*;
+use crate::wm::events::Answers;
+use crate::wm::stores::StoreReads;
 
 /// The window manager, as the compositor talks to it: in this process for
 /// now, the Lua host.
@@ -29,24 +33,35 @@ pub(crate) struct Scripts {
     /// What the window manager last declared: its bindings, which the key
     /// filter asks about on every key, and what `--check` reports.
     pub(crate) declared: wire::Declarations,
+    /// The store files read for the window manager.
+    pub(crate) stores: Rc<StoreReads>,
+    /// The stores read as it loaded, handed over with [`Self::startup`].
+    loaded_stores: Vec<Command>,
 }
 
 impl Scripts {
     /// Load the configuration, cold.
     pub(crate) fn load(config: &Path) -> Result<Self> {
-        let (host, loaded) = Host::load(config, false)?;
-        Ok(Self::loaded(host, loaded))
+        Self::load_reading(config, StoreReads::default())
     }
 
     /// Load the configuration for `solium --check`: as [`Self::load`] does,
     /// except that nothing of the user's is changed, so a store's broken
     /// file stays where it is and is said in [`Self::check_notes`] (#473).
     pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
-        let (host, loaded) = Host::load(config, true)?;
-        Ok(Self::loaded(host, loaded))
+        Self::load_reading(config, StoreReads::checking())
     }
 
-    fn loaded(host: Host, loaded: wire::Answer) -> Self {
+    fn load_reading(config: &Path, stores: StoreReads) -> Result<Self> {
+        let stores = Rc::new(stores);
+        let (host, loaded) = Host::load(
+            config,
+            Box::new(Answers {
+                snapshot: None,
+                stores: Rc::clone(&stores),
+            }),
+        )?;
+        let loaded_stores = stores.take_read();
         let mut scripts = Self {
             host,
             told: crate::wm::diff::Told::new(),
@@ -65,10 +80,21 @@ impl Scripts {
                 unknown: Vec::new(),
                 notes: Vec::new(),
             },
+            stores,
+            loaded_stores,
         };
         scripts.declarations_in(&loaded);
         scripts.loaded = loaded;
-        scripts
+        Ok(scripts)
+    }
+
+    /// Who answers the window manager's questions: the compositor, over
+    /// `snapshot` when a dispatch has one.
+    pub(crate) fn answers(&self, snapshot: Option<Snapshot>) -> Box<dyn Ask> {
+        Box::new(Answers {
+            snapshot,
+            stores: Rc::clone(&self.stores),
+        })
     }
 
     /// Load the configuration again, the window manager carrying what it
@@ -76,7 +102,9 @@ impl Scripts {
     /// new one asked for. One that fails to load leaves everything as it
     /// was.
     pub(crate) fn reload(&mut self, config: &Path) -> Result<()> {
-        let loaded = self.host.reload(config)?;
+        let answers = self.answers(None);
+        let loaded = self.host.reload(config, answers)?;
+        self.loaded_stores = self.stores.take_read();
         self.declared = wire::Declarations {
             bindings: Vec::new(),
             unbound: Vec::new(),
@@ -117,7 +145,11 @@ impl Scripts {
         if std::mem::replace(&mut self.started, true) {
             return Outcome::default();
         }
-        crate::wm::events::outcome_of(self.loaded.clone())
+        let mut outcome = crate::wm::events::outcome_of(self.loaded.clone());
+        outcome
+            .commands
+            .splice(0..0, std::mem::take(&mut self.loaded_stores));
+        outcome
     }
 
     /// Keep what an answer declares: the key filter and `--check` ask
@@ -249,6 +281,8 @@ impl Scripts {
     /// What a check found that a session would act on, such as a store's
     /// broken file, left where it is.
     pub(crate) fn check_notes(&self) -> Vec<String> {
-        self.declared.notes.clone()
+        let mut notes = self.declared.notes.clone();
+        notes.extend(self.stores.notes());
+        notes
     }
 }

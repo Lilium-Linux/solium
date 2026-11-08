@@ -26,6 +26,7 @@
 pub mod combo;
 pub mod frame;
 pub mod mirror;
+pub mod store;
 mod wire;
 
 pub use wire::{DecodeError, Input, Wire};
@@ -210,7 +211,7 @@ mod tests {
         });
         let answer = 3; // `message`'s fourth case
         let unplace = 13; // `command`'s fourteenth case
-        let quit = 53; // `command`'s last case
+        let quit = 52; // `command`'s last case
         assert_eq!(
             message.to_bytes(),
             [answer, 0xac, 0x02, 1, 2, unplace, 5, quit, 0, 0],

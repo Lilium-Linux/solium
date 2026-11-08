@@ -349,7 +349,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             // finds a window as the pointer does.
             match ask(lua, solium_wm_protocol::Query::WindowAt((x, y, skip))) {
                 Some(solium_wm_protocol::Reply::Window(id)) => Ok(id),
-                None => Ok(None),
+                _ => Ok(None),
             }
         })?,
     )?;

@@ -129,7 +129,6 @@ pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
         | C::Watch(_)
         | C::WatchCancel(_)
         | C::Store(_)
-        | C::StoreLoaded(_)
         | C::Notify(_)
         // Over a lock, it changes nothing.
         | C::LockNow
@@ -349,7 +348,6 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             name,
             value: json(&text)?,
         },
-        W::StoreLoaded((name, text)) => Command::StoreLoaded { name, text },
         W::Notify(notify) => {
             use crate::services::notifications::model::Urgency;
             Command::Notify(crate::services::notifications::Own {

@@ -39,11 +39,10 @@ pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
 
 impl Host {
     /// Load the configuration and everything it pulls in, cold, and answer
-    /// with what its top level asked for and declared. For `--check`
-    /// (`checking`), nothing of the user's is changed: a store's broken file
-    /// stays where it is and is said in the declarations' notes (#473).
-    pub(crate) fn load(config: &Path, checking: bool) -> Result<(Self, Answer)> {
-        let (lua, loaded) = Self::load_as(config, Keep::new(), checking)?;
+    /// with what its top level asked for and declared; what it asks of the
+    /// compositor as it loads goes to `ask`.
+    pub(crate) fn load(config: &Path, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
+        let (lua, loaded) = Self::load_as(config, Keep::new(), ask)?;
         Ok((
             Self {
                 lua,
@@ -78,8 +77,8 @@ impl Host {
     /// alternative is every script inventing its own answer, which is what
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
-    pub(crate) fn reload(&mut self, config: &Path) -> Result<Answer> {
-        let (lua, loaded) = Self::load_as(config, self.kept(), false)?;
+    pub(crate) fn reload(&mut self, config: &Path, ask: Box<dyn Ask>) -> Result<Answer> {
+        let (lua, loaded) = Self::load_as(config, self.kept(), ask)?;
         self.lua = lua;
         Ok(loaded)
     }
@@ -122,13 +121,12 @@ impl Host {
         stores_of(&self.lua)
     }
 
-    /// Run the configuration in a new Lua state, handed `carried`, or for
-    /// `--check` (`checking`): the state, and the answer its top level made.
-    fn load_as(config: &Path, carried: Keep, checking: bool) -> Result<(Lua, Answer)> {
+    /// Run the configuration in a new Lua state, handed `carried`, its
+    /// questions going to `ask`: the state, and the answer its top level
+    /// made.
+    fn load_as(config: &Path, carried: Keep, ask: Box<dyn Ask>) -> Result<(Lua, Answer)> {
         let lua = Lua::new();
-        if checking {
-            lua.set_app_data(CheckOnly::default());
-        }
+        lua.set_app_data(Asker(ask));
         lua.set_app_data(Pending::default());
         lua.set_app_data(StoresSent::default());
         lua.set_app_data(Carried(carried));
@@ -274,6 +272,7 @@ impl Host {
             .exec()
             .map_err(failed("running the configuration"))?;
 
+        lua.remove_app_data::<Asker>();
         // The load's answer: what the top level asked for, and the
         // declarations whole, whether or not anything was declared.
         let pending = lua.remove_app_data::<Pending>().unwrap_or_default();
@@ -302,13 +301,9 @@ impl Host {
 }
 
 /// The stores as they would be saved: each `sol.store` table as the plain
-/// data it holds, by name. Nothing in a check, which saves nothing.
+/// data it holds, by name.
 pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, crate::json::Json)> {
     let mut out = Vec::new();
-    // A check saves nothing.
-    if lua.app_data_ref::<CheckOnly>().is_some() {
-        return out;
-    }
     if let Ok(stores) = lua
         .globals()
         .get::<Table>("sol")

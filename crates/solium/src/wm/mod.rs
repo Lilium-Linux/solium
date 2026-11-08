@@ -8,5 +8,6 @@ pub(crate) mod diff;
 pub(crate) mod events;
 pub(crate) mod rows;
 mod scripts;
+pub(crate) mod stores;
 
 pub(crate) use scripts::Scripts;

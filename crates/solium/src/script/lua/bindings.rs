@@ -255,15 +255,11 @@ pub(crate) fn declarations(lua: &Lua) -> solium_wm_protocol::Declarations {
         .collect();
     unknown.sort_by(|left, right| left.key.cmp(&right.key));
 
-    let notes = lua
-        .app_data_ref::<CheckOnly>()
-        .map(|check| check.0.clone())
-        .unwrap_or_default();
-
     solium_wm_protocol::Declarations {
         bindings: bound,
         unbound,
         unknown,
-        notes,
+        // The Lua host has nothing of its own for a check to say.
+        notes: Vec::new(),
     }
 }

@@ -31,12 +31,6 @@ impl Default for FileSettings {
     }
 }
 
-/// Set in a Lua state `solium --check` loads (#473): `sol.store` then
-/// reads its file and changes nothing, and collects here what it would
-/// have set aside, for the check to say. Present means checking.
-#[derive(Debug, Default)]
-pub(crate) struct CheckOnly(pub(crate) Vec<String>);
-
 /// The key paths of stores already named in the log for holding what
 /// cannot be saved, so each is named once (#473).
 #[derive(Debug, Default)]

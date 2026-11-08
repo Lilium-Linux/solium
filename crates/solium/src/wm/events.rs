@@ -186,7 +186,8 @@ impl Scripts {
             changes: Vec::new(),
             events: vec![wire::Event::NotifyForget(tokens.to_vec())],
         };
-        let _ = self.host.handle(batch, Box::new(NoAnswers));
+        let answers = self.answers(None);
+        let _ = self.host.handle(batch, answers);
     }
 
     /// One of the configuration's own notifications was acted on.
@@ -406,10 +407,13 @@ impl Scripts {
             changes: self.told.changes(&snapshot),
             events: vec![event],
         };
-        let answer = self.host.handle(batch, Box::new(Answers(snapshot)));
+        let answers = self.answers(Some(snapshot));
+        let answer = self.host.handle(batch, answers);
         self.declarations_in(&answer);
         let decision = answer.decision.clone();
-        (decision, outcome_of(answer))
+        let mut outcome = outcome_of(answer);
+        outcome.commands.splice(0..0, self.stores.take_read());
+        (decision, outcome)
     }
 }
 
@@ -439,8 +443,23 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
 }
 
 /// The compositor's answers, in the same process: its own predicates over
-/// the snapshot a dispatch was handed.
-pub(crate) struct Answers(pub(crate) Snapshot);
+/// the snapshot a dispatch was handed, when there is one, and the stores'
+/// files.
+pub(crate) struct Answers {
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) stores: std::rc::Rc<crate::wm::stores::StoreReads>,
+}
+
+impl Answers {
+    /// Answers over `snapshot`, with stores read for nobody in particular.
+    #[cfg(test)]
+    pub(crate) fn over(snapshot: Snapshot) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            stores: std::rc::Rc::default(),
+        }
+    }
+}
 
 impl Ask for Answers {
     fn ask(&self, query: wire::Query) -> Option<wire::Reply> {
@@ -452,9 +471,10 @@ impl Ask for Answers {
             // window whose client has gone, and a minimized window is under
             // no point, even while a present on it plays out (#30).
             wire::Query::WindowAt((x, y, skip)) => {
+                let snapshot = self.snapshot.as_ref()?;
                 let point = smithay::utils::Point::<f64, smithay::utils::Logical>::from((x, y));
                 Some(wire::Reply::Window(
-                    self.0
+                    snapshot
                         .windows
                         .iter()
                         .find(|window| {
@@ -465,21 +485,15 @@ impl Ask for Answers {
                                     false,
                                     window.drawn.frame,
                                     point,
-                                    &self.0.screens,
+                                    &snapshot.screens,
                                 )
                         })
                         .map(|window| window.id),
                 ))
             }
+            wire::Query::Store((name, max)) => {
+                Some(wire::Reply::Store(self.stores.read(&name, max)))
+            }
         }
-    }
-}
-
-/// Nobody to ask: a batch the compositor sends with no snapshot behind it.
-struct NoAnswers;
-
-impl Ask for NoAnswers {
-    fn ask(&self, _: wire::Query) -> Option<wire::Reply> {
-        None
     }
 }

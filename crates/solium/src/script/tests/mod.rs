@@ -586,7 +586,7 @@ impl Scripts {
         self.host
             .lua
             .set_app_data(crate::script::lua::Asker(Box::new(
-                crate::wm::events::Answers(snapshot),
+                crate::wm::events::Answers::over(snapshot),
             )));
         self.evaluate(chunk)
     }

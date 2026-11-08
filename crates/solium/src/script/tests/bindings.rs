@@ -1106,7 +1106,7 @@ fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
             changes: Vec::new(),
             events: vec![solium_wm_protocol::Event::Relayout],
         },
-        Box::new(crate::wm::events::Answers(empty_snapshot())),
+        Box::new(crate::wm::events::Answers::over(empty_snapshot())),
     );
     assert!(
         !answer

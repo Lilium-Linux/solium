@@ -161,14 +161,7 @@ pub(crate) fn state_dir() -> Option<PathBuf> {
     }
 }
 
-/// Whether `name` may name a store: letters, digits, `_` and `-`, so it is
-/// always one file in the state directory.
-pub(crate) fn store_name_ok(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
+pub(crate) use solium_wm_protocol::store::name_ok as store_name_ok;
 
 /// The file store `name` is kept in.
 pub(crate) fn store_path(name: &str) -> Option<PathBuf> {

@@ -182,10 +182,16 @@ interface messages {
         /// The topmost window drawn at a point, as the pointer finds it,
         /// passing over the one named.
         window-at(tuple<f64, f64, option<u64>>),
+        /// A store's saved document, read from its file, at most the bytes
+        /// given. The compositor keeps the files: one that cannot be used
+        /// is set aside as `<name>.json.broken`, and none is the answer.
+        store(tuple<string, u64>),
     }
 
     variant reply {
         window(option<u64>),
+        /// The store's document as JSON text, or none.
+        store(option<string>),
     }
 
     variant message {

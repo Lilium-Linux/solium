@@ -219,14 +219,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `sol.store(name, defaults)` (#473): `sol.keep`'s table, also saved to
-    // `$XDG_STATE_HOME/solium/state/<name>.json`. Loaded here, at the call,
-    // because the configuration needs its values at once and the file is
-    // small and local; saved by the compositor. See `crate::files`.
+    // `sol.store(name, defaults)` (#473): `sol.keep`'s table, also saved by
+    // the compositor to `$XDG_STATE_HOME/solium/state/<name>.json`. Asked
+    // for here, at the call, because the configuration needs its values at
+    // once; the compositor reads the file, and sets aside one it cannot use.
     sol.set(
         "store",
         lua.create_function(|lua, (name, defaults): (String, Option<Table>)| {
-            if !crate::files::store_name_ok(&name) {
+            if !solium_wm_protocol::store::name_ok(&name) {
                 return Err(mlua::Error::runtime(format!(
                     "sol.store: {name:?} is not a store's name, which is letters, digits, `_` \
                      and `-`"
@@ -242,7 +242,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 None => lua.create_table()?,
             };
             // Within one session the store a reload carried is the truth;
-            // the file is read the first time it is asked for.
+            // the file is asked for the first time the store is.
             let carried = lua
                 .app_data_ref::<Carried>()
                 .and_then(|carried| carried.0.stores.get(&name).cloned());
@@ -254,45 +254,20 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         .ok()
                         .flatten()
                         .map_or(crate::files::MAX_STORE, |settings| settings.store_max);
-                    match crate::files::read_store(&name, max) {
-                        crate::files::StoreFile::Missing => {
-                            tracing::info!(store = name, "no store file yet; starting from the defaults");
-                            None
-                        }
-                        crate::files::StoreFile::Found(loaded) => {
-                            let text = loaded.render();
-                            let name = name.clone();
-                            with_pending(lua, |pending| {
-                                pending.push(solium_wm_protocol::Command::StoreLoaded((
-                                    name.clone(),
-                                    text.clone(),
-                                )));
-                                if let Some(mut sent) = lua.app_data_mut::<StoresSent>() {
-                                    sent.0.insert(name, text);
-                                }
-                            })?;
-                            Some(loaded)
-                        }
-                        crate::files::StoreFile::Broken { path, why } => {
-                            tracing::warn!(store = name, path = %path.display(), why, "the store file cannot be used; starting from the defaults");
-                            // `--check` changes nothing of the user's: it
-                            // says so instead, and the session sets the
-                            // file aside. `check::tests::a_check_leaves_a_broken_store_file_as_it_was`.
-                            match lua.app_data_mut::<CheckOnly>() {
-                                Some(mut check) => {
-                                    check.0.push(format!(
-                                        "store `{name}`: {} is {why}; a session would start from the \
-                                         defaults and move it to {name}.json.broken",
-                                        path.display()
-                                    ));
-                                    drop(check);
-                                    undeclared(lua);
-                                }
-                                None => crate::files::set_aside(&name, &path),
-                            }
-                            None
+                    let saved =
+                        match ask(lua, solium_wm_protocol::Query::Store((name.clone(), max))) {
+                            Some(solium_wm_protocol::Reply::Store(saved)) => saved,
+                            _ => None,
+                        };
+                    let loaded = saved.as_deref().and_then(crate::json::Json::parse);
+                    if let Some(loaded) = &loaded {
+                        // What is already saved, so it is not sent back
+                        // unchanged.
+                        if let Some(mut sent) = lua.app_data_mut::<StoresSent>() {
+                            sent.0.insert(name.clone(), loaded.render());
                         }
                     }
+                    loaded
                 }
             };
             if let Some(found) = found {
