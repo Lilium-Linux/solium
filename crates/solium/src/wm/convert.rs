@@ -597,7 +597,7 @@ fn declaration(surface: wire::Surface) -> Result<crate::scripted::Declaration, S
 
 /// A motion's timing, or why it is none: a duration that is not a number
 /// of milliseconds of zero or more. `tests::a_motion_crosses_to_the_nanosecond`.
-fn animation(motion: &wire::Motion) -> Result<crate::script::AnimationSpec, String> {
+pub(crate) fn animation(motion: &wire::Motion) -> Result<crate::script::AnimationSpec, String> {
     // Read back to the nanosecond, rounded, so a duration that crossed as
     // milliseconds is the duration that was sent, not one a float's last
     // digit away from it.
@@ -704,7 +704,7 @@ fn warp(warp: wire::Warp) -> Result<crate::script::Warp, String> {
     })
 }
 
-fn focus_source(cause: wire::FocusCause) -> crate::script::FocusSource {
+pub(crate) fn focus_source(cause: wire::FocusCause) -> crate::script::FocusSource {
     use crate::script::FocusSource as F;
     match cause {
         wire::FocusCause::Binding => F::Binding,

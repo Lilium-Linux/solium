@@ -58,16 +58,6 @@ pub(crate) enum Stream {
     Stderr,
 }
 
-impl Stream {
-    /// As Lua is told it.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
-    }
-}
-
 /// How a child ended, for its `done`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Ended {

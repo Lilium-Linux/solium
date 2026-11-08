@@ -551,6 +551,7 @@ impl Scripts {
             lua,
             told: crate::wm::diff::Told::new(),
             mirror: solium_wm_protocol::mirror::Mirror::new(),
+            serial: 0,
         })
     }
 }

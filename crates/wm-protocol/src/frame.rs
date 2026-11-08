@@ -163,6 +163,8 @@ mod tests {
             serial: 7,
             handled: true,
             commands: vec![Command::Unplace(3), Command::Quit],
+            motion: None,
+            decision: None,
         });
         write(&mut ours, &answer).expect("written");
         let mut reader = Reader::default();

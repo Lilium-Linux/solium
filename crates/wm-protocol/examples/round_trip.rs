@@ -102,6 +102,8 @@ fn window_manager(path: &str) {
                     serial: batch.serial,
                     handled: true,
                     commands,
+                    motion: None,
+                    decision: None,
                 });
                 frame::write(&mut socket, &answer).expect("answers");
             }

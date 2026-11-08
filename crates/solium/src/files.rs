@@ -365,17 +365,6 @@ pub(crate) enum Kind {
     Removed,
 }
 
-impl Kind {
-    /// As Lua is told it.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Changed => "changed",
-            Self::Created => "created",
-            Self::Removed => "removed",
-        }
-    }
-}
-
 /// What [`Files::pump`] heard, for the configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Heard {

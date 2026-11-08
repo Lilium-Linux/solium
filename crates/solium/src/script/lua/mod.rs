@@ -32,4 +32,6 @@ pub(crate) struct Scripts {
     /// The desktop as the scripts know it: what `sol.windows()` and the
     /// other reads answer from.
     pub(crate) mirror: solium_wm_protocol::mirror::Mirror,
+    /// The last batch's serial.
+    pub(crate) serial: u64,
 }

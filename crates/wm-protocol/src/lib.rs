@@ -181,6 +181,11 @@ mod tests {
                     Command::Configure(("idle".to_owned(), vec![DocNode::Nil])),
                     Command::LockNow,
                 ],
+                motion: Some(Motion {
+                    duration_ms: 120.0,
+                    easing: Easing::Linear,
+                }),
+                decision: Some("{\"show\":false}".to_owned()),
             }),
             Message::Submit(vec![Command::Spawn(vec!["foot".to_owned()])]),
             Message::Goodbye("reloading".to_owned()),
@@ -199,14 +204,17 @@ mod tests {
             serial: 300,
             handled: true,
             commands: vec![Command::Unplace(5), Command::Quit],
+            motion: None,
+            decision: None,
         });
         let answer = 3; // `message`'s fourth case
         let unplace = 14; // `command`'s fifteenth case
         let quit = 53; // `command`'s last case
         assert_eq!(
             message.to_bytes(),
-            [answer, 0xac, 0x02, 1, 2, unplace, 5, quit],
-            "case, serial as LEB128, handled, two commands each a case and its payload"
+            [answer, 0xac, 0x02, 1, 2, unplace, 5, quit, 0, 0],
+            "case, serial as LEB128, handled, two commands each a case and its payload, no \
+             motion, no decision"
         );
     }
 

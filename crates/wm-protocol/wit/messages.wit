@@ -8,7 +8,7 @@
 /// window manager may also `submit` commands of its own whenever it likes.
 interface messages {
     use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc};
-    use commands.{command};
+    use commands.{command, focus-cause, motion};
 
     /// The first message, from the compositor: the protocol it speaks, and
     /// everything the window manager kept before it was restarted.
@@ -46,14 +46,6 @@ interface messages {
         service(tuple<string, doc>),
     }
 
-    /// Why the keyboard moved.
-    enum focus-source {
-        binding, direction, move, click, scroll, drop, touch, hover,
-        surface, open, activate, settle, script,
-    }
-
-    /// Where a drag or a resize is.
-    enum phase { start, motion, end }
 
     /// A program's output, a line at a time, and how it ended.
     variant run-heard {
@@ -70,6 +62,8 @@ interface messages {
         truncated: bool,
         stdout: list<u8>,
         stderr: list<u8>,
+        /// Why the program could not be run at all.
+        error: option<string>,
     }
 
     /// What a file read, write or watch came to.
@@ -103,7 +97,7 @@ interface messages {
         maximize(tuple<u64, bool>),
         click(tuple<f64, f64>),
         touch(touch-event),
-        focused(tuple<u64, focus-source, bool>),
+        focused(tuple<u64, focus-cause, bool>),
         keyboard-changed(string),
         lock-changed(string),
         text-input(string),
@@ -152,7 +146,8 @@ interface messages {
     /// A window being dragged or resized by the pointer.
     record pointer-move {
         id: u64,
-        phase: phase,
+        /// `start`, `motion` or `end`.
+        phase: string,
         x: f64,
         y: f64,
     }
@@ -171,6 +166,11 @@ interface messages {
         /// take goes to the client.
         handled: bool,
         commands: list<command>,
+        /// The motion the compositor's own move answering the batch takes,
+        /// a fullscreen's or a maximise's, when the window manager set one.
+        motion: option<motion>,
+        /// A notification's fate, as JSON text, when the batch asked for one.
+        decision: option<string>,
     }
 
     /// A question only the compositor can answer, asked by a window
