@@ -366,7 +366,7 @@
 ---@class sol.IdleOptions
 ---@field lock_after? number Seconds with nobody at the machine before the session is locked, as `sol.lock_now` locks it. Held off by the same inhibitors as the blank. 0 never does. Default 300.
 ---@field screens_off_after? number Seconds with nobody at the machine before every screen is turned off. 0 never does.
----@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
+---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw, and a frame held by a fifo barrier no refresh reaches is let go. 0 stops both.
 ---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
 
 ---Automatic reload (#223). A key left out, or one that is not the right

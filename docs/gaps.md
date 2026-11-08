@@ -52,7 +52,6 @@ screen share ([#47](https://github.com/Lilium-Linux/solium/issues/47)) and have 
 | HDR and color management | 10-bit output, HDR metadata, client color descriptions and a linear-light composition pipeline remain open. | [#46](https://github.com/Lilium-Linux/solium/issues/46), [#77](https://github.com/Lilium-Linux/solium/issues/77), [#248](https://github.com/Lilium-Linux/solium/issues/248), [#249](https://github.com/Lilium-Linux/solium/issues/249), [#250](https://github.com/Lilium-Linux/solium/issues/250), [#251](https://github.com/Lilium-Linux/solium/issues/251) |
 | Night light | Gamma-control is missing. | [#69](https://github.com/Lilium-Linux/solium/issues/69) |
 | Game presentation | Tearing control, fullscreen-only VRR policy and preserving direct scanout need further work and hardware checks. | [#37](https://github.com/Lilium-Linux/solium/issues/37), [#243](https://github.com/Lilium-Linux/solium/issues/243), [#244](https://github.com/Lilium-Linux/solium/issues/244) |
-| Client frame pacing | fifo and commit-timing are not implemented. | [#76](https://github.com/Lilium-Linux/solium/issues/76) |
 | VR and streaming | DRM leasing and game-streaming validation are separate open work. | [#247](https://github.com/Lilium-Linux/solium/issues/247), [#246](https://github.com/Lilium-Linux/solium/issues/246) |
 
 ## Window behavior and effects

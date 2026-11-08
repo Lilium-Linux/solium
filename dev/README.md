@@ -750,6 +750,15 @@ answer: the log line with `socket=` says which, and `dev/run-nested.sh` prints
 it. `wl-probe` exits non-zero if anything it asked for went unanswered, so it
 can be a gate.
 
+With `wp_fifo_manager_v1` and `wp_commit_timing_manager_v1` advertised (#76),
+the same run queues twelve frames at once with fifo barriers and expects every
+one presented, none discarded, and stamps one frame a quarter of a second
+ahead and expects it shown no earlier and less than 100 ms later. Nested, a
+presentation time is when the frame was handed to the host, so pacing on real
+monitors is the TTY's: `dev/fifo-tty.sh`, from a free TTY, runs those checks
+three times and `vkcube`, whose Mesa swapchain speaks both protocols, for ten
+seconds, and sums up what reached the screen.
+
 `WL_PROBE_DMABUF=1` binds version 4 of the DMA-BUF global and asks for both
 default and surface feedback. It checks the format table, tranche indices
 and main DRM device, so a format-only global cannot pass as usable feedback

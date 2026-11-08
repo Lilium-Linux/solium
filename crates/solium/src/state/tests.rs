@@ -3335,6 +3335,12 @@ mod real_client {
         /// #71: how a surface says what it contains -- a video, a game, a
         /// photo -- which only its client can say.
         content_types: Option<wp_content_type_manager_v1::WpContentTypeManagerV1>,
+        /// #76: how a client paces its own commits by the screen -- one shown
+        /// a refresh, and one not before a time.
+        fifo: Option<wayland_protocols::wp::fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1>,
+        commit_timing: Option<
+            wayland_protocols::wp::commit_timing::v1::client::wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
+        >,
         /// For a window that asks to be brought forward with a token, as
         /// an application launched with one does as it opens -- GTK, Qt
         /// and winit all do. A raw client that never sends it cannot see
@@ -3958,6 +3964,10 @@ mod real_client {
                 "wp_content_type_manager_v1" => {
                     state.content_types = Some(registry.bind(name, 1, qh, ()));
                 }
+                "wp_fifo_manager_v1" => state.fifo = Some(registry.bind(name, 1, qh, ())),
+                "wp_commit_timing_manager_v1" => {
+                    state.commit_timing = Some(registry.bind(name, 1, qh, ()));
+                }
                 "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
                     state.shortcuts = Some(registry.bind(name, 1, qh, ()));
                 }
@@ -4096,6 +4106,10 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore zxdg_importer_v2::ZxdgImporterV2);
     wayland_client::delegate_noop!(Client: ignore zxdg_imported_v2::ZxdgImportedV2);
     wayland_client::delegate_noop!(Client: ignore wp_content_type_manager_v1::WpContentTypeManagerV1);
+    wayland_client::delegate_noop!(Client: ignore wayland_protocols::wp::fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1);
+    wayland_client::delegate_noop!(Client: ignore wayland_protocols::wp::fifo::v1::client::wp_fifo_v1::WpFifoV1);
+    wayland_client::delegate_noop!(Client: ignore wayland_protocols::wp::commit_timing::v1::client::wp_commit_timing_manager_v1::WpCommitTimingManagerV1);
+    wayland_client::delegate_noop!(Client: ignore wayland_protocols::wp::commit_timing::v1::client::wp_commit_timer_v1::WpCommitTimerV1);
     wayland_client::delegate_noop!(Client: ignore wp_content_type_v1::WpContentTypeV1);
     wayland_client::delegate_noop!(
         Client: ignore zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1
@@ -26154,6 +26168,8 @@ sol.act("windows.unminimize", {{ id = {id} }}, told)"#
                     "idle.off_frame_interval = 0 still told it to draw"
                 );
             }
+
+            include!("tests/fifo.rs");
         }
 
         /// **Escape is the focused window's, except while the overview is

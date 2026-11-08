@@ -942,6 +942,9 @@ pub(crate) struct Solium {
 
     /// Acquire transactions and GPU-completion ownership for explicit buffers.
     pub(crate) explicit_sync: crate::explicit_sync::State,
+    /// `wp_fifo_v1` and `wp_commit_timing_v1`, and the commits they hold
+    /// that no refresh may reach (#76). See `fifo.rs`.
+    pub(crate) client_pacing: crate::fifo::State,
 
     /// Hardware buffer sharing: `zwp_linux_dmabuf_v1`.
     ///
@@ -1628,6 +1631,7 @@ impl Solium {
             redraw: true,
             animating: false,
             explicit_sync: crate::explicit_sync::State::default(),
+            client_pacing: crate::fifo::State::new(&display_handle),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             request: None,

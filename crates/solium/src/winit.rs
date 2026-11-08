@@ -921,6 +921,14 @@ pub(crate) fn run() -> Result<()> {
         // Cleared before drawing, not after: a client that commits while we are
         // rendering has damaged the *next* frame, not this one.
         state.redraw = false;
+        // And every commit applied by now is in the frame it draws (#76):
+        // `fifo::latch`. One window shows every monitor.
+        if wanted {
+            let at = crate::pacing::monotonic_now();
+            for output in state.space.outputs() {
+                crate::fifo::latch(output, at);
+            }
+        }
 
         // `SOLIUM_PACING`, and only over the part of the loop that draws. An
         // iteration that decided not to draw is not a frame that was slow --
@@ -1336,11 +1344,13 @@ pub(crate) fn run() -> Result<()> {
         // layer or lock surface is told only by its own monitor's refresh
         // (`a_layer_surface_is_not_told_to_draw_by_a_monitor_it_is_not_on`),
         // so with `SOLIUM_OUTPUTS=2` a bar on the second would never be told.
-        for lit in state
+        let lit: Vec<_> = state
             .space
             .outputs()
             .filter(|each| !state.power.is_off(each))
-        {
+            .cloned()
+            .collect();
+        for lit in &lit {
             state.send_frames_on(lit, wall, frame_interval(lit));
         }
         state.send_dark_frames(wall);
@@ -1390,6 +1400,9 @@ pub(crate) fn run() -> Result<()> {
         // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
         crate::runs::settle(&mut state);
         crate::timers::settle(&mut state);
+        // And the commits held by fifo and commit timing that no refresh
+        // reached (#76): `fifo.rs`.
+        crate::fifo::settle(&mut state);
         // What its reads, writes and watches came to, and its stores saved
         // when they changed (#473): `files.rs`.
         crate::files::settle(&mut state);
