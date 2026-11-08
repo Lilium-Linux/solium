@@ -827,3 +827,19 @@ pub(crate) struct Outcome {
     /// `tests::a_change_is_answered_with_the_motion_sol_animate_set`.
     pub(crate) motion: Option<AnimationSpec>,
 }
+
+impl AnimationSpec {
+    /// This, with whatever a call actually named.
+    pub(crate) const fn with(self, duration: Option<Duration>, easing: Option<Curve>) -> Self {
+        Self {
+            duration: match duration {
+                Some(duration) => duration,
+                None => self.duration,
+            },
+            easing: match easing {
+                Some(easing) => easing,
+                None => self.easing,
+            },
+        }
+    }
+}

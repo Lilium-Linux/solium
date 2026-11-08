@@ -3,7 +3,9 @@
 use mlua::{IntoLua, Lua, Table, Value};
 
 use crate::script::doc::{self, Doc};
-use crate::script::{Parentage, Rect};
+use crate::script::lua::*;
+use crate::script::*;
+use crate::script::{Kept, Parentage, Rect};
 
 /// A rectangle as a Lua table: `{ x, y, w, h }`.
 pub(crate) fn rect_table(rect: Rect, lua: &Lua) -> mlua::Result<Table> {
@@ -114,4 +116,86 @@ fn doc_at(value: &Value, depth: usize) -> mlua::Result<Doc> {
         }
         other => Doc::Other(other.type_name()),
     })
+}
+
+impl Kept {
+    /// Read a Lua value, or say why it cannot be kept.
+    ///
+    /// `where_it_is` is the path from the keep's name down to this value, so a
+    /// warning names the key someone can go and look at rather than saying
+    /// "something in your table".
+    pub(crate) fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
+        match value {
+            Value::Boolean(flag) => Some(Self::Bool(*flag)),
+            Value::Integer(number) => Some(Self::Int(*number)),
+            Value::Number(number) => Some(Self::Number(*number)),
+            Value::String(text) => text.to_str().ok().map(|text| Self::Text(text.to_owned())),
+            Value::Table(table) => {
+                if depth >= KEEP_DEPTH {
+                    tracing::warn!(
+                        key = where_it_is,
+                        depth = KEEP_DEPTH,
+                        "a kept table is deeper than the host will follow; this branch of it \
+                         will not survive the next reload"
+                    );
+                    return None;
+                }
+                let mut pairs = Vec::new();
+                for (key, value) in table.pairs::<Value, Value>().flatten() {
+                    let named = format!("{where_it_is}.{}", describe(&key));
+                    let (Some(key), Some(value)) = (
+                        Self::read(&key, depth + 1, &named),
+                        Self::read(&value, depth + 1, &named),
+                    ) else {
+                        continue;
+                    };
+                    pairs.push((key, value));
+                }
+                Some(Self::Table(pairs))
+            }
+            // A copy, so the running scripts are left as they were: see
+            // `Scripts::kept` for why reading the keep must not damage them,
+            // and `a_reload_leaves_a_tiled_desk_exactly_as_it_was`.
+            Value::UserData(held) if held.is::<TilingTree>() => held
+                .borrow::<TilingTree>()
+                .ok()
+                .map(|tree| Self::Tree(tree.0.clone())),
+            Value::UserData(held) if held.is::<Scrolling>() => held
+                .borrow::<Scrolling>()
+                .ok()
+                .map(|strip| Self::Strip(strip.0.clone())),
+            // `nil` is not a failure: a key that has been cleared is a key that
+            // is not there, and Lua's own iteration never yields one.
+            Value::Nil => None,
+            other => {
+                tracing::warn!(
+                    key = where_it_is,
+                    kind = other.type_name(),
+                    "only plain data and the layouts sol.layout makes survive a reload, and this \
+                     is neither; it will be missing from the keep when the configuration is read \
+                     again"
+                );
+                None
+            }
+        }
+    }
+
+    /// Build it again, in the Lua state that replaced the one it came from.
+    pub(crate) fn into_value(self, lua: &Lua) -> mlua::Result<Value> {
+        Ok(match self {
+            Self::Bool(flag) => Value::Boolean(flag),
+            Self::Int(number) => Value::Integer(number),
+            Self::Number(number) => Value::Number(number),
+            Self::Text(text) => Value::String(lua.create_string(&text)?),
+            Self::Table(pairs) => {
+                let table = lua.create_table()?;
+                for (key, value) in pairs {
+                    table.set(key.into_value(lua)?, value.into_value(lua)?)?;
+                }
+                Value::Table(table)
+            }
+            Self::Tree(tree) => Value::UserData(lua.create_userdata(TilingTree(tree))?),
+            Self::Strip(strip) => Value::UserData(lua.create_userdata(Scrolling(strip))?),
+        })
+    }
 }
