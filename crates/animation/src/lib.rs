@@ -20,6 +20,8 @@
 //! assert_eq!(move_window.progress(Duration::from_millis(200)), 1.0);
 //! ```
 
+pub mod mat4;
+
 use std::time::Duration;
 
 pub mod ffi;
