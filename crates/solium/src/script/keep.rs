@@ -3,7 +3,7 @@
 /// What a script handed the host to hold while the Lua state is replaced.
 ///
 /// Plain data and the layouts `sol.layout` makes, because those are the only
-/// things that can cross. A reload builds a whole new [`Lua`]; a table, a
+/// things that can cross. A reload builds a whole new Lua state; a table, a
 /// closure, an upvalue — every Lua value there is — dies with the old one. So
 /// what crosses is this, and it is rebuilt as a fresh value in the new state.
 ///

@@ -330,7 +330,7 @@ pub(crate) struct Snapshot {
     pub(crate) problems: Vec<ProblemRow>,
     /// Whether the session is locked. A binding run while it is -- one that
     /// asked to be, with `locked` -- may not act on windows; see
-    /// [`Command::reaches_past_the_lock`].
+    /// [`Command::reaches_past_the_lock`](crate::script::Command::reaches_past_the_lock).
     pub(crate) locked: bool,
     /// Notifications as the service holds them, for `sol.notifications()`
     /// (#346). Shared, not copied, from one snapshot to the next.
