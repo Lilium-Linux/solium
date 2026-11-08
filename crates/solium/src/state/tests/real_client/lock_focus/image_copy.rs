@@ -165,7 +165,10 @@ fn a_screen_share_waits_out_the_lock() {
     let stream = Stream::open(&mut session);
     let lock = session.lock();
     let _frame = stream.frame(&mut session, &stream.buffer);
-    assert!(queued_ext(&session), "a frame asked for while locked was not kept");
+    assert!(
+        queued_ext(&session),
+        "a frame asked for while locked was not kept"
+    );
     assert!(
         crate::screencopy::waits(&session.state, &session.state.pending_captures[0]),
         "a frame asked for while locked would be filled from the lock screen"
