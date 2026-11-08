@@ -94,6 +94,13 @@ impl Doc {
         }
     }
 
+    pub(crate) fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
     /// The name of its type, as a configuration's author would say it.
     pub(crate) fn type_name(&self) -> &'static str {
         match self {

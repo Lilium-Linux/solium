@@ -78,7 +78,13 @@ fn doc_at(value: &Value, depth: usize) -> mlua::Result<Doc> {
         Value::Boolean(on) => Doc::Bool(*on),
         Value::Integer(whole) => Doc::Int(*whole),
         Value::Number(fraction) => Doc::Num(*fraction),
-        Value::String(text) => Doc::Text(text.to_string_lossy()),
+        // A document's text is UTF-8, as a WIT string is; text that is not
+        // is named, so the setting it was written for says so and keeps its
+        // default.
+        Value::String(text) => match text.to_str() {
+            Ok(text) => Doc::Text(text.to_owned()),
+            Err(_) => Doc::Other("string that is not UTF-8"),
+        },
         Value::Table(table) => {
             if depth >= DOC_DEPTH {
                 return Err(mlua::Error::runtime(format!(
