@@ -110,18 +110,6 @@ pub(crate) enum Layer {
     Overlay,
 }
 
-impl Layer {
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "background" => Some(Self::Background),
-            "bottom" => Some(Self::Bottom),
-            "top" => Some(Self::Top),
-            "overlay" => Some(Self::Overlay),
-            _ => None,
-        }
-    }
-}
-
 /// Which monitors a surface is drawn on, and how big it is there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum On {

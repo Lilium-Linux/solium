@@ -173,50 +173,42 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
             };
 
+            use solium_wm_protocol as wire;
+            // As written: the compositor, which knows where scenes live, finds
+            // it, and names one that is not there.
             let scene: String = options.get("scene")?;
-            let Some(scene) = crate::scripted::find_scene(&scene) else {
-                // Named rather than ignored: a scene that is not there is a
-                // typo, and a surface that silently does not appear is the
-                // hardest kind of configuration mistake to find.
-                tracing::error!(surface = name, scene, "no such QML scene");
-                return Ok(Value::Nil);
-            };
 
             let layer = options
                 .get::<Option<String>>("layer")?
                 .as_deref()
-                .and_then(crate::scripted::Layer::parse)
-                .unwrap_or_default();
+                .and_then(layer_named)
+                .unwrap_or(wire::Layer::Background);
 
             let on = match options.get::<Value>("on")? {
                 Value::String(where_) => match where_.to_str()?.as_ref() {
-                    "primary" => crate::scripted::On::Primary,
-                    "every-monitor" => crate::scripted::On::EveryMonitor,
-                    monitor => crate::scripted::On::Monitor(monitor.to_owned()),
+                    "primary" => wire::Placement::Primary,
+                    "every-monitor" => wire::Placement::EveryMonitor,
+                    monitor => wire::Placement::Monitor(monitor.to_owned()),
                 },
                 Value::Table(rect) => match rect_from(&rect)? {
                     #[expect(
                         clippy::cast_possible_truncation,
                         reason = "a rect from a script is screen-sized"
                     )]
-                    Some(rect) => crate::scripted::On::Rect(smithay::utils::Rectangle::new(
-                        (rect.x.round() as i32, rect.y.round() as i32).into(),
-                        (
-                            (rect.w.round() as i32).max(1),
-                            (rect.h.round() as i32).max(1),
-                        )
-                            .into(),
+                    Some(rect) => wire::Placement::Rect((
+                        rect.x.round() as i32,
+                        rect.y.round() as i32,
+                        (rect.w.round() as i32).max(1),
+                        (rect.h.round() as i32).max(1),
                     )),
-                    None => crate::scripted::On::EveryMonitor,
+                    None => wire::Placement::EveryMonitor,
                 },
-                _ => crate::scripted::On::EveryMonitor,
+                _ => wire::Placement::EveryMonitor,
             };
 
             let properties = match options.get::<Option<Table>>("properties")? {
-                Some(table) => {
-                    crate::scripted::Properties::new(crate::json::Json::object_from_lua(&table)?)
-                }
-                None => crate::scripted::Properties::default(),
+                Some(table) => to_wire::object(&solium_json::Json::object_from_lua(&table)?),
+                None => to_wire::object(&std::collections::BTreeMap::new()),
             };
             let interactive = options.get::<Option<bool>>("interactive")?.unwrap_or(false);
             // `tests::sol_surface_reads_the_edges_it_reserves`,
@@ -232,43 +224,55 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         }
                         Ok(value)
                     };
-                    crate::scripted::Edges {
+                    wire::Insets {
                         top: edge("top")?,
                         right: edge("right")?,
                         bottom: edge("bottom")?,
                         left: edge("left")?,
                     }
                 }
-                None => crate::scripted::Edges::default(),
+                None => wire::Insets {
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                    left: 0,
+                },
             };
             // `tests::sol_surface_reads_outside_click_as_a_word_or_a_table`,
             // `tests::an_unknown_outside_click_is_refused`.
-            let outside = |word: &str| -> mlua::Result<crate::scripted::Outside> {
+            let outside = |word: &str| -> mlua::Result<wire::Outside> {
                 match word {
-                    "swallow" => Ok(crate::scripted::Outside::Swallow),
-                    "pass" => Ok(crate::scripted::Outside::Pass),
+                    "swallow" => Ok(wire::Outside::Swallow),
+                    "pass" => Ok(wire::Outside::Pass),
                     other => Err(mlua::Error::runtime(format!(
                         "outside_click is \"swallow\" or \"pass\", not {other:?}"
                     ))),
                 }
             };
             let outside_click = match options.get::<Value>("outside_click")? {
-                Value::Nil => crate::scripted::OutsideClick::default(),
-                Value::String(word) => crate::scripted::OutsideClick {
+                Value::Nil => wire::OutsideClick {
+                    default: wire::Outside::Swallow,
+                    named: Vec::new(),
+                },
+                Value::String(word) => wire::OutsideClick {
                     default: outside(&word.to_str()?)?,
-                    named: std::collections::BTreeMap::new(),
+                    named: Vec::new(),
                 },
                 Value::Table(table) => {
-                    let mut policy = crate::scripted::OutsideClick::default();
+                    let mut default = wire::Outside::Swallow;
+                    let mut named = std::collections::BTreeMap::new();
                     for pair in table.pairs::<String, String>() {
                         let (name, word) = pair?;
                         if name == "default" {
-                            policy.default = outside(&word)?;
+                            default = outside(&word)?;
                         } else {
-                            policy.named.insert(name, outside(&word)?);
+                            named.insert(name, outside(&word)?);
                         }
                     }
-                    policy
+                    wire::OutsideClick {
+                        default,
+                        named: named.into_iter().collect(),
+                    }
                 }
                 _ => {
                     return Err(mlua::Error::runtime(
@@ -281,11 +285,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             // `tests::an_unknown_keyboard_bindings_is_refused`.
             let keyboard = match options.get::<Option<Table>>("keyboard")? {
                 Some(keyboard) => match keyboard.get::<Value>("bindings")? {
-                    Value::Nil => crate::scripted::KeyPolicy::ExceptClaimed,
+                    Value::Nil => wire::KeyPolicy::ExceptClaimed,
                     Value::String(word) => match word.to_str()?.as_ref() {
-                        "except_claimed" => crate::scripted::KeyPolicy::ExceptClaimed,
-                        "all" => crate::scripted::KeyPolicy::All,
-                        "none" => crate::scripted::KeyPolicy::NoBindings,
+                        "except_claimed" => wire::KeyPolicy::ExceptClaimed,
+                        "all" => wire::KeyPolicy::All,
+                        "none" => wire::KeyPolicy::NoBindings,
                         other => {
                             return Err(mlua::Error::runtime(format!(
                                 "keyboard.bindings is \"except_claimed\", \"all\" or \"none\", not {other:?}"
@@ -298,23 +302,21 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         ));
                     }
                 },
-                None => crate::scripted::KeyPolicy::ExceptClaimed,
+                None => wire::KeyPolicy::ExceptClaimed,
             };
 
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::Surface(to_wire::surface(
-                    crate::scripted::Declaration {
-                        name: name.clone(),
-                        scene: scene.clone(),
-                        layer,
-                        on: on.clone(),
-                        properties: properties.clone(),
-                        interactive,
-                        reserve,
-                        outside_click: outside_click.clone(),
-                        keyboard,
-                    },
-                )));
+                pending.push(wire::Command::Surface(wire::Surface {
+                    name: name.clone(),
+                    scene,
+                    layer,
+                    on,
+                    properties,
+                    interactive,
+                    reserve,
+                    outside_click,
+                    keyboard,
+                }));
             })?;
             Ok(Value::Nil)
         })?,
@@ -757,4 +759,16 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// A surface's layer by its name, `None` for a name that is not one.
+pub(crate) fn layer_named(name: &str) -> Option<solium_wm_protocol::Layer> {
+    use solium_wm_protocol::Layer;
+    match name {
+        "background" => Some(Layer::Background),
+        "bottom" => Some(Layer::Bottom),
+        "top" => Some(Layer::Top),
+        "overlay" => Some(Layer::Overlay),
+        _ => None,
+    }
 }

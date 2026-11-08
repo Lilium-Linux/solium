@@ -308,7 +308,7 @@ fn every_event_listened_for_is_one_that_is_sent() {
 
 /// **Every layer a shipped surface names is one that exists.**
 ///
-/// `Layer::parse` answers `None` and `unwrap_or_default` turns that into
+/// `layer_named` answers `None` and `sol.surface` turns that into
 /// `Background`, with no warning anywhere. A bar that asked for `"Top"` and
 /// got the background is a bar drawn underneath every window on the screen,
 /// and the symptom is that the bar has vanished.
@@ -318,7 +318,7 @@ fn every_layer_named_is_one_that_exists() {
     assert!(!asked.is_empty(), "no layers found; the scan is broken");
     for (file, line, name) in asked {
         assert!(
-            crate::scripted::Layer::parse(&name).is_some(),
+            crate::script::lua::api::windows::layer_named(&name).is_some(),
             "{file}:{line} puts a surface on layer {name:?}, which is not one of \
              background, bottom, top, overlay"
         );

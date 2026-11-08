@@ -553,9 +553,20 @@ fn declaration(surface: wire::Surface) -> Result<crate::scripted::Declaration, S
         wire::Outside::Swallow => Outside::Swallow,
         wire::Outside::Pass => Outside::Pass,
     };
+    // Found where scenes live; one that is not there is named, since a
+    // surface that silently does not appear is the hardest kind of
+    // configuration mistake to find.
+    let scene = crate::scripted::find_scene(&surface.scene).ok_or_else(|| {
+        tracing::error!(
+            surface = surface.name,
+            scene = surface.scene,
+            "no such QML scene"
+        );
+        format!("no such QML scene: {}", surface.scene)
+    })?;
     Ok(Declaration {
         name: surface.name,
-        scene: surface.scene.into(),
+        scene,
         layer: match surface.layer {
             wire::Layer::Background => Layer::Background,
             wire::Layer::Bottom => Layer::Bottom,

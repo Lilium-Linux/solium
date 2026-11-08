@@ -98,55 +98,6 @@ pub(crate) fn press(press: Press) -> wire::Press {
     }
 }
 
-/// A scene surface's declaration.
-pub(crate) fn surface(declaration: crate::scripted::Declaration) -> wire::Surface {
-    use crate::scripted::{KeyPolicy, Layer, On, Outside};
-    let outside = |outside: Outside| match outside {
-        Outside::Swallow => wire::Outside::Swallow,
-        Outside::Pass => wire::Outside::Pass,
-    };
-    wire::Surface {
-        name: declaration.name,
-        scene: declaration.scene.to_string_lossy().into_owned(),
-        layer: match declaration.layer {
-            Layer::Background => wire::Layer::Background,
-            Layer::Bottom => wire::Layer::Bottom,
-            Layer::Top => wire::Layer::Top,
-            Layer::Overlay => wire::Layer::Overlay,
-        },
-        on: match declaration.on {
-            On::EveryMonitor => wire::Placement::EveryMonitor,
-            On::Primary => wire::Placement::Primary,
-            On::Monitor(name) => wire::Placement::Monitor(name),
-            On::Rect(rect) => {
-                wire::Placement::Rect((rect.loc.x, rect.loc.y, rect.size.w, rect.size.h))
-            }
-        },
-        properties: declaration.properties.render(),
-        interactive: declaration.interactive,
-        reserve: wire::Insets {
-            top: declaration.reserve.top,
-            right: declaration.reserve.right,
-            bottom: declaration.reserve.bottom,
-            left: declaration.reserve.left,
-        },
-        outside_click: wire::OutsideClick {
-            default: outside(declaration.outside_click.default),
-            named: declaration
-                .outside_click
-                .named
-                .into_iter()
-                .map(|(name, policy)| (name, outside(policy)))
-                .collect(),
-        },
-        keyboard: match declaration.keyboard {
-            KeyPolicy::ExceptClaimed => wire::KeyPolicy::ExceptClaimed,
-            KeyPolicy::All => wire::KeyPolicy::All,
-            KeyPolicy::NoBindings => wire::KeyPolicy::NoBindings,
-        },
-    }
-}
-
 /// An object's fields as JSON text.
 pub(crate) fn object(fields: &std::collections::BTreeMap<String, crate::json::Json>) -> String {
     crate::json::Json::Object(fields.clone()).render()

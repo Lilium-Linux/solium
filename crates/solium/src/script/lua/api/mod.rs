@@ -11,7 +11,7 @@ mod present;
 mod process;
 mod services;
 mod settings;
-mod windows;
+pub(crate) mod windows;
 
 /// Build the `sol` table.
 pub(crate) fn build_api(lua: &Lua) -> mlua::Result<Table> {
