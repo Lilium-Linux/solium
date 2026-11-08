@@ -470,19 +470,35 @@ impl Solium {
     /// `a_lock_surface_is_told_to_draw_while_locked`). On a monitor that is
     /// off they are `send_dark_frames`', like a window there
     /// (`a_layer_surface_on_a_dark_monitor_is_told_to_draw_once_a_second_and_not_every_frame`).
-    pub(crate) fn send_frames_on(&self, output: &Output, time: Duration, throttle: Duration) {
+    ///
+    /// The same refresh clears what each of them holds for it with
+    /// `wp_fifo_v1` and `wp_commit_timing_v1`: a fifo barrier set by a commit
+    /// the frame now on `output` shows, and a commit timed for no later than
+    /// the earliest the frame drawn next can be on it. A window's barrier only
+    /// by a monitor it is on, or by any while it is on none. See `fifo.rs`.
+    pub(crate) fn send_frames_on(&mut self, output: &Output, time: Duration, throttle: Duration) {
+        let shown = crate::fifo::shown(output, crate::pacing::monotonic_now(), throttle);
+        let latched = crate::fifo::latched(output);
+        let mut cleared = Vec::new();
         for window in self.space.elements() {
             if self.in_the_dark(window) {
                 continue;
             }
             Paced::Window(window).send(output, time, throttle, Some(output));
+            let on = self.space.outputs_for_element(window);
+            if on.is_empty() {
+                cleared.extend(crate::fifo::refresh_window(window, None, shown));
+            } else if on.contains(output) {
+                cleared.extend(crate::fifo::refresh_window(window, Some(latched), shown));
+            }
         }
-        if self.shown_only_in_the_dark([output]) {
-            return;
+        if !self.shown_only_in_the_dark([output]) {
+            self.drawn_only_on(output, |paced| {
+                paced.send(output, time, throttle, Some(output));
+                cleared.extend(paced.refresh(latched, shown));
+            });
         }
-        self.drawn_only_on(output, |paced| {
-            paced.send(output, time, throttle, Some(output));
-        });
+        crate::fifo::wake(self, cleared);
     }
 
     /// The windows a live resize holds, told they may draw again the moment a
@@ -591,6 +607,19 @@ impl Paced<'_> {
             Self::Layer(layer) => layer.send_frame(output, time, Some(throttle), primary),
             Self::Lock(surface) | Self::Cursor(surface) => {
                 send_frames_surface_tree(surface, output, time, Some(throttle), primary);
+            }
+        }
+    }
+
+    /// A refresh of a monitor last drawn at `latched` reached it: see
+    /// `fifo::refreshed`. The client to wake, if anything was cleared.
+    fn refresh(&self, latched: Duration, shown: Duration) -> Option<Client> {
+        let latched = Some(latched);
+        match self {
+            Self::Window(window) => crate::fifo::refresh_window(window, latched, shown),
+            Self::Layer(layer) => crate::fifo::refresh_layer(layer, latched, shown),
+            Self::Lock(surface) | Self::Cursor(surface) => {
+                crate::fifo::refresh_tree(surface, latched, shown)
             }
         }
     }

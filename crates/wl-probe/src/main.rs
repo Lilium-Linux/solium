@@ -24,6 +24,7 @@ use std::time::Duration;
 mod crop;
 mod dmabuf;
 mod outputs;
+mod pacing;
 mod pixels;
 mod toplevels;
 
@@ -121,6 +122,12 @@ struct Probe {
     lock_surfaces: Vec<(String, u32, u32)>,
     decorations: Option<ZxdgDecorationManagerV1>,
     presentation: Option<WpPresentation>,
+    /// `wp_fifo_manager_v1` and `wp_commit_timing_manager_v1`, for
+    /// `pacing.rs` (#76).
+    fifo: Option<wayland_protocols::wp::fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1>,
+    commit_timing: Option<
+        wayland_protocols::wp::commit_timing::v1::client::wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
+    >,
     /// What a capture told us to allocate, and how it went.
     shot: Option<Shot>,
     /// The bars, kept alive past the layer check.
@@ -438,6 +445,8 @@ fn main() {
         "ext_session_lock_manager_v1",
         "ext_idle_notifier_v1",
         "zwp_idle_inhibit_manager_v1",
+        "wp_fifo_manager_v1",
+        "wp_commit_timing_manager_v1",
     ] {
         let version = probe
             .globals
@@ -530,10 +539,18 @@ fn main() {
         }
     }
 
-    // Presentation feedback needs a window on screen to be about.
+    // Presentation feedback needs a window on screen to be about, and so do
+    // fifo and commit timing, which are checked by it: `pacing.rs`.
     if probe.has("wp_presentation") {
         match map_and_measure(&connection, &mut queue, &mut probe) {
-            Ok(()) => {}
+            Ok(()) => {
+                if probe.fifo.is_some()
+                    && probe.commit_timing.is_some()
+                    && let Err(reason) = pacing::check(&connection, &mut queue, &mut probe)
+                {
+                    failures.push(reason);
+                }
+            }
             Err(reason) => failures.push(reason),
         }
     }
@@ -2030,6 +2047,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
             "wp_presentation" => {
                 state.presentation = Some(registry.bind(name, version.min(1), handle, ()));
             }
+            "wp_fifo_manager_v1" => state.fifo = Some(registry.bind(name, 1, handle, ())),
+            "wp_commit_timing_manager_v1" => {
+                state.commit_timing = Some(registry.bind(name, 1, handle, ()));
+            }
             _ => {}
         }
     }
@@ -2154,6 +2175,10 @@ impl Dispatch<ExtIdleNotificationV1, ()> for Probe {
     }
 }
 delegate_noop!(Probe: ignore WlSeat);
+delegate_noop!(Probe: ignore wayland_protocols::wp::fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1);
+delegate_noop!(Probe: ignore wayland_protocols::wp::fifo::v1::client::wp_fifo_v1::WpFifoV1);
+delegate_noop!(Probe: ignore wayland_protocols::wp::commit_timing::v1::client::wp_commit_timing_manager_v1::WpCommitTimingManagerV1);
+delegate_noop!(Probe: ignore wayland_protocols::wp::commit_timing::v1::client::wp_commit_timer_v1::WpCommitTimerV1);
 
 impl Dispatch<WlKeyboard, ()> for Probe {
     fn event(

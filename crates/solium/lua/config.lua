@@ -649,6 +649,11 @@ local defaults = {
         -- still told it may draw. Throttled rather than stopped: a program
         -- that waits for that inside its swap would otherwise stop dead for
         -- as long as the screen is dark. 0 stops it, which is what sway does.
+        --
+        -- The same wait lets go of a frame a program queued behind a fifo
+        -- barrier (`wp_fifo_v1`, a Vulkan swapchain in FIFO mode) that no
+        -- refresh has reached: one on a dark screen, or hidden. 0 holds it
+        -- until a refresh does.
         off_frame_interval = 1000,
 
         -- Answer the other way programs ask for the screens to stay on:

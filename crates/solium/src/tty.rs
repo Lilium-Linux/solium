@@ -681,6 +681,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
                 screen.cadence.flipped(
                     flip.map_or_else(crate::pacing::monotonic_now, |flip| flip.at),
                 );
+                // And the phase a timed commit is let go on (#76): only the
+                // kernel's own flip time, never a guess at it.
+                if let Some(flip) = flip {
+                    crate::fifo::flipped(&screen.output, flip.at);
+                }
                 state.send_frames();
                 // `owed` as well as the usual two: this screen may have been
                 // skipped while it was busy, and nothing else is going to ask
@@ -919,6 +924,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
             crate::runs::settle(&mut state.solium);
             crate::timers::settle(&mut state.solium);
+            // And the commits held by fifo and commit timing that no refresh
+            // reached (#76): `fifo.rs`.
+            crate::fifo::settle(&mut state.solium);
             // What its reads, writes and watches came to, and its stores
             // saved when they changed (#473): `files.rs`.
             crate::files::settle(&mut state.solium);
@@ -1757,6 +1765,11 @@ impl State {
                 }
                 continue;
             };
+            // Every commit applied by now is in what this pass draws here,
+            // whatever step it takes (#76): `fifo::latch`.
+            if let Some(screen) = self.screens.get(index) {
+                crate::fifo::latch(&screen.output, ready_at);
+            }
             match step {
                 Step::Draw => {}
                 Step::Rest => {

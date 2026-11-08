@@ -9,6 +9,7 @@ use super::*;
 impl CompositorHandler for Solium {
     fn new_surface(&mut self, surface: &WlSurface) {
         self.explicit_sync.surface(surface);
+        crate::fifo::surface(surface);
     }
 
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -29,6 +30,8 @@ impl CompositorHandler for Solium {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // When, for which refresh may clear the fifo barrier it sets (#76).
+        crate::fifo::applied(surface);
         // Before the buffer is taken below: whether this commit gives a new
         // one to a surface a window that went is still drawn from.
         self.let_go_of_reused(surface);

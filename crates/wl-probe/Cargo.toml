@@ -21,6 +21,9 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 # and whose work area its exclusive zone comes out of -- is exactly the kind of
 # claim that cannot be checked from inside the compositor.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# CLOCK_MONOTONIC, which commit timing's timestamps are on and `std` does not
+# expose (#76). Already in the lockfile, at this version, through smithay.
+rustix = { version = "1", features = ["time"] }
 
 # Not the workspace lints. Those deny `unwrap`, `expect` and `panic` because a
 # compositor crash takes the session with it — there is no supervisor and

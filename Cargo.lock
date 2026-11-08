@@ -3135,6 +3135,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wl-probe"
 version = "0.0.0"
 dependencies = [
+ "rustix 1.1.6",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
