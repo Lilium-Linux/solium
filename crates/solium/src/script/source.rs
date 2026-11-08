@@ -19,6 +19,23 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("settings/idle.rs", include_str!("settings/idle.rs")),
     ("settings/input.rs", include_str!("settings/input.rs")),
     ("settings/lock.rs", include_str!("settings/lock.rs")),
+    ("settings/reload.rs", include_str!("settings/reload.rs")),
+    (
+        "settings/layer_shell.rs",
+        include_str!("settings/layer_shell.rs"),
+    ),
+    (
+        "settings/toplevels.rs",
+        include_str!("settings/toplevels.rs"),
+    ),
+    ("settings/x11.rs", include_str!("settings/x11.rs")),
+    ("settings/session.rs", include_str!("settings/session.rs")),
+    ("settings/run.rs", include_str!("settings/run.rs")),
+    ("settings/files.rs", include_str!("settings/files.rs")),
+    (
+        "settings/client_sizes.rs",
+        include_str!("settings/client_sizes.rs"),
+    ),
     ("settings/mod.rs", include_str!("settings/mod.rs")),
     ("settings/read.rs", include_str!("settings/read.rs")),
     ("source.rs", include_str!("source.rs")),

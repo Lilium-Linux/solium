@@ -94,6 +94,15 @@ impl Doc {
         }
     }
 
+    /// An integer of zero or more, as Lua's `as_u64` reads one: a float,
+    /// even a whole one, is not.
+    pub(crate) fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Int(whole) => u64::try_from(*whole).ok(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(text),

@@ -3474,28 +3474,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "auto_reload",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut settings = crate::autoreload::Settings::default();
-            if let Some(options) = options {
-                match options.get::<Value>("automatic") {
-                    Ok(Value::Boolean(on)) => settings.automatic = on,
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(other) => tracing::warn!(
-                        value = describe(&other),
-                        "reload.automatic is true or false; keeping the default, true"
-                    ),
-                }
-                match options.get::<Value>("quiet_ms") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|amount| *amount >= 0.0) {
-                        Some(amount) => settings.quiet_ms = amount as u64,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "reload.quiet_ms is a number of milliseconds, zero or more; keeping \
-                             the default"
-                        ),
-                    },
-                }
-            }
+            let settings = settings::reload::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::AutoReload(settings));
             })
@@ -3567,46 +3546,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "layer_shell",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut settings = crate::layer::Settings::default();
-            if let Some(options) = options {
-                match options.get::<Value>("input_below") {
-                    Ok(Value::Boolean(true)) | Ok(Value::Nil) | Err(_) => {}
-                    Ok(Value::Boolean(false)) => {
-                        settings.input_below = crate::layer::InputBelow::Nothing;
-                    }
-                    Ok(Value::Table(list)) => {
-                        let mut names = Vec::new();
-                        let mut every_one_a_string = true;
-                        for value in list.sequence_values::<Value>() {
-                            match value {
-                                Ok(Value::String(name)) => match name.to_str() {
-                                    Ok(name) => {
-                                        names.push(crate::effect::rules::Glob::parse(&name));
-                                    }
-                                    Err(_) => every_one_a_string = false,
-                                },
-                                _ => every_one_a_string = false,
-                            }
-                            if !every_one_a_string {
-                                break;
-                            }
-                        }
-                        if every_one_a_string {
-                            settings.input_below = crate::layer::InputBelow::Named(names);
-                        } else {
-                            tracing::warn!(
-                                "layer_shell.input_below is true, false or a list of \
-                                 namespaces; every surface takes input"
-                            );
-                        }
-                    }
-                    Ok(other) => tracing::warn!(
-                        value = describe(&other),
-                        "layer_shell.input_below is true, false or a list of namespaces; \
-                         every surface takes input"
-                    ),
-                }
-            }
+            let settings = settings::layer_shell::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::LayerShell(settings));
             })
@@ -3645,42 +3585,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "toplevels",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut settings = crate::toplevels::Settings::default();
-            if let Some(options) = options {
-                for (key, slot) in [
-                    ("list", &mut settings.list),
-                    ("manage", &mut settings.manage),
-                ] {
-                    match options.get::<Value>(key) {
-                        Ok(Value::Boolean(on)) => *slot = on,
-                        Ok(Value::Nil) | Err(_) => {}
-                        Ok(other) => tracing::warn!(
-                            key,
-                            value = describe(&other),
-                            "toplevels: true or false; keeping it offered"
-                        ),
-                    }
-                }
-                match options.get::<Value>("capture") {
-                    Ok(Value::Boolean(false)) => {
-                        settings.capture = crate::toplevels::WindowCapture::Off;
-                    }
-                    Ok(Value::String(name)) => {
-                        match crate::toplevels::WindowCapture::named(&name.to_string_lossy()) {
-                            Some(capture) => settings.capture = capture,
-                            None => tracing::warn!(
-                                value = %name.to_string_lossy(),
-                                "toplevels.capture: \"client\", \"pane\" or false; keeping \"client\""
-                            ),
-                        }
-                    }
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(other) => tracing::warn!(
-                        value = describe(&other),
-                        "toplevels.capture: \"client\", \"pane\" or false; keeping \"client\""
-                    ),
-                }
-            }
+            let settings = settings::toplevels::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Toplevels(settings));
             })
@@ -3697,44 +3602,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "x11",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut settings = crate::xwayland::Settings::default();
-            if let Some(options) = options {
-                match options.get::<Value>("hidden") {
-                    // Each element is read as a `Value` first and only kept
-                    // when it is actually `Value::String` -- not through
-                    // `sequence_values::<String>()` directly, which would
-                    // silently stringify a number the way Lua's own
-                    // `tostring` does, and a WM_CLASS name that came from
-                    // `5` by accident is a configuration mistake, not a
-                    // value worth keeping.
-                    Ok(Value::Table(list)) => {
-                        let mut names = Vec::new();
-                        let mut every_one_a_string = true;
-                        for value in list.sequence_values::<Value>() {
-                            match value {
-                                Ok(Value::String(name)) => match name.to_str() {
-                                    Ok(name) => names.push(name.to_owned()),
-                                    Err(_) => every_one_a_string = false,
-                                },
-                                _ => every_one_a_string = false,
-                            }
-                            if !every_one_a_string {
-                                break;
-                            }
-                        }
-                        if every_one_a_string {
-                            settings.hidden = names;
-                        } else {
-                            tracing::warn!("x11.hidden is a list of strings; keeping the default");
-                        }
-                    }
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(other) => tracing::warn!(
-                        value = describe(&other),
-                        "x11.hidden is a list of strings; keeping the default"
-                    ),
-                }
-            }
+            let settings = settings::x11::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::X11(settings));
             })
@@ -4176,24 +4044,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "client_sizes",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut sizes = ClientSizes::default();
-            if let Some(options) = options {
-                if let Ok(Value::String(floating)) = options.get::<Value>("floating")
-                    && floating.to_str().is_ok_and(|said| &*said == "ignore")
-                {
-                    sizes.floating = false;
-                }
-                if let Ok(Value::Table(list)) = options.get::<Value>("ignore") {
-                    sizes.ignored = list
-                        .sequence_values::<Value>()
-                        .filter_map(Result::ok)
-                        .filter_map(|app| match app {
-                            Value::String(app) => app.to_str().ok().map(|app| app.to_string()),
-                            _ => None,
-                        })
-                        .collect();
-                }
-            }
+            let sizes = settings::client_sizes::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::ClientSizes(sizes.clone()));
             })
@@ -4579,34 +4430,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "session",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut settings = crate::session::Settings::default();
-            if let Some(options) = options {
-                for (key, slot) in [
-                    ("systemd", &mut settings.systemd),
-                    ("autostart", &mut settings.autostart),
-                ] {
-                    match options.get::<Value>(key) {
-                        Ok(Value::Boolean(on)) => *slot = on,
-                        Ok(Value::Nil) | Err(_) => {}
-                        Ok(other) => tracing::warn!(
-                            key,
-                            value = describe(&other),
-                            "session: true or false; keeping the default, true"
-                        ),
-                    }
-                }
-                match options.get::<Value>("stop_timeout") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match value.as_u64().filter(|&millis| millis > 0) {
-                        Some(millis) => settings.stop_timeout = Duration::from_millis(millis),
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "session.stop_timeout is a whole number of milliseconds above 0; \
-                             keeping the default"
-                        ),
-                    },
-                }
-            }
+            let settings = settings::session::parse(&lua::convert::section(options)?);
             lua.set_app_data(settings);
             Ok(())
         })?,
@@ -5316,39 +5140,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "run_defaults",
         lua.create_function(|lua, options: Option<Table>| {
-            let mut defaults = RunDefaults::default();
-            if let Some(options) = options {
-                match options.get::<Value>("timeout") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value)
-                        .filter(|ms| *ms > 0.0)
-                        .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
-                    {
-                        Some(timeout) => defaults.timeout = timeout,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "run.timeout is a number of milliseconds above 0; keeping the \
-                             default, 30000"
-                        ),
-                    },
-                }
-                match options.get::<Value>("max_output") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "checked to be a whole number from 0, and saturating past usize"
-                        )]
-                        Some(bytes) => defaults.max_output = bytes as usize,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "run.max_output is a whole number of bytes, 0 or more; keeping the \
-                             default, 1048576"
-                        ),
-                    },
-                }
-            }
+            let defaults = settings::run::parse(&lua::convert::section(options)?);
             lua.set_app_data(defaults);
             Ok(())
         })?,
@@ -5542,55 +5334,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "files",
         lua.create_function(|lua, options: Option<Table>| {
-            let mut settings = FileSettings::default();
-            if let Some(options) = options {
-                match options.get::<Value>("max_read") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "checked to be a whole number from 0, and saturating past usize"
-                        )]
-                        Some(bytes) => settings.max_read = bytes as usize,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "files.max_read is a whole number of bytes, 0 or more; keeping the \
-                             default, 4194304"
-                        ),
-                    },
-                }
-                match options.get::<Value>("store_interval") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value)
-                        .filter(|ms| *ms > 0.0)
-                        .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
-                    {
-                        Some(every) => settings.store_interval = every,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "files.store_interval is a number of milliseconds above 0; keeping \
-                             the default, 1000"
-                        ),
-                    },
-                }
-                match options.get::<Value>("store_max") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0) {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "checked to be a whole number from 0, and saturating past u64"
-                        )]
-                        Some(bytes) => settings.store_max = bytes as u64,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "files.store_max is a whole number of bytes, 0 or more; keeping the \
-                             default, 1048576"
-                        ),
-                    },
-                }
-            }
+            let settings = settings::files::parse(&lua::convert::section(options)?);
             lua.set_app_data(settings);
             Ok(())
         })?,
