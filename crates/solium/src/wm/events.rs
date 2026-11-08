@@ -526,6 +526,18 @@ impl Ask for Answers {
                         .map(|window| window.id),
                 ))
             }
+            wire::Query::Styles => Some(wire::Reply::Styles(
+                crate::decoration::available()
+                    .into_iter()
+                    .map(|offered| wire::Style {
+                        name: offered.name,
+                        kind: match offered.kind {
+                            crate::decoration::StyleKind::Bundle => wire::StyleKind::Bundle,
+                            crate::decoration::StyleKind::File => wire::StyleKind::File,
+                        },
+                    })
+                    .collect(),
+            )),
             wire::Query::Store((name, max)) => {
                 Some(wire::Reply::Store(self.stores.read(&name, max)))
             }

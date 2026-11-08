@@ -8,7 +8,7 @@ use solium_wm_protocol as wire;
 
 use std::rc::Rc;
 
-use crate::script::lua::{Ask, Host};
+use crate::script::lua::{Ask, Host, Setup};
 use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::stores::StoreReads;
@@ -56,6 +56,10 @@ impl Scripts {
         let stores = Rc::new(stores);
         let (host, loaded) = Host::load(
             config,
+            Setup {
+                shipped: crate::assets::lua(),
+                debug: crate::dev::debug_mode(),
+            },
             Box::new(Answers {
                 snapshot: None,
                 stores: Rc::clone(&stores),
@@ -119,7 +123,7 @@ impl Scripts {
 
     /// Where the configuration is. See [`crate::script::lua::config_path`].
     pub(crate) fn config_path() -> std::path::PathBuf {
-        crate::script::lua::config_path()
+        crate::script::lua::config_path(&crate::assets::lua())
     }
 
     /// Where a user's own scripts live, whether or not they have any.

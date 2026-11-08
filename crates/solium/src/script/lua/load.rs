@@ -11,10 +11,10 @@ use crate::script::lua::*;
 use crate::script::*;
 
 /// Where the configuration is: `SOLIUM_LUA_INIT` when it is set, else the
-/// user's own `init.lua`, else the shipped one. The user's file wins, and the
-/// shipped one is the fallback rather than a default that has to be copied
-/// before anything works.
-pub(crate) fn config_path() -> std::path::PathBuf {
+/// user's own `init.lua`, else the one in `shipped`. The user's file wins,
+/// and the shipped one is the fallback rather than a default that has to be
+/// copied before anything works.
+pub(crate) fn config_path(shipped: &Path) -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
         return std::path::PathBuf::from(path);
     }
@@ -24,7 +24,7 @@ pub(crate) fn config_path() -> std::path::PathBuf {
             return path;
         }
     }
-    crate::assets::lua().join("init.lua")
+    shipped.join("init.lua")
 }
 
 /// Where a user's own scripts live, whether or not they have any.
@@ -41,11 +41,12 @@ impl Host {
     /// Load the configuration and everything it pulls in, cold, and answer
     /// with what its top level asked for and declared; what it asks of the
     /// compositor as it loads goes to `ask`.
-    pub(crate) fn load(config: &Path, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
-        let (lua, loaded) = Self::load_as(config, Keep::new(), ask)?;
+    pub(crate) fn load(config: &Path, setup: Setup, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
+        let (lua, loaded) = Self::load_as(config, &setup, Keep::new(), ask)?;
         Ok((
             Self {
                 lua,
+                setup,
                 mirror: solium_wm_protocol::mirror::Mirror::new(),
             },
             loaded,
@@ -78,7 +79,7 @@ impl Host {
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
     pub(crate) fn reload(&mut self, config: &Path, ask: Box<dyn Ask>) -> Result<Answer> {
-        let (lua, loaded) = Self::load_as(config, self.kept(), ask)?;
+        let (lua, loaded) = Self::load_as(config, &self.setup, self.kept(), ask)?;
         self.lua = lua;
         Ok(loaded)
     }
@@ -124,8 +125,14 @@ impl Host {
     /// Run the configuration in a new Lua state, handed `carried`, its
     /// questions going to `ask`: the state, and the answer its top level
     /// made.
-    fn load_as(config: &Path, carried: Keep, ask: Box<dyn Ask>) -> Result<(Lua, Answer)> {
+    fn load_as(
+        config: &Path,
+        setup: &Setup,
+        carried: Keep,
+        ask: Box<dyn Ask>,
+    ) -> Result<(Lua, Answer)> {
         let lua = Lua::new();
+        lua.set_app_data(setup.clone());
         lua.set_app_data(Asker(ask));
         lua.set_app_data(Pending::default());
         lua.set_app_data(StoresSent::default());
@@ -243,12 +250,10 @@ impl Host {
             // point, require everything that ships, add your own") could not
             // work at all. Found by running the example out of the guide.
             //
-            // *Where* the shipped directory is stopped being a constant here
-            // when the compositor became installable: `crate::assets` answers
-            // that once, for the Lua and the QML together. What is local to
-            // this function is only the order.
-            let shipped_lua = crate::assets::lua();
-            let shipped = shipped_lua.display();
+            // *Where* the shipped directory is, is the host's [`Setup`]: the
+            // compositor answers it once, for the Lua and the QML together.
+            // What is local to this function is only the order.
+            let shipped = setup.shipped.display();
             let mut search = format!("{directory}/?.lua;{shipped}/?.lua;{path}");
             if let Some(user) = user_config_dir() {
                 search = format!("{}/?.lua;{search}", user.display());

@@ -252,8 +252,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // is a reason to remove it.
     sol.set("decoration", sol.get::<mlua::Function>("pane")?)?;
 
-    // Everything `sol.pane` could be handed, discovered from the
-    // directories the compositor actually resolves against rather than from a
+    // Everything `sol.pane` could be handed, asked of the compositor, which
+    // looks in the directories it actually resolves against rather than at a
     // list kept in Lua. Same principle as `parse_easing`: the names come from
     // the machinery, so a style someone writes is offerable the moment it
     // exists and `lua/tweaks.lua` has nothing to edit.
@@ -266,10 +266,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "decorations",
         lua.create_function(|lua, ()| {
             let list = lua.create_table()?;
-            for (index, offered) in crate::decoration::available().into_iter().enumerate() {
+            let styles = match ask(lua, solium_wm_protocol::Query::Styles) {
+                Some(solium_wm_protocol::Reply::Styles(styles)) => styles,
+                _ => Vec::new(),
+            };
+            for (index, style) in styles.into_iter().enumerate() {
                 let entry = lua.create_table()?;
-                entry.set("name", offered.name)?;
-                entry.set("kind", offered.kind.as_str())?;
+                entry.set("name", style.name)?;
+                entry.set("kind", style.kind.name())?;
                 list.set(index + 1, entry)?;
             }
             Ok(list)

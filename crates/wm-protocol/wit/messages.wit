@@ -7,13 +7,17 @@
 /// answer after `wm.ask-ms`; every other batch is never waited for. The
 /// window manager may also `submit` commands of its own whenever it likes.
 interface messages {
-    use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc};
+    use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc, style};
     use commands.{command, focus-cause, motion};
 
-    /// The first message, from the compositor: the protocol it speaks, and
-    /// everything the window manager kept before it was restarted.
+    /// The first message, from the compositor: the protocol it speaks,
+    /// whether the session runs in debug mode (`solium --debug-mode`), where
+    /// a window manager may offer what only belongs in a development
+    /// session, and everything the window manager kept before it was
+    /// restarted.
     record hello {
         version: string,
+        debug: bool,
         keeps: list<tuple<string, doc>>,
     }
 
@@ -186,12 +190,17 @@ interface messages {
         /// given. The compositor keeps the files: one that cannot be used
         /// is set aside as `<name>.json.broken`, and none is the answer.
         store(tuple<string, u64>),
+        /// Every window frame style there is, from the folders the
+        /// compositor looks in: sorted, bundles first, each name once, as
+        /// the compositor would resolve it.
+        styles,
     }
 
     variant reply {
         window(option<u64>),
         /// The store's document as JSON text, or none.
         store(option<string>),
+        styles(list<style>),
     }
 
     variant message {

@@ -131,4 +131,18 @@ interface types {
 
     /// A settings document: its nodes, the first the root.
     type doc = list<doc-node>;
+
+    /// What a window frame style is: a folder of QML and its parts, or a
+    /// single QML file.
+    enum style-kind {
+        bundle,
+        file,
+    }
+
+    /// A window frame style this machine can draw, by the name `pane`'s
+    /// settings take.
+    record style {
+        name: string,
+        kind: style-kind,
+    }
 }

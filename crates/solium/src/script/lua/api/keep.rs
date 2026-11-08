@@ -90,7 +90,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // What the Developer Tweaks panel offers, and what to do when one is
     // pressed. Both live in Lua so the panel is a list of whatever the
     // configuration says rather than a menu built into the compositor.
-    // Whether the compositor was started with `--debug-mode`.
+    // Whether the compositor was started with `--debug-mode`, as `hello`
+    // says.
     //
     // A script's gate rather than the compositor's: the Developer Tweaks panel
     // used to be gated in Rust, and now `lua/tweaks.lua` declines to declare
@@ -98,7 +99,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // the same.
     sol.set(
         "debug_mode",
-        lua.create_function(|_, ()| Ok(crate::dev::debug_mode()))?,
+        lua.create_function(|lua, ()| {
+            Ok(lua.app_data_ref::<Setup>().is_some_and(|setup| setup.debug))
+        })?,
     )?;
 
     // A setting a configuration wrote that the defaults do not define.

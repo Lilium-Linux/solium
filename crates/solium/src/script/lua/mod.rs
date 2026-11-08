@@ -29,7 +29,19 @@ pub(crate) use runs::*;
 #[derive(Debug)]
 pub(crate) struct Host {
     pub(crate) lua: mlua::Lua,
+    /// What it was started with, which a reload starts with again.
+    pub(crate) setup: Setup,
     /// The desktop as the scripts know it: what `sol.windows()` and the
     /// other reads answer from.
     pub(crate) mirror: solium_wm_protocol::mirror::Mirror,
+}
+
+/// What the Lua host is started with: where the shipped Lua is, which a
+/// configuration's `require` finds and which is the configuration when the
+/// user has none, and whether the session runs in debug mode, as `hello`
+/// says.
+#[derive(Clone, Debug)]
+pub(crate) struct Setup {
+    pub(crate) shipped: std::path::PathBuf,
+    pub(crate) debug: bool,
 }

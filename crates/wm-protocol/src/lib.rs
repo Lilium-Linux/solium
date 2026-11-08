@@ -105,6 +105,7 @@ mod tests {
         let messages = [
             Message::Hello(Hello {
                 version: crate::VERSION.to_owned(),
+                debug: true,
                 keeps: vec![(
                     "workspaces".to_owned(),
                     vec![
