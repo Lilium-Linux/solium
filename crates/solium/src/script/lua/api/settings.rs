@@ -5,6 +5,21 @@ use mlua::{Lua, Table, Value};
 use crate::script::lua::*;
 use crate::script::*;
 
+/// Hand a settings section over as a document, for the compositor to read
+/// as its configuration reference documents it.
+pub(crate) fn configure(
+    lua: &Lua,
+    section: &str,
+    options: solium_wm_protocol::Doc,
+) -> mlua::Result<()> {
+    with_pending(lua, |pending| {
+        pending.push(solium_wm_protocol::Command::Configure((
+            section.to_owned(),
+            options,
+        )));
+    })
+}
+
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // Effects on parts of windows: `sol.effects{ rules = { … } }`, parsed
@@ -15,12 +30,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "effects",
         lua.create_function(|lua, options: Option<Table>| {
-            let given = options.is_some();
-            let (rules, settings) =
-                settings::effects::parse(&lua::convert::section(options)?, given);
-            with_pending(lua, |pending| {
-                pending.push(Command::Effects { rules, settings });
-            })
+            configure(lua, "effects", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -30,13 +40,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "startup",
         lua.create_function(|lua, options: Option<Table>| {
-            let read = match options {
-                None => Ok(crate::warm::FirstFrame::default()),
-                Some(table) => crate::warm::startup(&lua::convert::doc_of(&Value::Table(table))?),
-            };
-            with_pending(lua, |pending| {
-                pending.push(Command::Startup(read));
-            })
+            configure(lua, "startup", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -52,13 +56,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "idle",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let options = lua::convert::wire_section(options)?;
-            with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::Configure((
-                    "idle".to_owned(),
-                    options,
-                )));
-            })
+            configure(lua, "idle", lua::convert::wire_section(options)?)
         })?,
     )?;
     // Automatic reload (#223): `config.reload`, handed over by `init.lua`.
@@ -74,10 +72,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "auto_reload",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = settings::reload::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::AutoReload(settings));
-            })
+            configure(lua, "auto_reload", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -106,12 +101,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "input",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let (config, shortcuts) = settings::input::parse(&lua::convert::section(options)?)
-                .map_err(mlua::Error::runtime)?;
-            with_pending(lua, |pending| {
-                pending.push(Command::Input(config));
-                pending.push(Command::ShortcutsInhibit(shortcuts));
-            })
+            configure(lua, "input", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -127,12 +117,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "lock",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let (settings, auth, scene) = settings::lock::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Lock(settings));
-                pending.push(Command::LockAuth(auth));
-                pending.push(Command::LockScene(scene));
-            })
+            configure(lua, "lock", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -146,10 +131,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "layer_shell",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = settings::layer_shell::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::LayerShell(settings));
-            })
+            configure(lua, "layer_shell", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -163,16 +145,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "frames",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = match settings::frames::parse(&lua::convert::section(options)?) {
-                Ok(settings) => settings,
-                Err(reason) => {
-                    tracing::warn!(reason, "frames: keeping the default");
-                    crate::framing::Settings::default()
-                }
-            };
-            with_pending(lua, |pending| {
-                pending.push(Command::Frames(settings));
-            })
+            configure(lua, "frames", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -185,10 +158,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "toplevels",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = settings::toplevels::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Toplevels(settings));
-            })
+            configure(lua, "toplevels", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -202,10 +172,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "x11",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = settings::x11::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::X11(settings));
-            })
+            configure(lua, "x11", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -221,20 +188,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "focus_mode",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings::focus::FocusMode {
-                click,
-                follow,
-                clear_on_empty_click,
-                after_close,
-            } = settings::focus::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::FocusMode {
-                    click,
-                    follow,
-                    clear_on_empty_click,
-                    after_close,
-                });
-            })
+            configure(lua, "focus_mode", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -254,12 +208,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "pane_build",
         lua.create_function(|lua, millis: Value| {
-            let Some(budget) = settings::pane::build_budget(&lua::convert::doc_of(&millis)?) else {
-                return Ok(());
-            };
-            with_pending(lua, |pending| {
-                pending.push(Command::PaneBuild(budget));
-            })
+            configure(lua, "pane_build", lua::convert::wire_doc_of(&millis)?)
         })?,
     )?;
 
@@ -328,11 +277,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "loading",
         lua.create_function(|lua, options: mlua::Table| {
-            let loading = settings::pane::loading(&lua::convert::doc_of(&Value::Table(options))?)
-                .map_err(mlua::Error::runtime)?;
-            with_pending(lua, |pending| {
-                pending.push(Command::Loading(loading.clone()));
-            })
+            configure(
+                lua,
+                "loading",
+                lua::convert::wire_doc_of(&Value::Table(options))?,
+            )
         })?,
     )?;
 
@@ -348,10 +297,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "client_sizes",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let sizes = settings::client_sizes::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::ClientSizes(sizes.clone()));
-            })
+            configure(lua, "client_sizes", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -368,10 +314,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "resize",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let resize = settings::resize::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Resize(resize));
-            })
+            configure(lua, "resize", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -383,10 +326,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "fullscreen",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let covers = settings::fullscreen::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Fullscreen(covers));
-            })
+            configure(lua, "fullscreen", lua::convert::wire_section(options)?)
         })?,
     )?;
 
@@ -419,14 +359,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "cursor_theme",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            // `Option<Table>`, because a copy of `config.lua` written before
-            // this setting existed has no `cursor` key, and shipped `init.lua`
-            // calls `sol.cursor_theme(nil)`: a required table would fail the
-            // whole configuration over a setting nobody asked for.
-            let configured = settings::cursor::parse(&lua::convert::section(options)?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Cursor(configured.clone()));
-            })
+            configure(lua, "cursor_theme", lua::convert::wire_section(options)?)
         })?,
     )?;
 

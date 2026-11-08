@@ -43,10 +43,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
                 return Ok(Value::Table(table));
             };
-            let config = settings::services::notifications(&lua::convert::section(Some(options))?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Notifications(config));
-            })?;
+            super::settings::configure(
+                lua,
+                "notifications",
+                lua::convert::wire_section(Some(options))?,
+            )?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -84,10 +85,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
                 return Ok(Value::Table(table));
             };
-            let config = settings::services::tray(&lua::convert::section(Some(options))?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Tray(config));
-            })?;
+            super::settings::configure(lua, "tray", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -105,10 +103,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let snapshot = snapshot(lua)?;
                 return snapshot.media.to_json().to_lua(lua);
             };
-            let config = settings::services::media(&lua::convert::section(Some(options))?);
-            with_pending(lua, |pending| {
-                pending.push(Command::Media(config));
-            })?;
+            super::settings::configure(lua, "media", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -125,7 +120,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "audio",
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
-                with_pending(lua, |pending| pending.push(Command::Audio(None)))?;
+                super::settings::configure(lua, "audio", vec![solium_wm_protocol::DocNode::Nil])?;
                 let snapshot = snapshot(lua)?;
                 let view = &snapshot.audio;
                 let table = lua.create_table()?;
@@ -163,8 +158,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 table.set("windows", windows)?;
                 return Ok(Value::Table(table));
             };
-            let settings = settings::services::audio(&lua::convert::section(Some(options))?);
-            with_pending(lua, |pending| pending.push(Command::Audio(Some(settings))))?;
+            super::settings::configure(lua, "audio", lua::convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;

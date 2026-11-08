@@ -166,7 +166,13 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Queued::Internal(Command::Effects { rules, .. }) => Some(rules.clone()),
+                    Queued::Wire(solium_wm_protocol::Command::Configure((section, nodes)))
+                        if section == "effects" =>
+                    {
+                        crate::wm::convert::doc(nodes).ok().map(|options| {
+                            crate::script::settings::effects::parse(&options, true).0
+                        })
+                    }
                     _ => None,
                 })
         })
@@ -185,7 +191,13 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Queued::Internal(Command::Effects { settings, .. }) => Some(settings.clone()),
+                    Queued::Wire(solium_wm_protocol::Command::Configure((section, nodes)))
+                        if section == "effects" =>
+                    {
+                        crate::wm::convert::doc(nodes).ok().map(|options| {
+                            crate::script::settings::effects::parse(&options, true).1
+                        })
+                    }
                     _ => None,
                 })
         })
@@ -330,6 +342,25 @@ impl Scripts {
 
     /// What a check found that a session would act on: a store's broken
     /// file, left where it is.
+    /// The settings sections the configuration handed over as it loaded
+    /// that the compositor refuses, each with why: `--check` fails on them.
+    /// `check::tests::a_refused_settings_section_fails_the_check`.
+    pub(crate) fn refused_at_load(&self) -> Vec<String> {
+        self.lua
+            .app_data_ref::<Pending>()
+            .map(|pending| {
+                pending
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        Queued::Wire(command) => crate::wm::convert::refusal(command),
+                        Queued::Internal(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn check_notes(&self) -> Vec<String> {
         self.lua
             .app_data_ref::<CheckOnly>()

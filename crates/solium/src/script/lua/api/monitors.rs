@@ -35,13 +35,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(Value::Table(monitors));
             };
 
-            let places = settings::monitors::parse(&lua::convert::doc_of(&Value::Table(rows))?)
-                .map_err(mlua::Error::runtime)?;
-            with_pending(lua, |pending| {
-                pending.push(Command::Monitors(crate::monitor::Arrangement::new(
-                    places.clone(),
-                )));
-            })?;
+            super::settings::configure(
+                lua,
+                "monitors",
+                lua::convert::wire_doc_of(&Value::Table(rows))?,
+            )?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -129,12 +127,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "workspaces",
         lua.create_function(|lua, declared: Table| {
-            let declared =
-                settings::workspaces::parse(&lua::convert::doc_of(&Value::Table(declared))?)
-                    .map_err(mlua::Error::runtime)?;
-            with_pending(lua, |pending| {
-                pending.push(Command::Workspaces(declared));
-            })
+            super::settings::configure(
+                lua,
+                "workspaces",
+                lua::convert::wire_doc_of(&Value::Table(declared))?,
+            )
         })?,
     )?;
 

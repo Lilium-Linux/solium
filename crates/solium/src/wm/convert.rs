@@ -100,17 +100,19 @@ pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
 /// it. One that cannot be applied is named in the log and left out.
 pub(crate) fn commands_of(command: wire::Command) -> Vec<crate::script::Command> {
     match command {
-        wire::Command::Configure((section, nodes)) => match doc(&nodes) {
-            Ok(options) => configure(&section, &options),
-            Err(why) => {
-                tracing::warn!(
-                    section,
-                    why,
-                    "a settings document that cannot be read; left out"
-                );
-                Vec::new()
+        wire::Command::Configure((section, nodes)) => {
+            match doc(&nodes).and_then(|options| configure(&section, &options)) {
+                Ok(commands) => commands,
+                Err(why) => {
+                    tracing::warn!(
+                        section,
+                        why,
+                        "a settings section that cannot be read; left as it was"
+                    );
+                    Vec::new()
+                }
             }
-        },
+        }
         other => {
             tracing::warn!(
                 ?other,
@@ -121,15 +123,100 @@ pub(crate) fn commands_of(command: wire::Command) -> Vec<crate::script::Command>
     }
 }
 
-/// A settings section as the commands that apply it.
-fn configure(section: &str, options: &crate::script::Doc) -> Vec<crate::script::Command> {
-    use crate::script::Command;
+/// Why a settings section is refused, if it is: what `solium --check`
+/// reports of a configuration's sections.
+pub(crate) fn refusal(command: &wire::Command) -> Option<String> {
+    let wire::Command::Configure((section, nodes)) = command else {
+        return None;
+    };
+    doc(nodes)
+        .and_then(|options| configure(section, &options))
+        .err()
+        .map(|why| format!("sol.{section} is refused: {why}"))
+}
+
+/// A settings section as the commands that apply it, each read as the
+/// configuration reference documents it, or why it cannot be read, in which
+/// case it applies nothing.
+fn configure(
+    section: &str,
+    options: &crate::script::Doc,
+) -> Result<Vec<crate::script::Command>, String> {
     use crate::script::settings;
-    match section {
+    use crate::script::{Command, Doc};
+    Ok(match section {
         "idle" => vec![Command::Idle(settings::idle::parse(options))],
-        other => {
-            tracing::warn!(section = other, "not a settings section; left out");
-            Vec::new()
+        "auto_reload" => vec![Command::AutoReload(settings::reload::parse(options))],
+        "input" => {
+            let (config, shortcuts) = settings::input::parse(options)?;
+            vec![Command::Input(config), Command::ShortcutsInhibit(shortcuts)]
         }
-    }
+        "lock" => {
+            let (settings, auth, scene) = settings::lock::parse(options);
+            vec![
+                Command::Lock(settings),
+                Command::LockAuth(auth),
+                Command::LockScene(scene),
+            ]
+        }
+        "layer_shell" => vec![Command::LayerShell(settings::layer_shell::parse(options))],
+        "frames" => vec![Command::Frames(
+            settings::frames::parse(options).unwrap_or_else(|reason| {
+                tracing::warn!(reason, "frames: keeping the default");
+                crate::framing::Settings::default()
+            }),
+        )],
+        "toplevels" => vec![Command::Toplevels(settings::toplevels::parse(options))],
+        "x11" => vec![Command::X11(settings::x11::parse(options))],
+        "focus_mode" => {
+            let settings::focus::FocusMode {
+                click,
+                follow,
+                clear_on_empty_click,
+                after_close,
+            } = settings::focus::parse(options);
+            vec![Command::FocusMode {
+                click,
+                follow,
+                clear_on_empty_click,
+                after_close,
+            }]
+        }
+        "pane_build" => settings::pane::build_budget(options)
+            .map(Command::PaneBuild)
+            .into_iter()
+            .collect(),
+        "loading" => vec![Command::Loading(settings::pane::loading(options)?)],
+        "client_sizes" => vec![Command::ClientSizes(settings::client_sizes::parse(options))],
+        "resize" => vec![Command::Resize(settings::resize::parse(options))],
+        "fullscreen" => vec![Command::Fullscreen(settings::fullscreen::parse(options))],
+        "cursor_theme" => vec![Command::Cursor(settings::cursor::parse(options))],
+        "effects" => {
+            let (rules, settings) = settings::effects::parse(options, true);
+            vec![Command::Effects { rules, settings }]
+        }
+        "startup" => vec![Command::Startup(crate::warm::startup(options))],
+        "keyboard" => {
+            let request = settings::keyboard::parse(options)?;
+            if request == crate::keymap::Request::default() {
+                Vec::new()
+            } else {
+                vec![Command::Keyboard(request)]
+            }
+        }
+        "notifications" => vec![Command::Notifications(settings::services::notifications(
+            options,
+        ))],
+        "tray" => vec![Command::Tray(settings::services::tray(options))],
+        "media" => vec![Command::Media(settings::services::media(options))],
+        "audio" => vec![Command::Audio(match options {
+            Doc::Nil => None,
+            options => Some(settings::services::audio(options)),
+        })],
+        "monitors" => vec![Command::Monitors(crate::monitor::Arrangement::new(
+            settings::monitors::parse(options)?,
+        ))],
+        "workspaces" => vec![Command::Workspaces(settings::workspaces::parse(options)?)],
+        other => return Err(format!("`{other}` is not a settings section")),
+    })
 }

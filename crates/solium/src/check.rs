@@ -162,6 +162,10 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
             // A store's file a session would set aside: said, not failed,
             // and left as it is (#473).
             // `tests::a_check_leaves_a_broken_store_file_as_it_was`.
+            for refused in scripts.refused_at_load() {
+                report.fail(&format!("  {refused}"));
+            }
+
             for note in scripts.check_notes() {
                 report.line(&format!("  warning: {note}"));
             }
@@ -2198,6 +2202,31 @@ mod tests {
         assert!(
             super::configured_rules(&scripts).is_none(),
             "the rules of a refused sol.effects were taken as applied"
+        );
+    }
+
+    /// **A settings section the compositor refuses fails the check, with
+    /// why**: the configuration still loads, but `sol.input` with a
+    /// shortcuts policy that is not one applies nothing, and the check says
+    /// which section and what is wrong with it.
+    #[test]
+    fn a_refused_settings_section_fails_the_check() {
+        let directory = crate::effect::host::tests::scratch("check-refused-section");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.input({ shortcuts_inhibit = { allow = "sometimes" } })"#,
+        )
+        .expect("writing");
+        let (passed, out) = reported(|report| {
+            let _ = super::config(&config, report);
+        });
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(!passed, "{out}");
+        assert!(out.contains("sol.input is refused"), "{out}");
+        assert!(
+            out.contains("allow must be true, false or 'fullscreen'"),
+            "{out}"
         );
     }
 

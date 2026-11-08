@@ -48,14 +48,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(Value::Table(table));
             };
 
-            let request = settings::keyboard::parse(&lua::convert::section(Some(options))?)
-                .map_err(mlua::Error::runtime)?;
-            if request == crate::keymap::Request::default() {
-                return Ok(Value::Nil);
-            }
-            with_pending(lua, |pending| {
-                pending.push(Command::Keyboard(request.clone()));
-            })?;
+            super::settings::configure(
+                lua,
+                "keyboard",
+                lua::convert::wire_section(Some(options))?,
+            )?;
             Ok(Value::Nil)
         })?,
     )?;
