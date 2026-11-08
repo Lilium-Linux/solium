@@ -44,14 +44,21 @@ fn a_present_motion_names_its_properties_and_a_bad_one_is_refused() {
     )
     .expect("a motion")
     .expect("one was given");
+    let of = |property: &str| {
+        timed
+            .iter()
+            .find(|(name, _)| *name == property)
+            .map(|(_, timing)| *timing)
+            .expect("every property is timed")
+    };
     assert_eq!(
-        timed.x,
+        of("x"),
         (Some(Duration::from_millis(300)), Some(Curve::Linear))
     );
-    assert_eq!(timed.y, (None, None), "left out, so the batch's");
-    assert_eq!(timed.size, (None, None));
-    assert_eq!(timed.opacity, (Some(Duration::from_millis(450)), None));
-    assert_eq!(timed.client_opacity, (None, None));
+    assert_eq!(of("y"), (None, None), "left out, so the batch's");
+    assert_eq!(of("size"), (None, None));
+    assert_eq!(of("opacity"), (Some(Duration::from_millis(450)), None));
+    assert_eq!(of("client_opacity"), (None, None));
     for (bad, says) in [
         ("return { motion = 3 }", "a table of timings by property"),
         ("return { motion = { colour = {} } }", "not colour"),

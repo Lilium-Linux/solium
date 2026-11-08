@@ -5,8 +5,8 @@
 use solium_wm_protocol as wire;
 
 use crate::mat4::Mat4;
-use crate::present::{Channels, Curve};
 use crate::script::*;
+use solium_animation::Curve;
 
 pub(crate) fn rect(rect: Rect) -> wire::Rect {
     wire::Rect {
@@ -46,108 +46,12 @@ pub(crate) fn matrix(matrix: Mat4) -> wire::Matrix {
     matrix.0.to_vec()
 }
 
-/// A motion of its own for each property, by the property's name.
-pub(crate) fn channels(
-    channels: Option<Box<Channels<AnimationSpec>>>,
-) -> Vec<(String, wire::Motion)> {
-    channels.map_or_else(Vec::new, |channels| {
-        let Channels {
-            x,
-            y,
-            size,
-            opacity,
-            client_opacity,
-        } = *channels;
-        vec![
-            ("x".to_owned(), motion(x)),
-            ("y".to_owned(), motion(y)),
-            ("size".to_owned(), motion(size)),
-            ("opacity".to_owned(), motion(opacity)),
-            ("client_opacity".to_owned(), motion(client_opacity)),
-        ]
-    })
-}
-
-pub(crate) fn aim(aim: Aim) -> wire::Aim {
-    match aim {
-        Aim::Rect(at) => wire::Aim::Rect(rect(at)),
-        Aim::Window(id) => wire::Aim::Window(id),
-        Aim::Surface(name) => wire::Aim::Surface(name),
-    }
-}
-
-pub(crate) fn deform(deform: DeformSpec) -> wire::Deform {
-    use crate::effect::settings::{PresentFailed, PresentReload};
-    use solium_effects::spec::Value;
-    let mut nodes = vec![wire::DocNode::Nil];
-    let mut fields = Vec::new();
-    for (name, value) in deform.params {
-        let at = u32::try_from(nodes.len()).unwrap_or(u32::MAX);
-        match value {
-            Value::Bool(on) => nodes.push(wire::DocNode::Boolean(on)),
-            Value::Int(whole) => nodes.push(wire::DocNode::Integer(whole)),
-            Value::Number(number) => nodes.push(wire::DocNode::Number(number)),
-            Value::Word(word) => nodes.push(wire::DocNode::Text(word)),
-            Value::Vec4(four) => {
-                nodes.push(wire::DocNode::Nil);
-                let mut list = Vec::new();
-                for component in four {
-                    list.push(u32::try_from(nodes.len()).unwrap_or(u32::MAX));
-                    nodes.push(wire::DocNode::Number(component));
-                }
-                nodes[at as usize] = wire::DocNode::Table(wire::DocTable {
-                    list,
-                    fields: Vec::new(),
-                    numbered: Vec::new(),
-                });
-            }
-        }
-        fields.push((name, at));
-    }
-    nodes[0] = wire::DocNode::Table(wire::DocTable {
-        list: Vec::new(),
-        fields,
-        numbered: Vec::new(),
-    });
-    wire::Deform {
-        effect: deform.effect,
-        params: nodes,
-        axis: deform.axis,
-        progress: deform.progress,
-        aim: aim(deform.aim),
-        seed: deform.seed,
-        failed: deform.failed.map(|failed| {
-            match failed {
-                PresentFailed::Flat => "flat",
-                PresentFailed::Hide => "hide",
-            }
-            .to_owned()
-        }),
-        on_reload: deform.on_reload.map(|reload| {
-            match reload {
-                PresentReload::Flat => "flat",
-                PresentReload::Keep => "keep",
-            }
-            .to_owned()
-        }),
-    }
-}
-
 pub(crate) fn selection(selection: Selection) -> wire::Selection {
     wire::Selection {
         windows: selection.windows,
         surfaces: selection.surfaces,
         monitors: selection.monitors,
         on: selection.on,
-    }
-}
-
-pub(crate) fn shift(shift: crate::group::Shift) -> wire::Shift {
-    wire::Shift {
-        dx: shift.dx,
-        dy: shift.dy,
-        opacity: shift.opacity,
-        matrix: matrix(shift.matrix),
     }
 }
 
@@ -256,23 +160,4 @@ pub(crate) fn millis(duration: std::time::Duration) -> f64 {
     )]
     let millis = duration.as_nanos() as f64 / 1e6;
     millis
-}
-
-/// A notification of the window manager's own.
-pub(crate) fn notify(own: crate::services::notifications::Own) -> wire::Notify {
-    use crate::services::notifications::model::Urgency;
-    wire::Notify {
-        token: own.token,
-        summary: own.summary,
-        body: own.body,
-        icon: own.icon,
-        urgency: match own.urgency {
-            Urgency::Low => "low",
-            Urgency::Normal => "normal",
-            Urgency::Critical => "critical",
-        }
-        .to_owned(),
-        actions: own.actions,
-        expire_timeout: own.expire_timeout,
-    }
 }

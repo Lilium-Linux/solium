@@ -259,6 +259,24 @@ pub(crate) fn wire_doc_of(value: &Value) -> mlua::Result<solium_wm_protocol::Doc
     Ok(nodes)
 }
 
+/// Named Lua values as one table's document: a deform's params.
+pub(crate) fn wire_doc_of_fields(
+    fields: &[(String, Value)],
+) -> mlua::Result<solium_wm_protocol::Doc> {
+    use solium_wm_protocol::{DocNode, DocTable};
+    let mut nodes = vec![DocNode::Nil];
+    let mut named = Vec::new();
+    for (name, value) in fields {
+        named.push((name.clone(), wire_node(value, 1, &mut nodes)?));
+    }
+    nodes[0] = DocNode::Table(DocTable {
+        list: Vec::new(),
+        fields: named,
+        numbered: Vec::new(),
+    });
+    Ok(nodes)
+}
+
 /// A settings section as its Lua function takes it, as a document: a table,
 /// or nothing, which reads as an empty section.
 pub(crate) fn wire_section(options: Option<Table>) -> mlua::Result<solium_wm_protocol::Doc> {

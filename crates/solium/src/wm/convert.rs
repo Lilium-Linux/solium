@@ -646,7 +646,7 @@ fn channels(
     })))
 }
 
-fn deform(deform: wire::Deform) -> Result<crate::script::DeformSpec, String> {
+pub(crate) fn deform(deform: wire::Deform) -> Result<crate::script::DeformSpec, String> {
     use crate::effect::settings::{PresentFailed, PresentReload};
     let params = doc(&deform.params)?;
     let mut read = Vec::new();

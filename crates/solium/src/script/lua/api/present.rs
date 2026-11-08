@@ -44,11 +44,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         opacity,
                         client_opacity,
                         matrix: matrix.map(to_wire::matrix),
-                        deform: deform.map(to_wire::deform),
+                        deform,
                         z,
                         pivot,
                         motion: to_wire::motion(animation),
-                        channels: to_wire::channels(channels),
+                        channels,
                     },
                 ));
             })
@@ -80,8 +80,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         opacity,
                         client_opacity,
                         motion: to_wire::motion(animation),
-                        channels: to_wire::channels(channels),
-                        deform: deform.map(to_wire::deform),
+                        channels,
+                        deform,
                     },
                 ));
             })
@@ -147,14 +147,19 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             |lua, (name, options, motion): (String, Option<Table>, Option<Table>)| {
                 let to = match options.as_ref() {
                     Some(options) => shift_from(options)?,
-                    None => crate::group::Shift::NONE,
+                    None => solium_wm_protocol::Shift {
+                        dx: 0.0,
+                        dy: 0.0,
+                        opacity: 1.0,
+                        matrix: to_wire::matrix(solium_animation::mat4::Mat4::IDENTITY),
+                    },
                 };
                 let (duration, easing) = motion_from(motion.as_ref())?;
                 with_pending(lua, |pending| {
                     let animation = pending.animation.with(duration, easing);
                     pending.push(solium_wm_protocol::Command::PresentGroup((
                         name.clone(),
-                        to_wire::shift(to),
+                        to,
                         to_wire::motion(animation),
                     )));
                 })

@@ -116,10 +116,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             if summary.is_empty() {
                 return Err(mlua::Error::runtime("sol.notify needs a summary"));
             }
+            // Anything but the two other words is normal, as it always was.
             let urgency = match text("urgency").as_str() {
-                "low" => crate::services::notifications::model::Urgency::Low,
-                "critical" => crate::services::notifications::model::Urgency::Critical,
-                _ => crate::services::notifications::model::Urgency::Normal,
+                word @ ("low" | "critical") => word.to_owned(),
+                _ => "normal".to_owned(),
             };
             let expire_timeout = match options.get::<Value>("timeout") {
                 Ok(value) => number(&value)
@@ -152,17 +152,17 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 kept.set(token, functions)?;
                 token
             };
-            let own = crate::services::notifications::Own {
+            let notify = solium_wm_protocol::Notify {
+                token,
                 summary,
                 body: text("body"),
                 icon: text("icon"),
                 urgency,
                 actions,
-                token,
                 expire_timeout,
             };
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::Notify(to_wire::notify(own)));
+                pending.push(solium_wm_protocol::Command::Notify(notify));
             })
         })?,
     )?;

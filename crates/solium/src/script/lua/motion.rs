@@ -6,9 +6,9 @@ use std::time::Duration;
 use mlua::{Table, Value};
 
 use crate::mat4::Mat4;
-use crate::present::Curve;
 use crate::script::lua::*;
 use crate::script::*;
+use solium_animation::Curve;
 
 pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
     let (x, y, w, h) = (
@@ -285,8 +285,50 @@ pub(crate) const DEFORM_KEYS: [&str; 7] = [
 /// is 1 when it is not given, all the way in, which is what one animates
 /// towards; `seed`, `failed` and `on_reload` are refused outside their
 /// words, naming the key (`tests::a_deforms_own_keys_are_refused_outside_their_words`).
-pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<DeformSpec>> {
-    use crate::effect::settings::{PresentFailed, PresentReload, said};
+/// The words a deform's `failed` takes: drawn flat, or hidden.
+const DEFORM_FAILED: [&str; 2] = ["flat", "hide"];
+
+/// The words a deform's `on_reload` takes: drawn flat, or kept.
+const DEFORM_ON_RELOAD: [&str; 2] = ["flat", "keep"];
+
+/// Words as a refusal lists them: `"a" or "b"`.
+fn said(words: &[&str]) -> String {
+    words
+        .iter()
+        .map(|word| format!("\"{word}\""))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// Whether a value can be an effect's param: a boolean, a number, a word,
+/// or a list of four numbers, a colour or a vector.
+fn is_param(value: &Value) -> bool {
+    match value {
+        Value::Boolean(_) | Value::Integer(_) | Value::String(_) => true,
+        Value::Number(number) => number.is_finite(),
+        Value::Table(table) => {
+            let mut count = 0;
+            for pair in table.pairs::<Value, Value>() {
+                let Ok((key, item)) = pair else {
+                    return false;
+                };
+                let numeric = match item {
+                    Value::Integer(_) => true,
+                    Value::Number(number) => number.is_finite(),
+                    _ => false,
+                };
+                if !numeric || !matches!(key, Value::Integer(1..=4)) {
+                    return false;
+                }
+                count += 1;
+            }
+            count == 4
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Deform>> {
     let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
@@ -325,33 +367,25 @@ pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<DeformSpec>> {
             other => Ok(other),
         }
     };
-    let failed = word("failed", &PresentFailed::WORDS)?
-        .as_deref()
-        .and_then(PresentFailed::from_word);
-    let on_reload = word("on_reload", &PresentReload::WORDS)?
-        .as_deref()
-        .and_then(PresentReload::from_word);
+    let failed = word("failed", &DEFORM_FAILED)?;
+    let on_reload = word("on_reload", &DEFORM_ON_RELOAD)?;
     let mut params = Vec::new();
     for pair in deform.pairs::<String, Value>() {
         let (key, value) = pair?;
         if DEFORM_KEYS.contains(&key.as_str()) {
             continue;
         }
-        match crate::script::doc_of_plain(&value)?
-            .as_ref()
-            .and_then(crate::effect::param_value)
-        {
-            Some(value) => params.push((key, value)),
-            None => {
-                return Err(refused(
-                    &key,
-                    "not a param's value: a number, a boolean, a word or four numbers".to_owned(),
-                ));
-            }
+        if !is_param(&value) {
+            return Err(refused(
+                &key,
+                "not a param's value: a number, a boolean, a word or four numbers".to_owned(),
+            ));
         }
+        params.push((key, value));
     }
     params.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(Some(DeformSpec {
+    let params = lua::convert::wire_doc_of_fields(&params)?;
+    Ok(Some(solium_wm_protocol::Deform {
         effect,
         params,
         axis,
@@ -370,19 +404,19 @@ pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<DeformSpec>> {
 /// moves. A rect aims at somewhere that does not move, such as the bottom edge
 /// of a monitor, and is honest about being a snapshot because there is nothing
 /// there to track.
-pub(crate) fn aim_from(to: &Table) -> mlua::Result<Aim> {
+pub(crate) fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
     if let Some(id) = to.get::<Option<u64>>("window")? {
-        return Ok(Aim::Window(id));
+        return Ok(solium_wm_protocol::Aim::Window(id));
     }
     if let Some(name) = to.get::<Option<String>>("surface")? {
-        return Ok(Aim::Surface(name));
+        return Ok(solium_wm_protocol::Aim::Surface(name));
     }
     let Some(rect) = rect_from(to)? else {
         return Err(mlua::Error::runtime(
             "a deform's `to` needs { window = id }, { surface = name } or a rect (x, y, w, h)",
         ));
     };
-    Ok(Aim::Rect(rect))
+    Ok(solium_wm_protocol::Aim::Rect(to_wire::rect(rect)))
 }
 
 /// Read a selection out of a `sol.group` table.
@@ -454,12 +488,12 @@ pub(crate) fn selection_from(options: &Table) -> mlua::Result<Selection> {
 /// `sol.present` is how a script gives one. An unknown key in this table is
 /// ignored like any other, so a script that writes one gets no window in the
 /// wrong place — it gets nothing, which is the mild half of this note.
-pub(crate) fn shift_from(options: &Table) -> mlua::Result<crate::group::Shift> {
-    Ok(crate::group::Shift {
+pub(crate) fn shift_from(options: &Table) -> mlua::Result<solium_wm_protocol::Shift> {
+    Ok(solium_wm_protocol::Shift {
         dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
         dy: options.get::<Option<f64>>("y")?.unwrap_or(0.0),
         opacity: options.get::<Option<f32>>("opacity")?.unwrap_or(1.0),
-        matrix: transform_from(options)?.unwrap_or(Mat4::IDENTITY),
+        matrix: to_wire::matrix(transform_from(options)?.unwrap_or(Mat4::IDENTITY)),
     })
 }
 
@@ -494,12 +528,20 @@ pub(crate) fn motion_from(
 pub(crate) fn resolved(
     motion: Option<PresentMotion>,
     animation: AnimationSpec,
-) -> Option<Box<crate::present::Channels<AnimationSpec>>> {
-    motion.map(|motion| {
-        Box::new(motion.map(|(duration, easing)| AnimationSpec {
-            duration: duration.unwrap_or(animation.duration),
-            easing: easing.unwrap_or(animation.easing),
-        }))
+) -> Vec<(String, solium_wm_protocol::Motion)> {
+    motion.map_or_else(Vec::new, |motion| {
+        motion
+            .into_iter()
+            .map(|(property, (duration, easing))| {
+                (
+                    property.to_owned(),
+                    to_wire::motion(AnimationSpec {
+                        duration: duration.unwrap_or(animation.duration),
+                        easing: easing.unwrap_or(animation.easing),
+                    }),
+                )
+            })
+            .collect()
     })
 }
 
@@ -511,7 +553,7 @@ pub(crate) fn resolved(
 /// with the batch's own; no `motion` at all is `None`. Anything else under
 /// `motion` is an error naming it.
 /// `tests::a_present_motion_names_its_properties_and_a_bad_one_is_refused`.
-pub(crate) type PresentMotion = crate::present::Channels<(Option<Duration>, Option<Curve>)>;
+pub(crate) type PresentMotion = Vec<(&'static str, (Option<Duration>, Option<Curve>))>;
 
 pub(crate) fn present_motion_from(options: &Table) -> mlua::Result<Option<PresentMotion>> {
     let motion = match options.get::<Value>("motion")? {
@@ -548,14 +590,14 @@ pub(crate) fn present_motion_from(options: &Table) -> mlua::Result<Option<Presen
             )));
         }
     }
-    let timing = |name: &str| motion_from(motion.get::<Option<Table>>(name)?.as_ref());
-    Ok(Some(crate::present::Channels {
-        x: timing("x")?,
-        y: timing("y")?,
-        size: timing("size")?,
-        opacity: timing("opacity")?,
-        client_opacity: timing("client_opacity")?,
-    }))
+    let mut timings = Vec::new();
+    for property in PRESENT_MOTIONS {
+        timings.push((
+            property,
+            motion_from(motion.get::<Option<Table>>(property)?.as_ref())?,
+        ));
+    }
+    Ok(Some(timings))
 }
 
 /// A present's `client_opacity` (#296): the client's opacity inside its pane,
@@ -665,7 +707,8 @@ pub(crate) fn deform_for_test(lua: &str) -> DeformSpec {
         .load(format!("return {{ deform = {lua} }}"))
         .eval()
         .expect("the test's deform");
-    deform_from(&options)
+    let deform = deform_from(&options)
         .expect("a deform")
-        .expect("a deform given")
+        .expect("a deform given");
+    crate::wm::convert::deform(deform).expect("the compositor reads it")
 }
