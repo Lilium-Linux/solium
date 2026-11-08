@@ -473,10 +473,10 @@ fn a_framed_panes_style_is_the_configured_one_or_the_default_and_a_bare_ones_is_
 
 /// Rules from Lua source, read the way `sol.effects` reads them (as
 /// `effect::rules::tests::rules` does).
-fn tree(lua: &str) -> crate::effect::tree::Tree {
+fn tree(lua: &str) -> crate::script::Doc {
     let state = mlua::Lua::new();
     let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-    crate::effect::tree::Tree::from_lua(&value)
+    crate::script::doc_of_plain(&value)
         .expect("readable")
         .expect("a value")
 }
@@ -767,7 +767,7 @@ fn a_client_blur_that_cannot_bind_costs_only_its_own_slots() {
     let place = crate::effect::host::tests::scratch("state-client-blur-unbound");
     crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
     let (_display, mut state) = state_with_effects_in(&place);
-    state.effect_settings.client_blur = Some(crate::effect::tree::Tree::Text("blur".to_owned()));
+    state.effect_settings.client_blur = Some(crate::script::Doc::Text("blur".to_owned()));
     let rules = crate::effect::rules::parse(&tree(
         r#"{ { match = "*", part = "client", slot = "replace", effect = { "tint", amount = 0.2 } } }"#,
     ))
@@ -38100,7 +38100,7 @@ end)"#,
                 let effects = |desk: &mut Desk, client_blur: bool| {
                     let settings = crate::effect::settings::Settings {
                         client_blur: client_blur
-                            .then(|| crate::effect::tree::Tree::Text("blur".to_owned())),
+                            .then(|| crate::script::Doc::Text("blur".to_owned())),
                         ..crate::effect::settings::Settings::default()
                     };
                     desk.state.apply(crate::script::Outcome {

@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::tree::Tree;
+use crate::script::{Doc, DocTable};
 
 /// What `sol.effects` reads: an unknown key is refused by name, so a typo
 /// never means "the default". Task 30 adds `timing`, Task 27b `geometry` (and
@@ -58,12 +58,12 @@ pub(crate) struct Settings {
     /// such a surface to your own rules. [`Settings::expansion`] makes it
     /// the rules it stands for.
     /// `tests::client_blur_is_a_chain_true_or_false_and_expands_to_its_rules`.
-    pub(crate) client_blur: Option<Tree>,
+    pub(crate) client_blur: Option<Doc>,
 }
 
 /// What `effects.client_blur` is when nothing says: the shipped `blur`.
-fn client_blur_default() -> Option<Tree> {
-    Some(Tree::Text("blur".to_owned()))
+fn client_blur_default() -> Option<Doc> {
+    Some(Doc::Text("blur".to_owned()))
 }
 
 impl Settings {
@@ -80,27 +80,30 @@ impl Settings {
         let rule = |part: &str| {
             let mut fields = std::collections::BTreeMap::new();
             let mut matching = std::collections::BTreeMap::new();
-            matching.insert("blur_region".to_owned(), Tree::Bool(true));
+            matching.insert("blur_region".to_owned(), Doc::Bool(true));
             fields.insert(
                 "match".to_owned(),
-                Tree::Table {
+                Doc::Table(DocTable {
                     list: Vec::new(),
                     fields: matching,
-                },
+                    ..DocTable::default()
+                }),
             );
-            fields.insert("part".to_owned(), Tree::Text(part.to_owned()));
-            fields.insert("slot".to_owned(), Tree::Text("behind".to_owned()));
-            fields.insert("mask".to_owned(), Tree::Text("region".to_owned()));
+            fields.insert("part".to_owned(), Doc::Text(part.to_owned()));
+            fields.insert("slot".to_owned(), Doc::Text("behind".to_owned()));
+            fields.insert("mask".to_owned(), Doc::Text("region".to_owned()));
             fields.insert("effect".to_owned(), effect.clone());
-            Tree::Table {
+            Doc::Table(DocTable {
                 list: Vec::new(),
                 fields,
-            }
+                ..DocTable::default()
+            })
         };
-        let rules = Tree::Table {
+        let rules = Doc::Table(DocTable {
             list: vec![rule("layer_shell:*"), rule("client")],
             fields: std::collections::BTreeMap::new(),
-        };
+            ..DocTable::default()
+        });
         // Checked when read (`parse`), so a refusal here is not reachable.
         crate::effect::rules::parse(&rules).unwrap_or_default()
     }
@@ -241,7 +244,7 @@ impl PresentReload {
 }
 
 /// What is at `path` (`"sandbox.load_ms"`) inside `options`.
-fn at<'a>(options: &'a Tree, path: &str) -> Option<&'a Tree> {
+fn at<'a>(options: &'a Doc, path: &str) -> Option<&'a Doc> {
     let mut at = Some(options);
     for key in path.split('.') {
         at = at.and_then(|tree| tree.field(key));
@@ -253,7 +256,7 @@ fn at<'a>(options: &'a Tree, path: &str) -> Option<&'a Tree> {
 /// `[low, high]` with the key and the bounds named.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 pub(crate) fn bounded(
-    options: &Tree,
+    options: &Doc,
     path: &str,
     default: f64,
     low: f64,
@@ -261,12 +264,12 @@ pub(crate) fn bounded(
 ) -> Result<f64, String> {
     let value = match at(options, path) {
         None => return Ok(default),
-        Some(Tree::Number(number)) => *number,
+        Some(Doc::Num(number)) => *number,
         #[expect(
             clippy::cast_precision_loss,
             reason = "a configured number, far below 2^52"
         )]
-        Some(Tree::Int(int)) => *int as f64,
+        Some(Doc::Int(int)) => *int as f64,
         Some(_) => f64::NAN,
     };
     if (low..=high).contains(&value) {
@@ -287,13 +290,13 @@ pub(crate) fn said(words: &[&str]) -> String {
 
 /// A word key at `path`, one of `words`, the first when absent.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
-pub(crate) fn word<'a>(options: &Tree, path: &str, words: &[&'a str]) -> Result<&'a str, String> {
+pub(crate) fn word<'a>(options: &Doc, path: &str, words: &[&'a str]) -> Result<&'a str, String> {
     match at(options, path) {
         None => words
             .first()
             .copied()
             .ok_or_else(|| format!("`effects.{path}` has no words")),
-        Some(Tree::Text(text)) => words
+        Some(Doc::Text(text)) => words
             .iter()
             .copied()
             .find(|word| word == text)
@@ -303,8 +306,8 @@ pub(crate) fn word<'a>(options: &Tree, path: &str, words: &[&'a str]) -> Result<
 }
 
 /// Unknown keys of a table, refused by name with the nearest known one.
-fn known(options: &Tree, path: &str, keys: &[&str]) -> Result<(), String> {
-    let Tree::Table { fields, .. } = options else {
+fn known(options: &Doc, path: &str, keys: &[&str]) -> Result<(), String> {
+    let Doc::Table(DocTable { fields, .. }) = options else {
         return Ok(());
     };
     match fields.keys().find(|key| !keys.contains(&key.as_str())) {
@@ -333,8 +336,8 @@ const TABLES: [(&str, &[&str]); 3] = [
 /// `script::tests::sol_effects_reads_xray_and_memo`.
 const OWN_TABLES: [&str; 2] = ["xray", "memo"];
 
-/// `sol.effects`' options as a [`Tree`], a number that is not finite kept
-/// where [`Tree::from_lua`] drops it (directly under `effects`, in
+/// `sol.effects`' options as a [`Doc`], a number that is not finite kept
+/// where [`Doc::plain`] drops it (directly under `effects`, in
 /// [`TABLES`], and in [`OWN_TABLES`] and their lists), so `load_ms = 1/0`
 /// is refused for its bounds rather than read as the default,
 /// `memo = { budget_mib = 1/0 }` is refused rather than read as no cap, and
@@ -342,68 +345,18 @@ const OWN_TABLES: [&str; 2] = ["xray", "memo"];
 /// as the wallpaper alone.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`,
 /// `script::tests::sol_effects_reads_xray_and_memo`.
-pub(crate) fn tree_of(options: &mlua::Table) -> mlua::Result<Tree> {
-    let mut tree =
-        Tree::from_lua(&mlua::Value::Table(options.clone()))?.unwrap_or_else(|| Tree::Table {
-            list: Vec::new(),
-            fields: std::collections::BTreeMap::new(),
-        });
-    if let Tree::Table { fields, .. } = &mut tree {
-        keep_non_finite(options, fields)?;
-        for table in TABLES.iter().map(|(table, _)| *table).chain(OWN_TABLES) {
-            if let Ok(mlua::Value::Table(inner)) = options.raw_get::<mlua::Value>(table)
-                && let Some(Tree::Table { fields, .. }) = fields.get_mut(table)
-            {
-                keep_non_finite(&inner, fields)?;
-                if OWN_TABLES.contains(&table) {
-                    keep_non_finite_items(&inner, fields)?;
-                }
+pub(crate) fn tree_of(options: &Doc) -> Doc {
+    let mut tree = options.plain().unwrap_or_else(Doc::table);
+    tree.keep_non_finite_fields(options);
+    for table in TABLES.iter().map(|(table, _)| *table).chain(OWN_TABLES) {
+        if let (Some(whole), Some(kept)) = (options.field(table), tree.field_mut(table)) {
+            kept.keep_non_finite_fields(whole);
+            if OWN_TABLES.contains(&table) {
+                kept.keep_non_finite_items(whole);
             }
         }
     }
-    Ok(tree)
-}
-
-/// Every list under a named key of `table` read again with its numbers
-/// that are not finite kept in their places, where [`Tree::from_lua`]
-/// drops them.
-/// `script::tests::sol_effects_reads_xray_and_memo`.
-fn keep_non_finite_items(
-    table: &mlua::Table,
-    fields: &mut std::collections::BTreeMap<String, Tree>,
-) -> mlua::Result<()> {
-    for (key, value) in fields.iter_mut() {
-        if let Tree::Table { list, .. } = value
-            && let Ok(mlua::Value::Table(items)) = table.raw_get::<mlua::Value>(key.as_str())
-        {
-            let mut kept = Vec::new();
-            for item in items.sequence_values::<mlua::Value>() {
-                match item? {
-                    mlua::Value::Number(number) if !number.is_finite() => {
-                        kept.push(Tree::Number(number));
-                    }
-                    item => kept.extend(Tree::from_lua(&item)?),
-                }
-            }
-            *list = kept;
-        }
-    }
-    Ok(())
-}
-
-/// Every named number of `table` that is not finite, into `fields`.
-fn keep_non_finite(
-    table: &mlua::Table,
-    fields: &mut std::collections::BTreeMap<String, Tree>,
-) -> mlua::Result<()> {
-    for pair in table.pairs::<mlua::Value, mlua::Value>() {
-        if let (mlua::Value::String(key), mlua::Value::Number(number)) = pair?
-            && !number.is_finite()
-        {
-            fields.insert(key.to_str()?.to_owned(), Tree::Number(number));
-        }
-    }
-    Ok(())
+    tree
 }
 
 /// `sol.effects`' options, beside `rules`: every key checked, each table's
@@ -412,12 +365,12 @@ fn keep_non_finite(
 /// by their own modules' `parse`.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`,
 /// `script::tests::sol_effects_reads_xray_and_memo`.
-pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
+pub(crate) fn parse(options: &Doc) -> Result<Settings, String> {
     known(options, "", KEYS)?;
     for (table, keys) in TABLES {
         match options.field(table) {
             None => {}
-            Some(tree @ Tree::Table { .. }) => known(tree, &format!(".{table}"), keys)?,
+            Some(tree @ Doc::Table(_)) => known(tree, &format!(".{table}"), keys)?,
             // Anything else is refused, not read as the defaults.
             Some(_) => {
                 let keys: Vec<String> = keys.iter().map(|key| format!("`{key}`")).collect();
@@ -456,9 +409,9 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
         .map_or_else(|| Ok(Default::default()), crate::effect::memo::parse)?;
     let motion_hz = match at(options, "motion_hz") {
         None => MOTION_HZ_DEFAULT,
-        Some(Tree::Number(number)) => *number,
+        Some(Doc::Num(number)) => *number,
         #[expect(clippy::cast_precision_loss, reason = "a rate, far below 2^52")]
-        Some(Tree::Int(int)) => *int as f64,
+        Some(Doc::Int(int)) => *int as f64,
         Some(_) => f64::NAN,
     };
     if motion_hz != 0.0 && !MOTION_HZ.contains(&motion_hz) {
@@ -469,9 +422,9 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
     // what to draw: checked now by expanding it, so a broken one refuses the
     // set naming its key.
     let client_blur = match options.field("client_blur") {
-        None | Some(Tree::Bool(true)) => client_blur_default(),
-        Some(Tree::Bool(false)) => None,
-        Some(effect @ (Tree::Text(_) | Tree::Table { .. })) => Some(effect.clone()),
+        None | Some(Doc::Bool(true)) => client_blur_default(),
+        Some(Doc::Bool(false)) => None,
+        Some(effect @ (Doc::Text(_) | Doc::Table(_))) => Some(effect.clone()),
         Some(_) => {
             return Err(
                 "`effects.client_blur` is an effect as a rule's `effect` takes it, true or false"
@@ -509,12 +462,12 @@ pub(crate) fn parse(options: &Tree) -> Result<Settings, String> {
 /// `effects.load`: a list of effect names, each one an effect's name
 /// (`host::is_name`), or the whole set refused naming the key.
 /// `tests::effects_load_is_a_list_of_names`.
-fn load_names(options: &Tree) -> Result<Vec<String>, String> {
+fn load_names(options: &Doc) -> Result<Vec<String>, String> {
     const SHAPE: &str = "`effects.load` is a list of effect names, such as { \"genie\" }";
     let Some(tree) = options.field("load") else {
         return Ok(Vec::new());
     };
-    let Tree::Table { list, fields } = tree else {
+    let Doc::Table(DocTable { list, fields, .. }) = tree else {
         return Err(SHAPE.to_owned());
     };
     if !fields.is_empty() {
@@ -522,8 +475,8 @@ fn load_names(options: &Tree) -> Result<Vec<String>, String> {
     }
     list.iter()
         .map(|item| match item {
-            Tree::Text(name) if crate::effect::host::is_name(name) => Ok(name.clone()),
-            Tree::Text(name) => Err(format!(
+            Doc::Text(name) if crate::effect::host::is_name(name) => Ok(name.clone()),
+            Doc::Text(name) => Err(format!(
                 "`effects.load` names effects by their folder's name, lower-case letters, digits, `-` and `_`; got {name:?}"
             )),
             _ => Err(SHAPE.to_owned()),
@@ -533,13 +486,11 @@ fn load_names(options: &Tree) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Tree;
+    use super::Doc;
 
     /// `sol.effects`' options as it reads them ([`super::tree_of`]).
-    fn tree(lua: &str) -> Tree {
-        let state = mlua::Lua::new();
-        let table: mlua::Table = state.load(lua).eval().expect("the test's Lua");
-        super::tree_of(&table).expect("readable")
+    fn tree(lua: &str) -> Doc {
+        super::tree_of(&crate::script::doc::tests::doc(lua))
     }
 
     /// **The engine's keys read with their defaults and within their
@@ -712,7 +663,7 @@ mod tests {
         let lua = mlua::Lua::new();
         let read = |source: &str| {
             let table: mlua::Table = lua.load(source).eval().expect("a table");
-            let tree = Tree::from_lua(&mlua::Value::Table(table))
+            let tree = crate::script::doc_of_plain(&mlua::Value::Table(table))
                 .expect("a tree")
                 .expect("a table is a tree");
             super::parse(&tree)

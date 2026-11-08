@@ -36,13 +36,19 @@ use crate::input::devices::{DeviceKind, DeviceMatch, InputConfig, Settings as In
 use crate::present::Curve;
 
 mod command;
+pub(crate) mod doc;
 mod keep;
 mod lua;
+mod settings;
 mod types;
 
 pub(crate) use command::*;
+pub(crate) use doc::{Doc, Table as DocTable};
 pub(crate) use keep::*;
+pub(crate) use lua::convert::doc_of_plain;
 pub(crate) use types::*;
+
+use lua::convert::describe_value as describe;
 
 /// The buttons `sol.press` names, with their evdev codes: `side` is
 /// `BTN_SIDE`, a mouse's "back", and `extra` is `BTN_EXTRA`, its "forward".
@@ -410,15 +416,6 @@ fn read_frames(options: &mlua::Table) -> Result<crate::framing::Settings, String
         }
     }
     Ok(settings)
-}
-
-fn describe(value: &Value) -> String {
-    match value {
-        Value::Integer(number) => number.to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::String(text) => text.to_string_lossy(),
-        other => format!("<{}>", other.type_name()),
-    }
 }
 
 /// `sol.lock`'s settings for Solium's own lock (#281): `lockout` (a table of
@@ -3122,16 +3119,16 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 .transpose()?
             {
                 None | Some(mlua::Value::Nil) => Ok(Vec::new()),
-                Some(value) => match crate::effect::tree::Tree::from_lua(&value)? {
+                Some(value) => match crate::script::doc_of_plain(&value)? {
                     Some(tree) => crate::effect::rules::parse(&tree),
                     None => Ok(Vec::new()),
                 },
             };
             let settings = match options {
                 None => Ok(crate::effect::settings::Settings::default()),
-                Some(table) => {
-                    crate::effect::settings::parse(&crate::effect::settings::tree_of(&table)?)
-                }
+                Some(table) => crate::effect::settings::parse(&crate::effect::settings::tree_of(
+                    &lua::convert::doc_of(&Value::Table(table))?,
+                )),
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Effects { rules, settings });
@@ -3147,7 +3144,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, options: Option<Table>| {
             let read = match options {
                 None => Ok(crate::warm::FirstFrame::default()),
-                Some(table) => crate::warm::startup(&table)?,
+                Some(table) => crate::warm::startup(&lua::convert::doc_of(&Value::Table(table))?),
             };
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Startup(read));
@@ -3837,48 +3834,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "idle",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut idle = crate::idle::Settings::default();
-            if let Some(options) = options {
-                let read = |key: &str, unit: f64| -> Option<Duration> {
-                    let value = options.get::<Value>(key).ok()?;
-                    if matches!(value, Value::Nil) {
-                        return None;
-                    }
-                    // `try_`, because a number past what a `Duration` holds
-                    // would otherwise panic, and that is the session.
-                    match number(&value)
-                        .filter(|amount| *amount >= 0.0)
-                        .and_then(|amount| Duration::try_from_secs_f64(amount * unit).ok())
-                    {
-                        Some(duration) => Some(duration),
-                        None => {
-                            tracing::warn!(
-                                key,
-                                value = describe(&value),
-                                "idle: not a number of zero or more; keeping the default"
-                            );
-                            None
-                        }
-                    }
-                };
-                if let Some(after) = read("lock_after", 1.0) {
-                    idle.lock_after = after;
-                }
-                if let Some(after) = read("screens_off_after", 1.0) {
-                    idle.screens_off_after = after;
-                }
-                if let Some(interval) = read("off_frame_interval", 0.001) {
-                    idle.off_frame_interval = interval;
-                }
-                match options.get::<Value>("dbus_inhibit") {
-                    Ok(Value::Boolean(on)) => idle.dbus_inhibit = on,
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(other) => tracing::warn!(
-                        value = describe(&other),
-                        "idle.dbus_inhibit: true or false; keeping the default, true"
-                    ),
-                }
-            }
+            let idle = settings::idle::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Idle(idle));
             })
@@ -7704,7 +7660,6 @@ const DEFORM_KEYS: [&str; 7] = [
 /// words, naming the key (`tests::a_deforms_own_keys_are_refused_outside_their_words`).
 fn deform_from(options: &Table) -> mlua::Result<Option<DeformSpec>> {
     use crate::effect::settings::{PresentFailed, PresentReload, said};
-    use crate::effect::tree::Tree;
     let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
@@ -7755,7 +7710,10 @@ fn deform_from(options: &Table) -> mlua::Result<Option<DeformSpec>> {
         if DEFORM_KEYS.contains(&key.as_str()) {
             continue;
         }
-        match Tree::from_lua(&value)?.as_ref().and_then(Tree::value) {
+        match crate::script::doc_of_plain(&value)?
+            .as_ref()
+            .and_then(crate::effect::param_value)
+        {
             Some(value) => params.push((key, value)),
             None => {
                 return Err(refused(

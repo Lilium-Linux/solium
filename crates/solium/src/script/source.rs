@@ -8,11 +8,14 @@
 /// Every production file of `script/`, by its path under `src/script/`.
 pub(crate) const FILES: &[(&str, &str)] = &[
     ("command.rs", include_str!("command.rs")),
+    ("doc.rs", include_str!("doc.rs")),
     ("keep.rs", include_str!("keep.rs")),
     ("lua/convert.rs", include_str!("lua/convert.rs")),
     ("lua/mod.rs", include_str!("lua/mod.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("reference.rs", include_str!("reference.rs")),
+    ("settings/idle.rs", include_str!("settings/idle.rs")),
+    ("settings/mod.rs", include_str!("settings/mod.rs")),
     ("source.rs", include_str!("source.rs")),
     ("types.rs", include_str!("types.rs")),
 ];

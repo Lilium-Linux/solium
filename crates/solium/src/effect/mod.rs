@@ -15,6 +15,7 @@ pub(crate) mod gl;
 pub(crate) mod host;
 pub(crate) mod mask;
 pub(crate) mod memo;
+pub(crate) mod param;
 pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod rules;
@@ -22,7 +23,7 @@ pub(crate) mod run;
 pub(crate) mod sandbox;
 pub(crate) mod settings;
 pub(crate) mod store;
-pub(crate) mod tree;
+pub(crate) use param::param_value;
 pub(crate) mod watch;
 pub(crate) mod xray;
 
