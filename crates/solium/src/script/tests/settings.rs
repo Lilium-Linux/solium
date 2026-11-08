@@ -1721,26 +1721,41 @@ fn sol_read_stops_at_files_max_read() {
 }
 
 /// **`sol.files` reads the store settings** (#473): `store_interval` is
-/// what the settle asks for, and `store_max` caps a store file; values
-/// of the wrong kind keep the defaults.
+/// how often the compositor asks for the stores, handed to it as a setting,
+/// and `store_max` caps a store file; values of the wrong kind keep the
+/// defaults.
 #[test]
 fn sol_files_reads_the_store_settings() {
+    let interval = |scripts: &mut Scripts| {
+        scripts
+            .startup()
+            .commands
+            .into_iter()
+            .find_map(|command| match command {
+                Command::StoreInterval(every) => Some(every),
+                _ => None,
+            })
+    };
     let state = crate::files::tests::scratch("script-store-settings");
     crate::files::tests::use_state_dir(&state);
     std::fs::write(state.join("big.json"), r#"{"a": "0123456789"}"#).expect("writing");
-    let (directory, scripts) = loaded(
+    let (directory, mut scripts) = loaded(
         "solium-script-test-store-settings",
         r#"sol.files({ store_interval = 5000, store_max = 10 })
            big = sol.store("big", { a = "default" })"#,
     );
-    assert_eq!(scripts.store_interval(), Duration::from_secs(5));
+    assert_eq!(interval(&mut scripts), Some(Duration::from_secs(5)));
     assert_eq!(scripts.evaluate("return big.a"), "default");
     assert!(
         state.join("big.json.broken").exists(),
         "past store_max was read"
     );
-    scripts.evaluate("sol.files({ store_interval = 0, store_max = -1 }) return ''");
-    assert_eq!(scripts.store_interval(), crate::files::STORE_INTERVAL);
+    let _ = std::fs::remove_dir_all(&directory);
+    let (directory, mut scripts) = loaded(
+        "solium-script-test-store-settings-wrong",
+        "sol.files({ store_interval = 0, store_max = -1 })",
+    );
+    assert_eq!(interval(&mut scripts), Some(crate::files::STORE_INTERVAL));
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::remove_dir_all(&state);
 }

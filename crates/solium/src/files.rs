@@ -507,6 +507,9 @@ pub(crate) struct Files {
     stored: HashMap<String, String>,
     /// When the stores are next compared, on the compositor's clock.
     next_save: Duration,
+    /// How often the configuration is asked for its stores:
+    /// `files.store_interval`.
+    pub(crate) store_interval: Duration,
 }
 
 impl Default for Files {
@@ -526,6 +529,7 @@ impl Default for Files {
             watches: HashMap::new(),
             stored: HashMap::new(),
             next_save: Duration::ZERO,
+            store_interval: STORE_INTERVAL,
         }
     }
 }
@@ -1021,13 +1025,9 @@ pub(crate) fn settle(state: &mut Solium) {
 
 /// [`settle`], at `now` on the compositor's clock, which a test chooses.
 pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
-    if let Some(scripts) = state.scripts.as_ref()
-        && state.files.save_due(now, scripts.store_interval())
-    {
-        let stores = scripts.stores();
-        state
-            .files
-            .save(stores.iter().map(|(name, value)| (name, value)));
+    let every = state.files.store_interval;
+    if state.scripts.is_some() && state.files.save_due(now, every) {
+        save_stores(state);
     }
     if state.files.is_idle() {
         return;
@@ -1048,13 +1048,19 @@ pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
 /// At the compositor's end: save the stores that changed, and wait a
 /// bounded time for every write to land.
 pub(crate) fn finish(state: &mut Solium) {
-    if let Some(scripts) = state.scripts.as_ref() {
-        let stores = scripts.stores();
-        state
-            .files
-            .save(stores.iter().map(|(name, value)| (name, value)));
-    }
+    save_stores(state);
     state.files.wait_for_writes();
+}
+
+/// Ask the configuration for the stores that changed, and save them.
+fn save_stores(state: &mut Solium) {
+    let snapshot = state.snapshot();
+    let Some(mut scripts) = state.scripts.take() else {
+        return;
+    };
+    let outcome = scripts.save_stores(snapshot);
+    state.scripts = Some(scripts);
+    state.apply(outcome);
 }
 
 #[cfg(test)]

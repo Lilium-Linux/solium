@@ -427,9 +427,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "files",
         lua.create_function(|lua, options: Option<Table>| {
-            let settings = settings::files::parse(&lua::convert::section(options)?);
+            let settings = settings::files::parse(&lua::convert::section(options.clone())?);
             lua.set_app_data(settings);
-            Ok(())
+            // How often the stores are saved is the compositor's to keep:
+            // it asks for them on its own clock.
+            configure(lua, "files", lua::convert::wire_section(options)?)
         })?,
     )?;
 

@@ -97,3 +97,8 @@ impl mlua::UserData for WatchHandle {
         });
     }
 }
+
+/// Each store's text as the compositor was last given it, loaded or saved,
+/// so a `save-stores` answers with only the stores that changed.
+#[derive(Debug, Default)]
+pub(crate) struct StoresSent(pub(crate) std::collections::HashMap<String, String>);

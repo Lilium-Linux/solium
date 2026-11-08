@@ -130,6 +130,7 @@ pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
         | C::Watch(_)
         | C::WatchCancel(_)
         | C::Store(_)
+        | C::StoreLoaded(_)
         | C::Notify(_)
         // Over a lock, it changes nothing.
         | C::LockNow
@@ -345,7 +346,11 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             shown: watch.shown,
         },
         W::WatchCancel(id) => Command::WatchCancel(id),
-        W::Store((name, text)) => Command::StoreLoaded { name, text },
+        W::Store((name, text)) => Command::StoreSave {
+            name,
+            value: json(&text)?,
+        },
+        W::StoreLoaded((name, text)) => Command::StoreLoaded { name, text },
         W::Notify(notify) => {
             use crate::services::notifications::model::Urgency;
             Command::Notify(crate::services::notifications::Own {
@@ -481,6 +486,9 @@ fn configure(
         ))],
         "workspaces" => vec![Command::Workspaces(settings::workspaces::parse(options)?)],
         "output_management" => vec![Command::OutputManagement(flag(options)?)],
+        "files" => vec![Command::StoreInterval(
+            settings::files::parse(options).store_interval,
+        )],
         "workspaces_offered" => vec![Command::WorkspacesOffered(flag(options)?)],
         other => return Err(format!("`{other}` is not a settings section")),
     })

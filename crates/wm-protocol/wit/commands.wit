@@ -298,7 +298,11 @@ interface commands {
         file-write(file-write),
         watch(watch),
         watch-cancel(u64),
+        /// A store's content to save, as JSON text, by its name.
         store(tuple<string, string>),
+        /// A store as it was read from its file when the window manager
+        /// started, as JSON text: what is already saved.
+        store-loaded(tuple<string, string>),
         notify(notify),
 
         lock-now,

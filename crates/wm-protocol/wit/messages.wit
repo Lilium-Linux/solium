@@ -132,6 +132,9 @@ interface messages {
         resizing(pointer-move),
         dropped(tuple<u64, f64, f64>),
         scrolled(tuple<f64, f64>),
+        /// It is time to save the stores: answered with a `store` for each
+        /// that changed since the last.
+        save-stores,
     }
 
     /// A window's edge moved by its own resize.

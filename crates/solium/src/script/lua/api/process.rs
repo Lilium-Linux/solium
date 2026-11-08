@@ -263,7 +263,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                             let text = loaded.render();
                             let name = name.clone();
                             with_pending(lua, |pending| {
-                                pending.push(solium_wm_protocol::Command::Store((name, text)));
+                                pending.push(solium_wm_protocol::Command::StoreLoaded((
+                                    name.clone(),
+                                    text.clone(),
+                                )));
+                                if let Some(mut sent) = lua.app_data_mut::<StoresSent>() {
+                                    sent.0.insert(name, text);
+                                }
                             })?;
                             Some(loaded)
                         }

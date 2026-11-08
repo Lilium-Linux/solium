@@ -921,6 +921,8 @@ impl Solium {
                 Command::Watch { id, path, shown } => self.files.watch(id, &path, shown),
                 Command::WatchCancel(id) => self.files.cancel_watch(id),
                 Command::StoreLoaded { name, text } => self.files.loaded_store(name, text),
+                Command::StoreSave { name, value } => self.files.save([(&name, &value)]),
+                Command::StoreInterval(every) => self.files.store_interval = every,
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
                     // Copied only when an entry changes, so `Folder` is sent

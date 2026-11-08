@@ -369,6 +369,13 @@ pub(crate) enum Command {
         name: String,
         text: String,
     },
+    /// A store changed since it was last saved: save it, as it is now.
+    StoreSave {
+        name: String,
+        value: crate::json::Json,
+    },
+    /// How often the stores are asked for, to save them: `files.store_interval`.
+    StoreInterval(Duration),
     /// `folder.trust { uri }`, validated and resolved to an absolute path by
     /// `Solium::act` (04-ui.md §4.9): mark a desktop launcher trusted,
     /// durably, so `folder.open` will run it. Its own command, rather than a

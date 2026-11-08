@@ -2,7 +2,6 @@
 //! before the compositor starts, keeps and stores.
 
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
@@ -282,55 +281,7 @@ impl Scripts {
     /// Rust only, so it runs between dispatches: no Lua is called.
     /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
     pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
-        let mut out = Vec::new();
-        // A check saves nothing.
-        if self.lua.app_data_ref::<CheckOnly>().is_some() {
-            return out;
-        }
-        if let Ok(stores) = self
-            .lua
-            .globals()
-            .get::<Table>("sol")
-            .and_then(|sol| sol.get::<Table>("_stores"))
-        {
-            let mut warned = self
-                .lua
-                .remove_app_data::<StoreWarnings>()
-                .unwrap_or_default();
-            for (name, value) in stores.pairs::<String, Value>().filter_map(Result::ok) {
-                let mut left = 65_536;
-                match crate::files::plain(&value, &name, 0, &mut left, &mut warned.0) {
-                    Ok(Some(json)) => out.push((name, json)),
-                    Ok(None) => {}
-                    Err(why) => {
-                        if warned.0.insert(name.clone()) {
-                            tracing::warn!(store = name, why, "a store is too big to save");
-                        }
-                    }
-                }
-            }
-            self.lua.set_app_data(warned);
-        }
-        if let Some(carried) = self.lua.app_data_ref::<Carried>() {
-            for (name, json) in &carried.0.stores {
-                if !out.iter().any(|(each, _)| each == name) {
-                    out.push((name.clone(), json.clone()));
-                }
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-
-    /// How often the stores are saved: `files.store_interval` (#473).
-    pub(crate) fn store_interval(&self) -> Duration {
-        self.lua
-            .try_app_data_ref::<FileSettings>()
-            .ok()
-            .flatten()
-            .map_or(crate::files::STORE_INTERVAL, |settings| {
-                settings.store_interval
-            })
+        stores_of(&self.lua)
     }
 
     /// Load the configuration for `solium --check`: as [`Self::load`] does,
@@ -397,7 +348,7 @@ impl Scripts {
             lua.set_app_data(CheckOnly::default());
         }
         lua.set_app_data(Pending::default());
-        lua.set_app_data(Snapshot::default());
+        lua.set_app_data(StoresSent::default());
         lua.set_app_data(Carried(carried));
 
         let sol = build_api(&lua).map_err(failed("building the script API"))?;
@@ -554,4 +505,43 @@ impl Scripts {
             serial: 0,
         })
     }
+}
+
+/// The stores as they would be saved: each `sol.store` table as the plain
+/// data it holds, by name. Nothing in a check, which saves nothing.
+pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, crate::json::Json)> {
+    let mut out = Vec::new();
+    // A check saves nothing.
+    if lua.app_data_ref::<CheckOnly>().is_some() {
+        return out;
+    }
+    if let Ok(stores) = lua
+        .globals()
+        .get::<Table>("sol")
+        .and_then(|sol| sol.get::<Table>("_stores"))
+    {
+        let mut warned = lua.remove_app_data::<StoreWarnings>().unwrap_or_default();
+        for (name, value) in stores.pairs::<String, Value>().filter_map(Result::ok) {
+            let mut left = 65_536;
+            match crate::files::plain(&value, &name, 0, &mut left, &mut warned.0) {
+                Ok(Some(json)) => out.push((name, json)),
+                Ok(None) => {}
+                Err(why) => {
+                    if warned.0.insert(name.clone()) {
+                        tracing::warn!(store = name, why, "a store is too big to save");
+                    }
+                }
+            }
+        }
+        lua.set_app_data(warned);
+    }
+    if let Some(carried) = lua.app_data_ref::<Carried>() {
+        for (name, json) in &carried.0.stores {
+            if !out.iter().any(|(each, _)| each == name) {
+                out.push((name.clone(), json.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }

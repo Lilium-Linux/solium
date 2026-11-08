@@ -425,6 +425,12 @@ impl Scripts {
         self.send(snapshot, wire::Event::Scrolled((dx, dy)))
     }
 
+    /// Ask for the stores that changed, to save them: every
+    /// `files.store_interval` on the compositor's clock, and at its end.
+    pub(crate) fn save_stores(&mut self, snapshot: Snapshot) -> Outcome {
+        self.send(snapshot, wire::Event::SaveStores)
+    }
+
     /// Send one event, with what changed since the last batch, and read the
     /// answer as the compositor applies it.
     fn send(&mut self, snapshot: Snapshot, event: wire::Event) -> Outcome {
@@ -880,6 +886,34 @@ fn run(
         }
         E::Dropped((id, x, y)) => call_listeners(lua, "drop", (id, x, y)),
         E::Scrolled((dx, dy)) => call_listeners(lua, "scroll", (dx, dy)),
+        E::SaveStores => {
+            // Read whole before what was sent is looked at: reading them
+            // borrows the Lua state's app data too.
+            let stores: Vec<(String, String)> = super::load::stores_of(lua)
+                .into_iter()
+                .map(|(name, value)| (name, value.render()))
+                .collect();
+            let changed: Vec<(String, String)> = {
+                let sent = lua.app_data_ref::<StoresSent>();
+                stores
+                    .into_iter()
+                    .filter(|(name, text)| {
+                        sent.as_ref().and_then(|sent| sent.0.get(name)) != Some(text)
+                    })
+                    .collect()
+            };
+            if let Some(mut sent) = lua.app_data_mut::<StoresSent>() {
+                for (name, text) in &changed {
+                    sent.0.insert(name.clone(), text.clone());
+                }
+            }
+            with_pending(lua, |pending| {
+                pending
+                    .commands
+                    .extend(changed.into_iter().map(wire::Command::Store));
+            })?;
+            Ok(false)
+        }
     }
 }
 
