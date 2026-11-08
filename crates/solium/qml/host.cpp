@@ -2680,28 +2680,122 @@ static bool transition_moving(const QObject *transition, Census &census)
     return longest < 0 || g_clock_ms - seen->since_ms <= longest + TRANSITION_SLACK_MS;
 }
 
-static bool animation_running(const QObject *item, Census &census)
+/* The three classes the census looks for, by their meta-objects, and the
+ * properties it reads on them.
+ *
+ * The walk visits every object of a scene, on every output, on every pass
+ * something animates, and asking each one `QObject::inherits("...")` is a
+ * string compare at every step up its class chain, three times over, with
+ * `property("running")` a search by name on top. With these, an object is
+ * asked `QMetaObject::inherits`, which compares pointers, and a property is
+ * read through the handle found once.
+ *
+ * Found through the meta-types QtQuick registers, so this still needs no
+ * private header. They exist once QtQuick is loaded, which it is before any
+ * scene exists to ask about; until they are all found, the walk asks by
+ * name, as it always did (`qml::wake::tests::the_census_finds_quicks_classes`). */
+struct CensusClasses
 {
-    /* Of the three kinds only a Flickable is an item, so an item is asked one
-     * inherits() and not three. */
+    const QMetaObject *flickable = nullptr;
+    const QMetaObject *animation = nullptr;
+    const QMetaObject *transition = nullptr;
+    QMetaProperty moving;
+    QMetaProperty animation_running;
+    QMetaProperty paused;
+    QMetaProperty transition_running;
+};
+
+static QMetaProperty named(const QMetaObject *meta, const char *name)
+{
+    return meta->property(meta->indexOfProperty(name));
+}
+
+static const CensusClasses *census_classes()
+{
+    static CensusClasses classes;
+    static bool found = false;
+    if (!found) {
+        classes.flickable = QMetaType::fromName("QQuickFlickable*").metaObject();
+        classes.animation = QMetaType::fromName("QQuickAbstractAnimation*").metaObject();
+        classes.transition = QMetaType::fromName("QQuickTransition*").metaObject();
+        if (classes.flickable == nullptr || classes.animation == nullptr
+            || classes.transition == nullptr) {
+            return nullptr;
+        }
+        classes.moving = named(classes.flickable, "moving");
+        classes.animation_running = named(classes.animation, "running");
+        classes.paused = named(classes.animation, "paused");
+        classes.transition_running = named(classes.transition, "running");
+        found = classes.moving.isValid() && classes.animation_running.isValid()
+            && classes.paused.isValid() && classes.transition_running.isValid();
+        if (!found) {
+            return nullptr;
+        }
+    }
+    return &classes;
+}
+
+/* Which of the three an object is, and what it reads: the handles when
+ * QtQuick's classes are known, the names when not. */
+enum class Kind { Other, Flickable, Animation, Transition };
+
+static Kind kind_of(const QObject *object, bool item, const CensusClasses *classes)
+{
+    /* Of the three only a Flickable is an item, so an item is asked about
+     * one class and not three. */
+    if (classes != nullptr) {
+        const QMetaObject *meta = object->metaObject();
+        if (item) {
+            return meta->inherits(classes->flickable) ? Kind::Flickable : Kind::Other;
+        }
+        if (meta->inherits(classes->animation)) {
+            return Kind::Animation;
+        }
+        return meta->inherits(classes->transition) ? Kind::Transition : Kind::Other;
+    }
+    if (item) {
+        return object->inherits("QQuickFlickable") ? Kind::Flickable : Kind::Other;
+    }
+    if (object->inherits("QQuickAbstractAnimation")) {
+        return Kind::Animation;
+    }
+    return object->inherits("QQuickTransition") ? Kind::Transition : Kind::Other;
+}
+
+static bool read_bool(const QObject *object, QMetaProperty CensusClasses::*property,
+                      const char *name, const CensusClasses *classes)
+{
+    return classes != nullptr ? (classes->*property).read(object).toBool()
+                              : object->property(name).toBool();
+}
+
+static bool animation_running(const QObject *item, Census &census, const CensusClasses *classes)
+{
     const auto *as_item = qobject_cast<const QQuickItem *>(item);
-    if (as_item != nullptr) {
-        if (item->inherits("QQuickFlickable") && item->property("moving").toBool()) {
+    switch (kind_of(item, as_item != nullptr, classes)) {
+    case Kind::Flickable:
+        if (read_bool(item, &CensusClasses::moving, "moving", classes)) {
             return true;
         }
-    } else if (item->inherits("QQuickAbstractAnimation")) {
-        if (item->property("running").toBool() && !item->property("paused").toBool()) {
+        break;
+    case Kind::Animation:
+        if (read_bool(item, &CensusClasses::animation_running, "running", classes)
+            && !read_bool(item, &CensusClasses::paused, "paused", classes)) {
             return true;
         }
-    } else if (item->inherits("QQuickTransition")) {
-        if (!item->property("running").toBool()) {
+        break;
+    case Kind::Transition:
+        if (!read_bool(item, &CensusClasses::transition_running, "running", classes)) {
             census.seen.remove(item);
         } else if (transition_moving(item, census)) {
             return true;
         }
+        break;
+    case Kind::Other:
+        break;
     }
     for (const QObject *child : item->children()) {
-        if (animation_running(child, census)) {
+        if (animation_running(child, census, classes)) {
             return true;
         }
     }
@@ -2727,7 +2821,7 @@ static bool animation_running(const QObject *item, Census &census)
      * would visit the whole subtree twice at every level. */
     if (as_item != nullptr) {
         for (const QQuickItem *child : as_item->childItems()) {
-            if (child->parent() != item && animation_running(child, census)) {
+            if (child->parent() != item && animation_running(child, census, classes)) {
                 return true;
             }
         }
@@ -2735,15 +2829,52 @@ static bool animation_running(const QObject *item, Census &census)
     return false;
 }
 
-extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene)
+/* How many scenes the census has walked, for the tests that it walks none
+ * while nothing is on the clock. */
+static unsigned long long g_census_walks = 0;
+
+extern "C" int solium_qml_scene_animating(const SoliumQmlScene *scene, int still)
 {
     if (scene == nullptr || scene->object == nullptr) {
+        return 0;
+    }
+    /* Nothing on the clock, nothing moving, and no walk.
+     *
+     * Every way a scene moves without being drawn again is a job on the
+     * animation driver: an animation, a Transition's, a Flickable's timeline.
+     * The driver runs exactly while one is on it (`anything_animating`), but
+     * a job asked to start joins it only when the event queue is next run, so
+     * the caller says when that has happened with the driver still and
+     * nothing since (`qml::nothing_on_the_clock`). Then no scene can be in
+     * the middle of anything, and the walk is not asked: on an idle desktop
+     * with the pointer moving, that is every scene on every output on every
+     * pass (`qml::wake::tests::nothing_on_the_clock_is_no_walk`).
+     *
+     * The Transitions seen running are forgotten too. A run that ends while
+     * no walk looks would otherwise leave its start behind, and the next run
+     * would be judged by it: stuck, from its first frame. A Transition that
+     * never says it stopped is found again the next time something runs, and
+     * believed for its animations' length once more, which is what a stuck
+     * one costs beside another animation anyway. */
+    if (still != 0) {
+        scene->transitions.clear();
         return 0;
     }
     /* What a freed object left is let go of before the walk. */
     scene->transitions.removeIf([](const auto &entry) { return entry.value().object.isNull(); });
     Census census{scene->transitions, false};
-    return animation_running(scene->object, census) ? 1 : 0;
+    ++g_census_walks;
+    return animation_running(scene->object, census, census_classes()) ? 1 : 0;
+}
+
+extern "C" unsigned long long solium_qml_census_walks(void)
+{
+    return g_census_walks;
+}
+
+extern "C" int solium_qml_census_classes_found(void)
+{
+    return census_classes() != nullptr ? 1 : 0;
 }
 
 /* Every object of the scene once: its QObject children, and the visual
@@ -2852,7 +2983,7 @@ extern "C" int solium_qml_scene_ticking(const SoliumQmlScene *scene)
      * scene holds, not whether it moves. */
     QHash<const QObject *, TransitionSeen> none;
     Census census{none, true};
-    return ticking || animation_running(scene->object, census) ? 1 : 0;
+    return ticking || animation_running(scene->object, census, census_classes()) ? 1 : 0;
 }
 
 extern "C" int solium_qml_scene_render(SoliumQmlScene *scene)

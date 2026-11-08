@@ -39,7 +39,7 @@ local looks = {}
 local MATERIAL = "blur"
 local ACTIVE = 0.88
 local INACTIVE = 0.80
-local FADE = { duration = 200, easing = "outCubic" }
+local FADE = require("motion").fade
 -- The frame whose titlebar this file folds into the border as a window
 -- tiles, and unfolds as it floats: rounded-violet's (its Frame.qml). The
 -- frame every window gets is `pane` in user.lua, rounded-violet unless you
@@ -62,7 +62,7 @@ local RADIUS = 12
 -- Where each window was while floating, by id, kept across a reload, from the
 -- moment a layout takes over until floating comes back.
 local kept = sol.keep("looks", { floated = {} })
-local RETURN = { duration = 320, easing = "outCubic" }
+local RETURN = require("motion").reflow
 
 -- The groups an earlier version of this file faded windows with, one per
 -- window ("dim-<id>"): taken away, so nothing fades the blur behind a window.
@@ -249,6 +249,13 @@ function looks.wallpaper(open, monitor, chosen)
     for _, m in ipairs(sol.monitors()) do
         desks[m.name] = (stack.open and stack.monitor == m.name and stack.chosen) or workspaces.on(m.name)
     end
+    -- The pan rides the workspaces' own motion, so the picture lands with
+    -- the windows: their spring when it is one, their duration when not.
+    local moving = config.workspaces.motion
+    local spring = type(moving) == "table" and type(moving.easing) == "table" and moving.easing.spring
+    local stiffness = type(spring) == "table" and spring.stiffness or 0
+    local damping = type(spring) == "table" and spring.damping or 0
+    local duration = type(moving) == "table" and tonumber(moving.duration) or 300
     sol.surface("wallpaper", {
         scene = "wallpaper.qml",
         layer = "background",
@@ -259,6 +266,9 @@ function looks.wallpaper(open, monitor, chosen)
             count = workspaces.count(),
             stack = stack.open,
             stackMonitor = stack.monitor or "",
+            stiffness = stiffness,
+            damping = damping,
+            duration = duration,
         },
     })
 end

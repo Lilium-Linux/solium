@@ -23,7 +23,22 @@ local kept = sol.keep("bar", {
     popup = {},
     battery = { present = false, percent = 0, status = "" },
     shown = {},
+    -- Whether the clock is put away while the lock's is out of it.
+    clock_away = false,
 })
+
+-- The clock, put away while the lock's is out of it. The lock this desktop
+-- shows, qml/lock/Violet.qml, takes the bar's clock with it: its own starts
+-- on the bar's, at its size and place, flies to the middle as the session
+-- locks and back down into the bar's as it unlocks. So for that while there
+-- is one clock, the lock's: the bar's goes the instant the lock starts, while
+-- the two still lie one on the other, and fades back over the last LANDING
+-- milliseconds of the exit, as the lock's settles onto it, so neither a
+-- second clock nor no clock is ever seen. 60: the exit eases in, and that
+-- long before its end the lock's clock is within a few pixels of the bar's;
+-- 120 brought the bar's back with the lock's still 20 pixels off, two clocks
+-- for as long. Only under Violet; another lock leaves the bar's clock alone.
+local LANDING = 60
 
 local function name(monitor)
     return "bar-" .. monitor.name
@@ -60,7 +75,12 @@ function bar.apply()
             on = { x = whole.x, y = whole.y + whole.h - HEIGHT, w = whole.w, h = HEIGHT },
             interactive = true,
             reserve = { bottom = HEIGHT },
-            properties = { battery = kept.battery, popup = kept.popup },
+            properties = {
+                battery = kept.battery,
+                popup = kept.popup,
+                clockAway = kept.clock_away,
+                clockLanding = LANDING,
+            },
         })
     end
     for surface in pairs(kept.shown) do
@@ -119,6 +139,38 @@ local function place()
     placed_for = sizes()
     bar.apply()
 end
+
+-- The clock, put away while the lock's is out of it (LANDING, above).
+local landing
+
+local function clock_away(away)
+    if kept.clock_away ~= away then
+        kept.clock_away = away
+        bar.apply()
+    end
+end
+
+sol.on("lock", function(state)
+    local lock = require("config").lock
+    if type(lock) ~= "table" or lock.scene ~= "Violet" then
+        return
+    end
+    if landing then
+        landing:cancel()
+        landing = nil
+    end
+    if state == "locking" or state == "locked" then
+        clock_away(true)
+    elseif state == "unlocking" then
+        local exit = tonumber(lock.exit_ms) or 450
+        landing = sol.after(math.max(0, exit - LANDING), function()
+            landing = nil
+            clock_away(false)
+        end)
+    else
+        clock_away(false)
+    end
+end)
 
 sol.on("monitors", place)
 sol.on("restore", place)

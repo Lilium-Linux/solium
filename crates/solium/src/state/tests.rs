@@ -34598,11 +34598,14 @@ end)
             /// **#134's fifth review, finding 2: on a spring, a genuine
             /// activation mid-slide of a window on the desk being switched
             /// to takes the keyboard.** The desk is cleared from a screen
-            /// away, and a spring's progress at its end is within its
+            /// away, and a spring's progress at its end was within its
             /// epsilon of 1 and not 1 -- so asked where the desk is at
             /// `settling`, it was still a pixel or two off, a hidden
             /// workspace, until the travel was retired: every window on the
-            /// desk being switched to was refused for the whole slide.
+            /// desk being switched to was refused for the whole slide. A
+            /// spring lands exactly now (`solium_animation`'s
+            /// `a_spring_lands_exactly_on_its_target`), so at `settling` the
+            /// desk is where it is going, and the window still takes it.
             #[test]
             fn on_a_spring_a_genuine_activation_mid_slide_on_the_desk_being_switched_to_takes_the_keyboard()
              {
@@ -34653,9 +34656,9 @@ end)
                     })
                     .unwrap_or_default();
                 assert!(
-                    late != (0.0, 0.0) && late.0.abs() < 3.0 && late.1 == 0.0,
-                    "the premise, and the situation under test: the spring leaves workspace 2 \
-                     a pixel or two off at `settling`, and here it is {late:?}"
+                    late.0.abs() < f64::EPSILON && late.1.abs() < f64::EPSILON,
+                    "the premise: at `settling` the spring has workspace 2 where it is going, \
+                     and here it is {late:?} off"
                 );
                 assert!(
                     headed_on_stage(&desk.state, asking.pane),

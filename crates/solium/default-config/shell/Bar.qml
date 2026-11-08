@@ -16,6 +16,10 @@ Item {
     // looks pressed.
     property var battery: ({ present: false, percent: 0, status: "" })
     property var popup: ({})
+    // The clock put away while the lock's is out of it, and how long it takes
+    // to come back as that one lands (bar.lua).
+    property bool clockAway: false
+    property int clockLanding: 60
 
     // The tray: Solium's own (#363), absent on a Solium built before it.
     readonly property bool hasTray: typeof Tray !== "undefined"
@@ -623,6 +627,10 @@ Item {
 
                 Column {
                     anchors.centerIn: parent
+                    // Away at once, as the lock's clock lies on it; back over
+                    // the last of the lock's exit, as that clock lands.
+                    opacity: root.clockAway ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: root.clockAway ? 0 : root.clockLanding } }
                     Text {
                         id: timeText
                         anchors.horizontalCenter: parent.horizontalCenter

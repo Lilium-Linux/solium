@@ -29,7 +29,7 @@ use crate::mat4::Mat4;
 use crate::pane::Pane;
 use smithay::utils::{Logical, Point, Rectangle};
 pub(crate) use solium_animation::Curve;
-use solium_animation::{Animation, lerp};
+use solium_animation::{Animation, Coast, lerp};
 
 /// A monotonic clock, sampled once per frame.
 ///
@@ -794,6 +794,92 @@ pub(crate) trait Blend: Copy {
     fn blend(self, other: Self, progress: f64) -> Self;
 }
 
+/// The speed a field leaves at when a transform whose own start moves it at
+/// `own` takes over from one moving it at `carried`.
+///
+/// What it had, unless that is slower than `own` in `own`'s direction: a
+/// curve that starts with a kick kicks a slower window up to its own start,
+/// as it would from rest, so taking over never answers slower than starting
+/// fresh. Moving the other way, the kick is less by the speed it had, so it
+/// turns rather than reversing at once. Continuous in `carried` throughout,
+/// and exactly `carried` when `own` is 0, which is a spring's start and an
+/// in-out curve's.
+fn leaving_at(carried: f64, own: f64) -> f64 {
+    if own == 0.0 {
+        return carried;
+    }
+    let (along, kick) = (carried * own.signum(), own.abs());
+    let speed = if along >= kick {
+        along
+    } else if along >= 0.0 {
+        kick
+    } else {
+        along + kick
+    };
+    speed * own.signum()
+}
+
+/// How many fields that measure a [`Carried`] thing has, at most.
+const RATE_FIELDS: usize = 8;
+
+/// How fast each field that measures is changing, per second, in the order
+/// [`Carried::measures`] lists them.
+pub(crate) type Rate = [f64; RATE_FIELDS];
+
+/// Something whose speed one transform can hand to the next
+/// ([`Transform::carrying`]).
+///
+/// Only the fields that measure carry a speed: a [`Frame`]'s rectangle, its
+/// two opacities and its zoom, a [`crate::group::Shift`]'s displacement and
+/// opacity. A matrix carries none: half way between two of its speeds is not
+/// a rotation, and nothing the compositor animates turns fast enough to
+/// show the seam.
+pub(crate) trait Carried: Blend {
+    /// The fields that measure, in a fixed order, unused ones 0.
+    fn measures(self) -> Rate;
+    /// This, with the fields that measure set to `fields`, each kept within
+    /// what it can be (an opacity in 0..=1, a size not below 0).
+    #[must_use]
+    fn with_measures(self, fields: Rate) -> Self;
+    /// What `transform` draws at `now`, with any timing of its own.
+    fn drawn(transform: &Transform<Self>, now: Duration) -> Self
+    where
+        Self: Sized;
+}
+
+impl Carried for Frame {
+    fn measures(self) -> Rate {
+        [
+            self.rect.loc.x,
+            self.rect.loc.y,
+            self.rect.size.w,
+            self.rect.size.h,
+            f64::from(self.opacity),
+            f64::from(self.client_opacity),
+            self.zoom.0,
+            self.zoom.1,
+        ]
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "opacity is a small float either way"
+    )]
+    fn with_measures(self, [x, y, w, h, opacity, client_opacity, zoom_x, zoom_y]: Rate) -> Self {
+        Self {
+            rect: logical((x, y), (w, h)),
+            opacity: opacity.clamp(0.0, 1.0) as f32,
+            client_opacity: client_opacity.clamp(0.0, 1.0) as f32,
+            zoom: (zoom_x, zoom_y),
+            ..self
+        }
+    }
+
+    fn drawn(transform: &Transform<Self>, now: Duration) -> Self {
+        transform.frame_at(now)
+    }
+}
+
 /// An in-flight transform: where it was, where it is going, and when.
 ///
 /// The when is `solium-animation`'s problem; this only knows the two ends.
@@ -808,9 +894,13 @@ pub(crate) struct Transform<T> {
     /// Drop the transform when it lands, so the thing goes back to being drawn
     /// where it lives with no per-frame cost. Set when leaving a mode.
     release: bool,
+    /// The speed of the transform this one took over from, as much of it as
+    /// this one's own start does not have, and how it dies away
+    /// ([`Self::carrying`]). `None` for a start from rest.
+    coast: Option<(Rate, Coast)>,
 }
 
-impl<T: Blend> Transform<T> {
+impl<T: Carried> Transform<T> {
     pub(crate) fn new(
         from: T,
         to: T,
@@ -825,12 +915,94 @@ impl<T: Blend> Transform<T> {
             animation: Animation::new(now, duration, easing),
             channels: None,
             release,
+            coast: None,
         }
     }
 
     /// The value to use this instant.
     pub(crate) fn at(&self, now: Duration) -> T {
-        self.from.blend(self.to, self.animation.progress(now))
+        self.coasted(self.from.blend(self.to, self.animation.progress(now)), now)
+    }
+
+    /// `value` with what the carried speed adds to it at `now`.
+    fn coasted(&self, value: T, now: Duration) -> T {
+        let Some((rate, coast)) = self.coast else {
+            return value;
+        };
+        let seconds = coast.at(now);
+        let mut fields = value.measures();
+        for (field, rate) in fields.iter_mut().zip(rate) {
+            *field += rate * seconds;
+        }
+        value.with_measures(fields)
+    }
+
+    /// How fast what this draws is moving at `now`, each field that measures
+    /// per second; `None` once it has landed, held or not.
+    ///
+    /// Read off what it draws a millisecond either side, so it is the speed
+    /// on screen whatever made it: the curve, a property's own timing, a speed
+    /// carried in from before. In its first millisecond only forward, and over
+    /// a microsecond, since before its start it was something else and a
+    /// spring leaving from rest gathers speed within the millisecond.
+    pub(crate) fn velocity(&self, now: Duration) -> Option<Rate> {
+        const STEP: Duration = Duration::from_millis(1);
+        const FIRST: Duration = Duration::from_micros(1);
+        if self.finished(now) {
+            return None;
+        }
+        let (before, after) = if now.saturating_sub(self.animation.start()) >= STEP {
+            (now.saturating_sub(STEP), now + STEP)
+        } else {
+            (now, now + FIRST)
+        };
+        let seconds = after.saturating_sub(before).as_secs_f64();
+        let (early, late) = (
+            T::drawn(self, before).measures(),
+            T::drawn(self, after).measures(),
+        );
+        let mut rate = [0.0; RATE_FIELDS];
+        for ((rate, early), late) in rate.iter_mut().zip(early).zip(late) {
+            *rate = (late - early) / seconds;
+        }
+        Some(rate)
+    }
+
+    /// Carry on at `velocity`, the speed of what this takes over from, so a
+    /// motion handed over to the next does not lose the speed it had.
+    ///
+    /// Field by field, it leaves at the speed it had, except that it never
+    /// answers slower than its own start would ([`leaving_at`]): a spring, or
+    /// a curve that starts from rest, leaves at exactly the speed it had, and
+    /// one going the other way slows and turns rather than turning in a
+    /// frame; a curve that starts with a kick, such as `outCubic`, still kicks
+    /// a window that was slower. The difference from this transform's own
+    /// start coasts away on its timing ([`Coast`]), so it still lands where it
+    /// is aimed, at rest. `None`, or nothing to make up, is a start from rest,
+    /// exactly as it was.
+    /// `tests::an_interrupted_spring_keeps_its_speed`,
+    /// `tests::a_glide_sent_back_turns_and_lands_at_rest`,
+    /// `tests::a_start_from_rest_is_what_it_was`.
+    pub(crate) fn carrying(mut self, velocity: Option<Rate>) -> Self {
+        // A thousandth of a pixel, or of an opacity, a second.
+        const STILL: f64 = 1e-3;
+        let Some(velocity) = velocity else {
+            return self;
+        };
+        let start = self.animation.start();
+        let own = self.velocity(start).unwrap_or([0.0; RATE_FIELDS]);
+        let mut excess = [0.0; RATE_FIELDS];
+        for ((excess, velocity), own) in excess.iter_mut().zip(velocity).zip(own) {
+            *excess = leaving_at(velocity, own) - own;
+        }
+        if excess.iter().all(|rate| rate.abs() < STILL) {
+            return self;
+        }
+        self.coast = Some((
+            excess,
+            Coast::new(start, self.animation.duration(), self.animation.curve()),
+        ));
+        self
     }
 
     /// Where it is headed, for whoever has to start again from here.
@@ -845,6 +1017,7 @@ impl<T: Blend> Transform<T> {
 
     pub(crate) fn finished(&self, now: Duration) -> bool {
         self.animation.done(now)
+            && self.coast.is_none_or(|(_, coast)| coast.done(now))
             && self.channels.is_none_or(|channels| {
                 [
                     channels.x,
@@ -865,16 +1038,19 @@ impl Transform<Frame> {
     pub(crate) fn frame_at(&self, now: Duration) -> Frame {
         match self.channels {
             None => self.at(now),
-            Some(channels) => self.from.blend_channels(
-                self.to,
-                Progress {
-                    x: channels.x.progress(now),
-                    y: channels.y.progress(now),
-                    size: channels.size.progress(now),
-                    opacity: channels.opacity.progress(now),
-                    client_opacity: channels.client_opacity.progress(now),
-                    rest: self.animation.progress(now),
-                },
+            Some(channels) => self.coasted(
+                self.from.blend_channels(
+                    self.to,
+                    Progress {
+                        x: channels.x.progress(now),
+                        y: channels.y.progress(now),
+                        size: channels.size.progress(now),
+                        opacity: channels.opacity.progress(now),
+                        client_opacity: channels.client_opacity.progress(now),
+                        rest: self.animation.progress(now),
+                    },
+                ),
+                now,
             ),
         }
     }
@@ -967,9 +1143,10 @@ pub(crate) fn present(
 ) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
+        let velocity = slot.and_then(|transform| transform.velocity(now));
         let mut transform = Transform::new(from, to, now, duration, easing, false);
         transform.channels = timed(channels, now);
-        *slot = Some(transform);
+        *slot = Some(transform.carrying(velocity));
     });
 }
 
@@ -997,14 +1174,10 @@ pub(crate) fn clear(
 ) -> bool {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform::new(
-            from,
-            Frame::real(real),
-            now,
-            duration,
-            easing,
-            true,
-        ));
+        let velocity = slot.and_then(|transform| transform.velocity(now));
+        *slot = Some(
+            Transform::new(from, Frame::real(real), now, duration, easing, true).carrying(velocity),
+        );
     })
     .is_some()
 }
@@ -1028,7 +1201,7 @@ pub(crate) fn clear(
 ///
 /// The destination and the release flag are preserved rather than reset, so a
 /// window that was on its way somewhere under its own transform keeps going
-/// there; only the easing restarts.
+/// there, at the speed it had ([`Transform::carrying`]).
 pub(crate) fn rebase(
     pane: &Pane,
     real: Rectangle<i32, Logical>,
@@ -1048,14 +1221,18 @@ pub(crate) fn rebase(
                 )
             },
         );
-        *slot = Some(Transform::new(
-            drawn.shifted(by.0, by.1),
-            to,
-            now,
-            duration,
-            easing,
-            release,
-        ));
+        let velocity = slot.and_then(|transform| transform.velocity(now));
+        *slot = Some(
+            Transform::new(
+                drawn.shifted(by.0, by.1),
+                to,
+                now,
+                duration,
+                easing,
+                release,
+            )
+            .carrying(velocity),
+        );
     });
 }
 
@@ -1065,7 +1242,7 @@ pub(crate) fn rebase(
 /// still aimed where it started drew the window arriving at the rectangle it
 /// no longer had, then let go onto the real one, a jump at the end. The rest
 /// of the way from what is drawn, in what is left of the glide, so nothing on
-/// screen jumps; only the easing restarts, as [`rebase`]'s does.
+/// screen jumps, at the speed it had, as [`rebase`]'s does.
 ///
 /// Only a glide that lets go on arrival, the kind a placement plays, and with
 /// one timing for every channel: a mode's transform is aimed at something
@@ -1086,7 +1263,8 @@ pub(crate) fn reaim(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
             transform.animation.remaining(now),
             transform.animation.curve(),
             true,
-        );
+        )
+        .carrying(transform.velocity(now));
     });
 }
 
@@ -1335,14 +1513,20 @@ pub(crate) const CLOSING: Duration = Duration::from_millis(190);
 pub(crate) fn close(pane: &Pane, real: Rectangle<i32, Logical>, now: Duration) {
     let from = frame(pane, real, now);
     with_slot(pane, |slot| {
-        *slot = Some(Transform::new(
-            from,
-            from.scaled(0.86).with_opacity(0.0),
-            now,
-            CLOSING,
-            Curve::InOutQuad,
-            false,
-        ));
+        // A window closed as it opens shrinks on from the speed it was
+        // growing at, rather than stopping dead to shrink.
+        let velocity = slot.and_then(|transform| transform.velocity(now));
+        *slot = Some(
+            Transform::new(
+                from,
+                from.scaled(0.86).with_opacity(0.0),
+                now,
+                CLOSING,
+                Curve::InOutQuad,
+                false,
+            )
+            .carrying(velocity),
+        );
     });
 }
 
@@ -1423,6 +1607,177 @@ mod tests {
         Rectangle::new((x, y).into(), (w, h).into())
     }
 
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    /// A 400x300 window at `x`.
+    fn window_at(x: i32) -> Frame {
+        Frame::real(rect(x, 100, 400, 300))
+    }
+
+    /// How fast `transform` draws its window moving right at `now`, in pixels
+    /// a second, from what it draws over the half millisecond after.
+    fn going(transform: &Transform<Frame>, now: Duration) -> f64 {
+        let after = now + Duration::from_micros(500);
+        (transform.frame_at(after).rect.loc.x - transform.frame_at(now).rect.loc.x) / 0.0005
+    }
+
+    /// The spring the shipped desktop travels on (`default-config/motion.lua`).
+    fn travel() -> Curve {
+        Curve::Spring(solium_animation::Spring {
+            stiffness: 600.0,
+            damping: 49.0,
+            epsilon: 0.0003,
+            ..solium_animation::Spring::default()
+        })
+    }
+
+    /// A glide from 0 to 1000 on `curve`, `millis` in: as drawn there, and
+    /// as fast as it is moving.
+    fn under_way(curve: Curve, millis: u64) -> (Frame, Option<Rate>, f64) {
+        let glide = Transform::new(window_at(0), window_at(1000), ms(0), ms(300), curve, true);
+        let velocity = glide.velocity(ms(millis));
+        let speed = velocity.map_or(0.0, |rate| rate[0]);
+        (glide.frame_at(ms(millis)), velocity, speed)
+    }
+
+    /// **An interrupted spring keeps its speed.** 60 ms into a glide on the
+    /// travel spring the window is moving at its fastest. Sent on further, a
+    /// new spring restarted from rest stopped it dead and set off again: a
+    /// stall in the middle of a slide, every time a key was pressed twice.
+    /// Carried, it leaves at the speed it had, from exactly where it was.
+    #[test]
+    fn an_interrupted_spring_keeps_its_speed() {
+        let (drawn, velocity, speed) = under_way(travel(), 60);
+        let restarted = Transform::new(drawn, window_at(1500), ms(60), ms(0), travel(), true);
+        let carried = restarted.carrying(velocity);
+
+        assert!(speed > 5000.0, "the glide was moving at only {speed} px/s");
+        let stalled = going(&restarted, ms(60));
+        assert!(
+            stalled < 0.2 * speed,
+            "a restart from rest should stall, or this proves nothing: {stalled} px/s"
+        );
+        let carried_on = going(&carried, ms(60));
+        assert!(
+            (carried_on - speed).abs() < 0.02 * speed,
+            "carried, it left at {carried_on} px/s, from {speed}"
+        );
+        assert_eq!(
+            carried.frame_at(ms(60)),
+            drawn,
+            "carried, it started somewhere else"
+        );
+        assert!(
+            (carried.frame_at(ms(1500)).rect.loc.x - 1500.0).abs() < 1e-9,
+            "it did not land on its target"
+        );
+    }
+
+    /// **A spring sent back turns, rather than reversing in a frame,** and
+    /// arrives where it is sent, at rest, without passing it.
+    #[test]
+    fn a_glide_sent_back_turns_and_lands_at_rest() {
+        let (drawn, velocity, speed) = under_way(travel(), 60);
+        let back =
+            Transform::new(drawn, window_at(0), ms(60), ms(0), travel(), true).carrying(velocity);
+
+        assert!(going(&back, ms(60)) > 0.95 * speed, "it reversed at once");
+        assert!(
+            back.frame_at(ms(70)).rect.loc.x > drawn.rect.loc.x,
+            "10 ms after being sent back it had not carried on at all"
+        );
+        let mut millis = 60;
+        while !back.finished(ms(millis)) {
+            let x = back.frame_at(ms(millis)).rect.loc.x;
+            assert!(x >= -0.001, "at {millis} ms it was past its target, at {x}");
+            millis += 5;
+            assert!(millis < 2000, "it never finished");
+        }
+        assert!(back.frame_at(ms(millis)).rect.loc.x.abs() < 1e-9);
+        let landing = back
+            .velocity(ms(millis.saturating_sub(10)))
+            .map_or(0.0, |rate| rate[0]);
+        assert!(
+            landing.abs() < 0.01 * speed,
+            "10 ms before it landed it was still at {landing} px/s"
+        );
+    }
+
+    /// **A curve that kicks reverses slower than it would from rest.** Half
+    /// way through an `outCubic` glide, moving at 2500 px/s, sent back: a
+    /// fresh `outCubic` leaves at 8750 px/s the other way; carried, the speed
+    /// it had is taken off that, so it turns at 6250.
+    #[test]
+    fn a_kicking_curve_sent_back_turns_slower() {
+        let (drawn, velocity, speed) = under_way(Curve::OutCubic, 150);
+        let fresh = Transform::new(drawn, window_at(0), ms(150), ms(300), Curve::OutCubic, true);
+        let carried = fresh.carrying(velocity);
+        let (kick, turned) = (going(&fresh, ms(150)), going(&carried, ms(150)));
+        assert!(
+            (speed - 2500.0).abs() < 25.0,
+            "the glide was moving at {speed} px/s"
+        );
+        assert!(
+            (turned - (kick + speed)).abs() < 0.02 * kick.abs(),
+            "fresh it turned at {kick} px/s, carried at {turned}, having had {speed}"
+        );
+        assert!((carried.frame_at(ms(450)).rect.loc.x).abs() < 1e-9);
+    }
+
+    /// **A start from rest is what it always was.** Nothing to carry, or a
+    /// speed too small to see, leaves a transform exactly as it was made.
+    #[test]
+    fn a_start_from_rest_is_what_it_was() {
+        let plain = Transform::new(
+            window_at(0),
+            window_at(500),
+            ms(0),
+            ms(240),
+            Curve::OutCubic,
+            true,
+        );
+        let none = plain.carrying(None);
+        let still = plain.carrying(Some([0.0; RATE_FIELDS]));
+        for millis in [0, 30, 120, 239, 240] {
+            assert_eq!(none.frame_at(ms(millis)), plain.frame_at(ms(millis)));
+            assert_eq!(still.frame_at(ms(millis)), plain.frame_at(ms(millis)));
+        }
+        assert!(
+            plain.velocity(ms(240)).is_none(),
+            "a landed transform still had a speed"
+        );
+    }
+
+    /// **The speed a transform reads is the speed it draws,** its own
+    /// property timings included: a present whose centre moves on a slower
+    /// curve than the rest is as fast as its centre moves.
+    #[test]
+    fn a_transforms_speed_is_what_it_draws() {
+        let mut timed = Transform::new(
+            window_at(0),
+            window_at(800),
+            ms(0),
+            ms(200),
+            Curve::OutCubic,
+            true,
+        );
+        let slow = Animation::new(ms(0), ms(400), Curve::Linear);
+        let rest = Animation::new(ms(0), ms(200), Curve::OutCubic);
+        timed.channels = Some(Channels {
+            x: slow,
+            y: rest,
+            size: rest,
+            opacity: rest,
+            client_opacity: rest,
+        });
+        let speed = timed.velocity(ms(100)).map_or(0.0, |rate| rate[0]);
+        assert!(
+            (speed - 2000.0).abs() < 1.0,
+            "a linear 800 px in 400 ms read {speed} px/s"
+        );
+    }
     /// **An overshooting shrink never draws a negative size (#282).** A
     /// spring carrying a fast swipe's velocity takes progress past 1, and
     /// past 0 on the way back; blended there, a window shrinking to a card

@@ -1396,6 +1396,13 @@ doing
 show theirs without it
 (`lock_auth::tests::the_prompt_is_on_the_monitor_prompt_on_names_and_no_other`).
 
+The rest of the desktop hears the lock come and go too, as one word and
+nothing more: `sol.on("lock", function(state) ... end)` is told `"locking"`,
+`"locked"`, `"unlocking"` and `"unlocked"`, each once, so a configuration
+can move with the lock. The shipped desktop's bar puts its clock away while
+Violet's flies out of it and back (`default-config/bar.lua`)
+(`lock_auth::tests::the_scripts_hear_the_lock_come_and_go`).
+
 **Pulled down by a finger.** On an iPhone, the lock follows a finger pulled
 down from the top and locks when it is let go far enough. Solium gives your
 configuration the piece it cannot make itself, and leaves the gesture to you:

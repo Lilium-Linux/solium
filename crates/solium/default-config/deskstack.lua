@@ -18,9 +18,9 @@
 
 local deskstack = { active = false }
 
-local OPEN = { duration = 320, easing = "outCubic" }
-local STEP = { duration = 260, easing = "outCubic" }
-local LEAVE = { duration = 260, easing = "outCubic" }
+local OPEN = require("motion").travel
+local STEP = require("motion").travel
+local LEAVE = require("motion").reflow
 
 local SCALE = 0.5        -- the chosen desk, of the monitor
 local SHRINK = 0.6       -- each step away from it

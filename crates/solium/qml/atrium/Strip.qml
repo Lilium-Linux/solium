@@ -37,9 +37,14 @@ Item {
     // front window's bottom-left corner as drawn, this frame) and `fade` (1 a
     // card, 0 a window); `false` while none is held.
     property var held: false
-    // The strip's own width; the scene is wider, so that a held card's icons
-    // can go with it.
+    // The strip's own depth, its width down the left or its height along the
+    // bottom; the scene is deeper, so that a held card's icons can go with it.
     property int strip: 220
+    // Which side of the work area the strip is on, "left" or "bottom"
+    // (`floating.atrium.side`): where the edge that brings it back is, and
+    // which way it slides away.
+    property string side: "left"
+    readonly property bool alongBottom: side === "bottom"
     // The springs the Lua moves the cards on, `{ stiffness, damping }`, for
     // the icons to move with them: `floating.atrium.motion` and, as the strip
     // slides away, `hide_motion`.
@@ -81,12 +86,21 @@ Item {
     // pointer is. The compositor moves a window and says nothing until it is
     // let go, and this scene's own pointer events arrive unevenly between
     // frames, so while a button is held over this monitor, or a card is held
-    // anywhere, by the pointer or a finger, the Lua is asked to draw once a frame, on the compositor's
-    // clock, with how long the frame was, which a turned window's easing
-    // after the pointer is measured in, and told when the button comes up.
+    // anywhere, by the pointer or a finger, the Lua is asked to draw once a
+    // frame, with how long the frame was by the compositor's clock (`clock`
+    // below), which a turned window's easing after the pointer and how fast
+    // it turns are measured in, and told when the button comes up.
+    readonly property bool ticking: (Solium.cursor.pressed && Solium.monitor.pointer) || column.dragging
+    property real tickedAt: -1
+    onTickingChanged: tickedAt = -1
     FrameAnimation {
-        running: (Solium.cursor.pressed && Solium.monitor.pointer) || column.dragging
-        onTriggered: Solium.send("tick", { dt: frameTime })
+        running: root.ticking
+        onTriggered: {
+            const now = root.clock
+            const dt = root.tickedAt < 0 ? -1 : now - root.tickedAt
+            root.tickedAt = now
+            Solium.send("tick", dt > 0 ? { dt: dt } : {})
+        }
     }
     Connections {
         target: Solium.cursor
@@ -102,13 +116,28 @@ Item {
         id: edge
         visible: root.cardList.length > 0 && root.hidden
         x: 0
-        y: 0
-        width: 3
-        height: root.height
+        y: root.alongBottom ? root.height - 6 : 0
+        width: root.alongBottom ? root.width : 3
+        height: root.alongBottom ? 6 : root.height
         HoverHandler {
             id: edgeHover
             onHoveredChanged: {
-                if (hovered && !root.peeking)
+                if (!hovered || root.peeking)
+                    dwell.stop()
+                else if (root.alongBottom)
+                    dwell.restart()
+                else
+                    Solium.send("edge")
+            }
+        }
+        // Along the bottom the edge lies just above the bar, which the pointer
+        // crosses on its way to the taskbar; so there it must rest a moment,
+        // where the left edge, which stops the pointer, answers at once.
+        Timer {
+            id: dwell
+            interval: 220
+            onTriggered: {
+                if (edgeHover.hovered && !root.peeking)
                     Solium.send("edge")
             }
         }
@@ -271,11 +300,36 @@ Item {
             root.aimKey = null
         }
     }
-    FrameAnimation {
-        running: root.near !== null
-        onTriggered: {
+    // The compositor's clock, in seconds, for the icons' springs and the
+    // drag's ticks: a plain animation of it, which the clock the cards move
+    // on advances, running only while one of those springs is (`springing`
+    // counts them) or a drag ticks. FrameAnimation's frameTime counts the
+    // wall's time, so under SOLIUM_CLOCK_RATE, or across a stalled frame, the
+    // icons left the cards they belong to behind, and a window in the hand
+    // eased and turned as many times faster.
+    property int springing: 0
+    property real clock: 0
+    NumberAnimation on clock {
+        running: root.springing > 0 || root.ticking
+        from: 0
+        to: 1000
+        duration: 1000000
+        loops: Animation.Infinite
+    }
+    readonly property bool aiming: root.near !== null
+    property real aimClock: 0
+    onAimingChanged: {
+        aimClock = clock
+        springing += aiming ? 1 : -1
+    }
+    onClockChanged: {
+        if (!root.aiming)
+            return
+        const now = root.clock
+        let left = Math.min(Math.max(0, now - root.aimClock), 0.05)
+        root.aimClock = now
+        {
             const k = root.motion.stiffness, c = root.motion.damping
-            let left = Math.min(frameTime, 0.05)
             while (left > 0) {
                 const dt = Math.min(left, 0.004)
                 root.aimVx += (k * (root.near.ix - root.aimX) - c * root.aimVx) * dt
@@ -412,7 +466,8 @@ Item {
                     const keep = Math.max(0, Math.min(1, (nearSize + 8 - level) / 8))
                     return drawn + Math.max(0, there - drawn) * keep
                 }
-                return badge.ix - size * 0.18 + slot * (size + root.iconGap) - (away ? root.strip : 0)
+                return badge.ix - size * 0.18 + slot * (size + root.iconGap)
+                    - (away && !root.alongBottom ? root.strip : 0)
             }
             readonly property real ty: {
                 if (inHand) {
@@ -420,7 +475,7 @@ Item {
                     const there = root.near ? root.aimY - nearSize * 0.62 : own
                     return own + (there - own) * root.pull
                 }
-                return badge.iy - size * 0.62
+                return badge.iy - size * 0.62 + (away && root.alongBottom ? root.strip : 0)
             }
             width: shown
             height: shown
@@ -478,18 +533,30 @@ Item {
                 }
                 if (inHand) {
                     px = tx; py = ty; vx = 0; vy = 0
-                } else if (!settled()) {
-                    spring.running = true
+                } else if (!settled() && !springing) {
+                    lastClock = root.clock
+                    springing = true
                 }
             }
-            FrameAnimation {
-                id: spring
-                onTriggered: {
+            // On the scene's clock (`root.clock`), a step each time it moves.
+            property bool springing: false
+            property real lastClock: 0
+            onSpringingChanged: root.springing += springing ? 1 : -1
+            Component.onDestruction: {
+                if (springing)
+                    root.springing -= 1
+            }
+            Connections {
+                target: root
+                enabled: badge.springing
+                function onClockChanged() {
                     if (isNaN(badge.tx) || isNaN(badge.ty))
                         return
+                    const now = root.clock
+                    let left = Math.min(Math.max(0, now - badge.lastClock), 0.05)
+                    badge.lastClock = now
                     const m = badge.away ? root.softMotion : root.motion
                     const k = m.stiffness, c = m.damping
-                    let left = Math.min(frameTime, 0.05)
                     while (left > 0) {
                         const dt = Math.min(left, 0.004)
                         badge.vx += (k * (badge.tx - badge.px) - c * badge.vx) * dt
@@ -500,7 +567,7 @@ Item {
                     }
                     if (badge.settled()) {
                         badge.px = badge.tx; badge.py = badge.ty; badge.vx = 0; badge.vy = 0
-                        running = false
+                        badge.springing = false
                     }
                 }
             }

@@ -229,16 +229,10 @@ Item {
     readonly property real barClockY: root.height - barHeight + 4
     readonly property real barColumnTop: barClockY + (32 - barTime.implicitHeight - barDate.implicitHeight) / 2
 
-    // Over the bar's own clock while the lock's flies out of it or back
-    // into it, so there is one clock and not two; the wallpaper fading in
-    // covers it.
-    Rectangle {
-        visible: root.down < 1 && (Lock.locked || Lock.state === "unlocking" || Lock.state === "peeking")
-        x: root.barClockX; y: root.barClockY
-        width: root.barClockW; height: 32
-        radius: 6
-        color: "#1c1b1d"
-    }
+    // The bar's own clock is put away while this one is out of it, so there
+    // is one clock and not two: bar.lua hears the lock (`sol.on("lock")`)
+    // and hides it the instant the lock starts, while the two lie one on the
+    // other, and brings it back as this one lands. Nothing here covers it.
 
     // The sheet: everything below moves with it.
     Item {
@@ -613,9 +607,12 @@ Item {
             Text {
                 x: -implicitWidth / 2; y: -implicitHeight / 2
                 text: Qt.formatDate(root.now, "dd.MM.yyyy")
-                color: Theme.text
+                // The bar's date colour (shell/Bar.qml's textDim), so the
+                // hand-over to the bar's own date, at either end, is not a
+                // step in brightness.
+                color: "#9c9aa3"
                 // Gone before it reaches the time it would cross.
-                opacity: Math.max(0, 1 - clock.t * 4) * 0.8
+                opacity: Math.max(0, 1 - clock.t * 4)
                 font { pixelSize: 22; family: root.font }
             }
             Text {
