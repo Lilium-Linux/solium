@@ -405,7 +405,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "run_defaults",
         lua.create_function(|lua, options: Option<Table>| {
-            let defaults = settings::run::parse(&lua::convert::section(options)?);
+            let defaults = RunDefaults::read(options.as_ref())?;
             lua.set_app_data(defaults);
             Ok(())
         })?,
@@ -414,15 +414,15 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // `config.files`, handed over by `init.lua` (#473): how much a
     // `sol.read` reads, how often the stores are saved, and how large a
     // store file is read. Left out, or of the wrong kind, keeps the default,
-    // named in the log, as `sol.run_defaults` does; kept in this Lua state,
-    // where `sol.read` and `sol.store` read them and the settle asks
-    // `Scripts::store_interval`.
+    // named in the log, as `sol.run_defaults` does. The limits are kept in
+    // this Lua state, where `sol.read` and `sol.store` read them; how often
+    // the stores are saved is the compositor's, as a settings section.
     // `tests::sol_read_stops_at_files_max_read`,
     // `tests::sol_files_reads_the_store_settings`.
     sol.set(
         "files",
         lua.create_function(|lua, options: Option<Table>| {
-            let settings = settings::files::parse(&lua::convert::section(options.clone())?);
+            let settings = FileSettings::read(options.as_ref())?;
             lua.set_app_data(settings);
             // How often the stores are saved is the compositor's to keep:
             // it asks for them on its own clock.

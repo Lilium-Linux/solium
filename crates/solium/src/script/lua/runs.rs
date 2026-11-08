@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
+use crate::script::lua::convert::describe_value;
 use crate::script::lua::*;
 
 /// Ids for `sol.run{}`'s runs and for timers, counting up across reloads,
@@ -13,8 +14,13 @@ use crate::script::lua::*;
 pub(crate) static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) static TIMERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How long a child may run when nothing says, in milliseconds.
+pub(crate) const TIMEOUT_MS: u64 = 30_000;
+/// How much of each stream is kept when nothing says, in bytes.
+pub(crate) const MAX_OUTPUT: usize = 1 << 20;
+
 /// What a `sol.run{}` takes when its options leave a key out: `config.run`,
-/// through `sol.run_defaults`, or `crate::runs`'s own.
+/// through `sol.run_defaults`, or its own.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RunDefaults {
     pub(crate) timeout: Duration,
@@ -24,9 +30,52 @@ pub(crate) struct RunDefaults {
 impl Default for RunDefaults {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_millis(crate::runs::TIMEOUT_MS),
-            max_output: crate::runs::MAX_OUTPUT,
+            timeout: Duration::from_millis(TIMEOUT_MS),
+            max_output: MAX_OUTPUT,
         }
+    }
+}
+
+impl RunDefaults {
+    /// `sol.run_defaults`'s table, read. Each key left out keeps its
+    /// default, and one of the wrong kind is named in the log and keeps its
+    /// default too.
+    pub(crate) fn read(options: Option<&Table>) -> mlua::Result<Self> {
+        let mut defaults = Self::default();
+        let Some(options) = options else {
+            return Ok(defaults);
+        };
+        match options.get::<Value>("timeout")? {
+            Value::Nil => {}
+            value => match number(&value)
+                .filter(|ms| *ms > 0.0)
+                .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+            {
+                Some(timeout) => defaults.timeout = timeout,
+                None => tracing::warn!(
+                    value = describe_value(&value),
+                    "run.timeout is a number of milliseconds above 0; keeping the \
+                     default, 30000"
+                ),
+            },
+        }
+        match options.get::<Value>("max_output")? {
+            Value::Nil => {}
+            value => match whole_bytes(&value) {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "checked to be a whole number from 0, and saturating past usize"
+                )]
+                Some(bytes) => defaults.max_output = bytes as usize,
+                None => tracing::warn!(
+                    value = describe_value(&value),
+                    "run.max_output is a whole number of bytes, 0 or more; keeping the \
+                     default, 1048576"
+                ),
+            },
+        }
+        Ok(defaults)
     }
 }
 
@@ -111,24 +160,16 @@ pub(crate) fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua
     let lines: Option<mlua::Function> = options.get("lines")?;
     let done: Option<mlua::Function> = options.get("done")?;
     let id = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let request = crate::runs::Request {
-        id,
-        argv,
-        cwd,
-        env,
-        timeout,
-        max_output,
-        lines: lines.is_some(),
-    };
+    let wants_lines = lines.is_some();
     with_pending(lua, |pending| {
         pending.push(solium_wm_protocol::Command::Run(solium_wm_protocol::Run {
-            id: request.id,
-            argv: request.argv,
-            cwd: request.cwd,
-            env: request.env,
-            timeout_ms: to_wire::millis(request.timeout),
-            max_output: u64::try_from(request.max_output).unwrap_or(u64::MAX),
-            lines: request.lines,
+            id,
+            argv,
+            cwd,
+            env,
+            timeout_ms: to_wire::millis(timeout),
+            max_output: u64::try_from(max_output).unwrap_or(u64::MAX),
+            lines: wants_lines,
         }));
     })?;
     if lines.is_some() || done.is_some() {

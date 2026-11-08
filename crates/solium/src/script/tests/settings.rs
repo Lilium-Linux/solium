@@ -1710,7 +1710,7 @@ fn sol_read_stops_at_files_max_read() {
             _ => None,
         })
         .collect();
-    assert_eq!(caps, [4, 10, crate::files::MAX_READ]);
+    assert_eq!(caps, [4, 10, crate::script::lua::MAX_READ]);
     let mut files = crate::files::Files::default();
     play_files(&mut files, &outcome);
     assert_eq!(

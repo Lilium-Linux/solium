@@ -133,13 +133,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "read",
         lua.create_function(|lua, (path, done): (String, mlua::Function)| {
-            let absolute = crate::files::expand(&path)
-                .map_err(|why| mlua::Error::runtime(format!("sol.read: {why}")))?;
+            let absolute =
+                expand(&path).map_err(|why| mlua::Error::runtime(format!("sol.read: {why}")))?;
             let max = lua
                 .try_app_data_ref::<FileSettings>()
                 .ok()
                 .flatten()
-                .map_or(crate::files::MAX_READ, |settings| settings.max_read);
+                .map_or(MAX_READ, |settings| settings.max_read);
             let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             with_pending(lua, |pending| {
                 pending.push(solium_wm_protocol::Command::FileRead(
@@ -162,7 +162,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "write",
         lua.create_function(
             |lua, (path, data, done): (String, mlua::LuaString, Option<mlua::Function>)| {
-                let absolute = crate::files::expand(&path)
+                let absolute = expand(&path)
                     .map_err(|why| mlua::Error::runtime(format!("sol.write: {why}")))?;
                 let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
@@ -190,8 +190,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "watch",
         lua.create_function(|lua, (path, run): (String, mlua::Function)| {
-            let absolute = crate::files::expand(&path)
-                .map_err(|why| mlua::Error::runtime(format!("sol.watch: {why}")))?;
+            let absolute =
+                expand(&path).map_err(|why| mlua::Error::runtime(format!("sol.watch: {why}")))?;
             let (Some(directory), Some(_)) = (absolute.parent(), absolute.file_name()) else {
                 return Err(mlua::Error::runtime(format!(
                     "sol.watch: {path} names no file in a directory"
@@ -253,7 +253,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         .try_app_data_ref::<FileSettings>()
                         .ok()
                         .flatten()
-                        .map_or(crate::files::MAX_STORE, |settings| settings.store_max);
+                        .map_or(MAX_STORE, |settings| settings.store_max);
                     let saved =
                         match ask(lua, solium_wm_protocol::Query::Store((name.clone(), max))) {
                             Some(solium_wm_protocol::Reply::Store(saved)) => saved,

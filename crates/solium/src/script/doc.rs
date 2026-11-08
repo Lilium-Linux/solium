@@ -212,7 +212,8 @@ pub(crate) mod tests {
     use std::cell::RefCell;
 
     use super::{Doc, describe};
-    use crate::script::lua::convert::{describe_value, doc_of};
+    use crate::effect::lua_doc::doc_of;
+    use crate::script::lua::convert::describe_value;
 
     thread_local! {
         static READ: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };

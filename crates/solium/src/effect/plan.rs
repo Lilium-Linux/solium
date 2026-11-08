@@ -896,7 +896,7 @@ mod tests {
     fn rules(lua: &str) -> Vec<crate::effect::rules::Rule> {
         let state = mlua::Lua::new();
         let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-        let tree = crate::script::doc_of_plain(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         crate::effect::rules::parse(&tree).expect("parses")

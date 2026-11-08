@@ -312,7 +312,7 @@ pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, crate::json::Json)> {
         let mut warned = lua.remove_app_data::<StoreWarnings>().unwrap_or_default();
         for (name, value) in stores.pairs::<String, Value>().filter_map(Result::ok) {
             let mut left = 65_536;
-            match crate::files::plain(&value, &name, 0, &mut left, &mut warned.0) {
+            match plain(&value, &name, 0, &mut left, &mut warned.0) {
                 Ok(Some(json)) => out.push((name, json)),
                 Ok(None) => {}
                 Err(why) => {

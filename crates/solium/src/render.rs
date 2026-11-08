@@ -9144,7 +9144,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::script::doc_of_plain(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)
@@ -9238,7 +9238,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "glow" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::script::doc_of_plain(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)
@@ -12251,7 +12251,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "replace", effect = "tint" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::script::doc_of_plain(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)

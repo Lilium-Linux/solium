@@ -379,7 +379,9 @@ fn read_rules(
         .map_err(|problem| vec![problem])?;
     let value = sandbox.eval_file(file).map_err(|problem| vec![problem])?;
     let problem = |message: String| vec![Problem::error(effect, file, None, message)];
-    let tree = match crate::script::doc_of_plain(&value).map_err(|err| problem(err.to_string()))? {
+    let tree = match crate::effect::lua_doc::doc_of_plain(&value)
+        .map_err(|err| problem(err.to_string()))?
+    {
         // Nothing returned is no rules: a file written and not filled yet
         // (`tests::an_effects_lua_that_returns_no_list_is_a_problem`).
         None if value.is_nil() => return Ok(Vec::new()),

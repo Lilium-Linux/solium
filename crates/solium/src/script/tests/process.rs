@@ -261,7 +261,7 @@ fn sol_read_hands_the_file_to_its_function() {
     assert!(
         outcome.commands.iter().any(|command| matches!(
             command,
-            Command::FileRead(request) if request.max == crate::files::MAX_READ
+            Command::FileRead(request) if request.max == crate::script::lua::MAX_READ
         )),
         "the default cap: {:?}",
         outcome.commands

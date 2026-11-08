@@ -663,7 +663,7 @@ mod tests {
         let lua = mlua::Lua::new();
         let read = |source: &str| {
             let table: mlua::Table = lua.load(source).eval().expect("a table");
-            let tree = crate::script::doc_of_plain(&mlua::Value::Table(table))
+            let tree = crate::effect::lua_doc::doc_of_plain(&mlua::Value::Table(table))
                 .expect("a tree")
                 .expect("a table is a tree");
             super::parse(&tree)

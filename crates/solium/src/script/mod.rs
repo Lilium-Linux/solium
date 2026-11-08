@@ -37,7 +37,6 @@ mod types;
 pub(crate) use command::*;
 pub(crate) use doc::{Doc, Table as DocTable};
 pub(crate) use keep::*;
-pub(crate) use lua::convert::doc_of_plain;
 pub(crate) use types::*;
 
 use lua::convert::describe_value as describe;

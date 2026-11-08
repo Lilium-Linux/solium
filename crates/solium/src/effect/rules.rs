@@ -1213,7 +1213,7 @@ mod tests {
     fn rules(lua: &str) -> Doc {
         let state = mlua::Lua::new();
         let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-        crate::script::doc_of_plain(&value)
+        crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value")
     }

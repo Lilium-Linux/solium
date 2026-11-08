@@ -13,6 +13,7 @@ pub(crate) mod fade;
 pub(crate) mod geometry;
 pub(crate) mod gl;
 pub(crate) mod host;
+pub(crate) mod lua_doc;
 pub(crate) mod mask;
 pub(crate) mod memo;
 pub(crate) mod param;

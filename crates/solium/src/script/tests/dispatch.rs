@@ -819,7 +819,7 @@ fn shortcuts_policy_validates_permission_escape_and_application_patterns() {
             .eval()
             .expect("table");
         let settings = crate::script::settings::input::shortcuts(
-            &lua::convert::doc_of(&Value::Table(table)).expect("a document"),
+            &crate::effect::lua_doc::doc_of(&Value::Table(table)).expect("a document"),
         )
         .expect("valid policy");
         assert_eq!(settings.allow, allowed);
@@ -838,7 +838,7 @@ fn shortcuts_policy_validates_permission_escape_and_application_patterns() {
         let table: Table = lua.load(format!("return {spec}")).eval().expect("table");
         assert!(
             crate::script::settings::input::shortcuts(
-                &lua::convert::doc_of(&Value::Table(table)).expect("a document")
+                &crate::effect::lua_doc::doc_of(&Value::Table(table)).expect("a document")
             )
             .is_err(),
             "accepted invalid policy {spec}"

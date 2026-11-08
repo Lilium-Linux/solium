@@ -20,7 +20,6 @@ pub(crate) mod qml;
 pub(crate) mod read;
 pub(crate) mod reload;
 pub(crate) mod resize;
-pub(crate) mod run;
 pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod toplevels;

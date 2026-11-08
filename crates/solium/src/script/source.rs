@@ -51,7 +51,6 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ),
     ("settings/x11.rs", include_str!("settings/x11.rs")),
     ("settings/session.rs", include_str!("settings/session.rs")),
-    ("settings/run.rs", include_str!("settings/run.rs")),
     ("settings/files.rs", include_str!("settings/files.rs")),
     (
         "settings/client_sizes.rs",

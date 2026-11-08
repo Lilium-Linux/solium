@@ -401,9 +401,9 @@ fn configure(
         ))],
         "workspaces" => vec![Command::Workspaces(settings::workspaces::parse(options)?)],
         "output_management" => vec![Command::OutputManagement(flag(options)?)],
-        "files" => vec![Command::StoreInterval(
-            settings::files::parse(options).store_interval,
-        )],
+        "files" => vec![Command::StoreInterval(settings::files::store_interval(
+            options,
+        ))],
         "workspaces_offered" => vec![Command::WorkspacesOffered(flag(options)?)],
         // Read once, before Qt and the session start, from the commands the
         // window manager loaded with ([`crate::script::Scripts::qml`]); a

@@ -476,7 +476,7 @@ fn a_framed_panes_style_is_the_configured_one_or_the_default_and_a_bare_ones_is_
 fn tree(lua: &str) -> crate::script::Doc {
     let state = mlua::Lua::new();
     let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-    crate::script::doc_of_plain(&value)
+    crate::effect::lua_doc::doc_of_plain(&value)
         .expect("readable")
         .expect("a value")
 }
