@@ -843,3 +843,7 @@ impl AnimationSpec {
         }
     }
 }
+
+/// The properties a present can time apart, each with a motion of its own
+/// (#293): what `sol.present`'s `motion` is keyed by.
+pub(crate) const PRESENT_MOTIONS: [&str; 5] = ["x", "y", "size", "opacity", "client_opacity"];

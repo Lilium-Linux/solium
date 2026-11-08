@@ -117,25 +117,17 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "touch",
         lua.create_function(|lua, (slot, options): (i32, Table)| {
-            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+            use solium_wm_protocol::TouchAction;
             let action: String = options.get("action")?;
             let action = match action.as_str() {
                 "capture" => TouchAction::Capture,
                 "move" => TouchAction::Move(options.get("window")?),
                 "resize" => {
                     let edges: String = options.get("edges")?;
-                    let edges = match edges.as_str() {
-                        "top" => ResizeEdge::Top,
-                        "bottom" => ResizeEdge::Bottom,
-                        "left" => ResizeEdge::Left,
-                        "right" => ResizeEdge::Right,
-                        "top_left" => ResizeEdge::TopLeft,
-                        "top_right" => ResizeEdge::TopRight,
-                        "bottom_left" => ResizeEdge::BottomLeft,
-                        "bottom_right" => ResizeEdge::BottomRight,
-                        _ => return Err(mlua::Error::runtime("sol.touch: invalid resize edges")),
-                    };
-                    TouchAction::Resize(options.get("window")?, edges)
+                    if crate::wm::convert::resize_edge(&edges).is_none() {
+                        return Err(mlua::Error::runtime("sol.touch: invalid resize edges"));
+                    }
+                    TouchAction::Resize((options.get("window")?, edges))
                 }
                 _ => {
                     return Err(mlua::Error::runtime(
@@ -143,7 +135,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     ));
                 }
             };
-            with_pending(lua, |pending| pending.push(Command::Touch { slot, action }))
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Touch((slot, action)));
+            })
         })?,
     )?;
     sol.set(
@@ -189,11 +183,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime(format!("sol.press: {id} {why}")));
             }
             with_pending(lua, |pending| {
-                pending.push(Command::Press {
+                let cause = to_wire::focus_cause(pending.source);
+                pending.push(solium_wm_protocol::Command::Press((
                     id,
-                    press,
-                    source: pending.source,
-                });
+                    to_wire::press(press),
+                    cause,
+                )));
             })
         })?,
     )?;

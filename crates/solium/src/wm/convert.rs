@@ -154,6 +154,94 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
                 args: argv,
             }
         }
+        W::Present(present) => Command::Present {
+            id: present.id,
+            rect: present.rect.map(rect),
+            opacity: present.opacity,
+            client_opacity: present.client_opacity,
+            matrix: present.matrix.map(matrix).transpose()?,
+            deform: present.deform.map(deform).transpose()?,
+            z: present.z,
+            pivot: present.pivot,
+            animation: animation(&present.motion)?,
+            channels: channels(&present.channels, &present.motion)?,
+        },
+        W::PresentFrom(present) => Command::PresentFrom {
+            id: present.id,
+            rect: rect(present.rect),
+            opacity: present.opacity,
+            client_opacity: present.client_opacity,
+            animation: animation(&present.motion)?,
+            channels: channels(&present.channels, &present.motion)?,
+            deform: present.deform.map(deform).transpose()?,
+        },
+        W::Clear((id, motion)) => Command::Clear {
+            id,
+            animation: animation(&motion)?,
+        },
+        W::Group((name, selection, motion)) => Command::Group {
+            name,
+            selection: selection.map(|selection| crate::script::Selection {
+                windows: selection.windows,
+                surfaces: selection.surfaces,
+                monitors: selection.monitors,
+                on: selection.on,
+            }),
+            animation: animation(&motion)?,
+        },
+        W::PresentGroup((name, shift, motion)) => Command::PresentGroup {
+            name,
+            to: crate::group::Shift {
+                dx: shift.dx,
+                dy: shift.dy,
+                opacity: shift.opacity,
+                matrix: matrix(shift.matrix)?,
+            },
+            animation: animation(&motion)?,
+        },
+        W::ClearGroup((name, motion)) => Command::ClearGroup {
+            name,
+            animation: animation(&motion)?,
+        },
+        W::Place(place) => Command::Place {
+            id: place.id,
+            rect: rect(place.rect),
+            animation: animation(&place.motion)?,
+            tile: place.tile,
+            inside: place.inside.map(rect),
+            cramped: place.cramped,
+            moved: place.moved,
+        },
+        W::Focus((id, cause, to)) => Command::Focus {
+            id,
+            source: focus_source(cause),
+            warp: to.map(warp).transpose()?,
+        },
+        W::Warp(to) => Command::Warp(warp(to)?),
+        W::Touch((slot, action)) => Command::Touch {
+            slot,
+            action: match action {
+                wire::TouchAction::Capture => crate::script::TouchAction::Capture,
+                wire::TouchAction::Move(id) => crate::script::TouchAction::Move(id),
+                wire::TouchAction::Resize((id, edges)) => crate::script::TouchAction::Resize(
+                    id,
+                    resize_edge(&edges).ok_or_else(|| format!("`{edges}` is not an edge"))?,
+                ),
+            },
+        },
+        W::Press((id, press, cause)) => Command::Press {
+            id,
+            press: match press {
+                wire::Press::Button(button) => crate::script::Press::Button(button),
+                wire::Press::Keys(names) => crate::script::Press::Keys(
+                    names
+                        .iter()
+                        .map(|name| keysym(name))
+                        .collect::<Result<_, _>>()?,
+                ),
+            },
+            source: focus_source(cause),
+        },
         W::LockNow => Command::LockNow,
         W::LockPeek(progress) => {
             Command::LockPeek(progress.map(|progress| progress.clamp(0.0, 1.0)))
@@ -275,4 +363,234 @@ fn configure(
         "workspaces_offered" => vec![Command::WorkspacesOffered(flag(options)?)],
         other => return Err(format!("`{other}` is not a settings section")),
     })
+}
+
+fn rect(rect: wire::Rect) -> crate::script::Rect {
+    crate::script::Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn curve(easing: &wire::Easing) -> crate::present::Curve {
+    use crate::present::Curve;
+    match easing {
+        wire::Easing::Linear => Curve::Linear,
+        wire::Easing::OutCubic => Curve::OutCubic,
+        wire::Easing::OutBack => Curve::OutBack,
+        wire::Easing::InOutQuad => Curve::InOutQuad,
+        wire::Easing::InOutCubic => Curve::InOutCubic,
+        wire::Easing::Bezier((x1, y1, x2, y2)) => Curve::Bezier {
+            x1: *x1,
+            y1: *y1,
+            x2: *x2,
+            y2: *y2,
+        },
+        wire::Easing::Spring(spring) => Curve::Spring(solium_animation::Spring {
+            stiffness: spring.stiffness,
+            damping: spring.damping,
+            mass: spring.mass,
+            initial_velocity: spring.initial_velocity,
+            epsilon: spring.epsilon,
+        }),
+    }
+}
+
+/// A motion's timing, or why it is none: a duration that is not a number
+/// of milliseconds of zero or more. `tests::a_motion_crosses_to_the_nanosecond`.
+fn animation(motion: &wire::Motion) -> Result<crate::script::AnimationSpec, String> {
+    // Read back to the nanosecond, rounded, so a duration that crossed as
+    // milliseconds is the duration that was sent, not one a float's last
+    // digit away from it.
+    let nanos = (motion.duration_ms * 1e6).round();
+    if !(0.0..=u64::MAX as f64).contains(&nanos) {
+        return Err(format!("a motion of {} ms", motion.duration_ms));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded, and checked to be within u64"
+    )]
+    let duration = std::time::Duration::from_nanos(nanos as u64);
+    Ok(crate::script::AnimationSpec {
+        duration,
+        easing: curve(&motion.easing),
+    })
+}
+
+fn matrix(matrix: wire::Matrix) -> Result<crate::mat4::Mat4, String> {
+    let values: [f32; 16] = matrix
+        .try_into()
+        .map_err(|values: Vec<f32>| format!("a matrix of {} numbers, not 16", values.len()))?;
+    Ok(crate::mat4::Mat4(values))
+}
+
+/// A motion of its own for each property: every one named, those left out
+/// moving by the command's own motion.
+fn channels(
+    named: &[(String, wire::Motion)],
+    motion: &wire::Motion,
+) -> Result<Option<Box<crate::present::Channels<crate::script::AnimationSpec>>>, String> {
+    if named.is_empty() {
+        return Ok(None);
+    }
+    let of = |property: &str| -> Result<crate::script::AnimationSpec, String> {
+        let own = named
+            .iter()
+            .find(|(name, _)| name == property)
+            .map_or(motion, |(_, own)| own);
+        animation(own)
+    };
+    if let Some((name, _)) = named
+        .iter()
+        .find(|(name, _)| !crate::script::PRESENT_MOTIONS.contains(&name.as_str()))
+    {
+        return Err(format!("`{name}` is not a property a present moves"));
+    }
+    Ok(Some(Box::new(crate::present::Channels {
+        x: of("x")?,
+        y: of("y")?,
+        size: of("size")?,
+        opacity: of("opacity")?,
+        client_opacity: of("client_opacity")?,
+    })))
+}
+
+fn deform(deform: wire::Deform) -> Result<crate::script::DeformSpec, String> {
+    use crate::effect::settings::{PresentFailed, PresentReload};
+    let params = doc(&deform.params)?;
+    let mut read = Vec::new();
+    if let crate::script::Doc::Table(table) = &params {
+        for (name, value) in &table.fields {
+            let value = value
+                .plain()
+                .as_ref()
+                .and_then(crate::effect::param_value)
+                .ok_or_else(|| format!("a deform's `{name}` is not a param's value"))?;
+            read.push((name.clone(), value));
+        }
+    }
+    let word = |word: Option<&str>, words: &[&str]| -> Result<(), String> {
+        match word {
+            Some(word) if !words.contains(&word) => {
+                Err(format!("`{word}` is not one of {words:?}"))
+            }
+            _ => Ok(()),
+        }
+    };
+    word(deform.failed.as_deref(), &PresentFailed::WORDS)?;
+    word(deform.on_reload.as_deref(), &PresentReload::WORDS)?;
+    Ok(crate::script::DeformSpec {
+        effect: deform.effect,
+        params: read,
+        axis: deform.axis,
+        progress: deform.progress,
+        aim: match deform.aim {
+            wire::Aim::Rect(at) => crate::script::Aim::Rect(rect(at)),
+            wire::Aim::Window(id) => crate::script::Aim::Window(id),
+            wire::Aim::Surface(name) => crate::script::Aim::Surface(name),
+        },
+        seed: deform.seed,
+        failed: deform.failed.as_deref().and_then(PresentFailed::from_word),
+        on_reload: deform
+            .on_reload
+            .as_deref()
+            .and_then(PresentReload::from_word),
+    })
+}
+
+fn warp(warp: wire::Warp) -> Result<crate::script::Warp, String> {
+    use crate::script::{Interrupt, WarpTo};
+    Ok(crate::script::Warp {
+        to: match warp.to {
+            wire::WarpTo::Point((x, y)) => WarpTo::Point { x, y },
+            wire::WarpTo::Window((id, x, y)) => WarpTo::Window { id, at: (x, y) },
+        },
+        motion: warp.motion.as_ref().map(animation).transpose()?,
+        interrupt: match warp.interrupt {
+            wire::Interrupt::Pointer => Interrupt::Pointer,
+            wire::Interrupt::Picture => Interrupt::Picture,
+        },
+    })
+}
+
+fn focus_source(cause: wire::FocusCause) -> crate::script::FocusSource {
+    use crate::script::FocusSource as F;
+    match cause {
+        wire::FocusCause::Binding => F::Binding,
+        wire::FocusCause::Direction => F::Direction,
+        wire::FocusCause::Move => F::Move,
+        wire::FocusCause::Click => F::Click,
+        wire::FocusCause::Scroll => F::Scroll,
+        wire::FocusCause::Drop => F::Drop,
+        wire::FocusCause::Touch => F::Touch,
+        wire::FocusCause::Hover => F::Hover,
+        wire::FocusCause::Surface => F::Surface,
+        wire::FocusCause::Open => F::Open,
+        wire::FocusCause::Activate => F::Activate,
+        wire::FocusCause::Settle => F::Settle,
+        wire::FocusCause::Script => F::Script,
+    }
+}
+
+/// A key by its xkb name, exactly as xkb writes it.
+fn keysym(name: &str) -> Result<smithay::input::keyboard::Keysym, String> {
+    use smithay::input::keyboard::{Keysym, xkb};
+    match xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS) {
+        Keysym::NoSymbol => Err(format!("`{name}` is not a key")),
+        key => Ok(key),
+    }
+}
+
+/// The edge or corner a finger resizes a window from, by its name.
+pub(crate) fn resize_edge(
+    name: &str,
+) -> Option<smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge> {
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+    Some(match name {
+        "top" => ResizeEdge::Top,
+        "bottom" => ResizeEdge::Bottom,
+        "left" => ResizeEdge::Left,
+        "right" => ResizeEdge::Right,
+        "top_left" => ResizeEdge::TopLeft,
+        "top_right" => ResizeEdge::TopRight,
+        "bottom_left" => ResizeEdge::BottomLeft,
+        "bottom_right" => ResizeEdge::BottomRight,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use solium_wm_protocol as wire;
+
+    #[test]
+    fn a_motion_crosses_to_the_nanosecond() {
+        for duration in [0, 1, 240, 333, 1_000, 86_400_000] {
+            let sent = crate::script::AnimationSpec {
+                duration: std::time::Duration::from_millis(duration),
+                easing: crate::present::Curve::OutBack,
+            };
+            let crossed = crate::script::lua::to_wire::motion(sent);
+            assert_eq!(super::animation(&crossed), Ok(sent), "{duration} ms");
+        }
+        let odd = std::time::Duration::from_nanos(16_666_667);
+        let crossed = crate::script::lua::to_wire::motion(crate::script::AnimationSpec {
+            duration: odd,
+            easing: crate::present::Curve::Linear,
+        });
+        assert_eq!(
+            super::animation(&crossed).map(|spec| spec.duration),
+            Ok(odd)
+        );
+        assert!(
+            super::animation(&wire::Motion {
+                duration_ms: -1.0,
+                easing: wire::Easing::Linear
+            })
+            .is_err()
+        );
+    }
 }

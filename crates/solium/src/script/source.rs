@@ -29,6 +29,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("lua/motion.rs", include_str!("lua/motion.rs")),
     ("lua/pending.rs", include_str!("lua/pending.rs")),
     ("lua/runs.rs", include_str!("lua/runs.rs")),
+    ("lua/to_wire.rs", include_str!("lua/to_wire.rs")),
     ("lua/dispatch.rs", include_str!("lua/dispatch.rs")),
     ("lua/load.rs", include_str!("lua/load.rs")),
     ("lua/mod.rs", include_str!("lua/mod.rs")),

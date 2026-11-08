@@ -37,18 +37,20 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let channels = resolved(motion, animation);
-                pending.push(Command::Present {
-                    id,
-                    rect,
-                    opacity,
-                    client_opacity,
-                    matrix,
-                    deform,
-                    z,
-                    pivot,
-                    animation,
-                    channels,
-                });
+                pending.push(solium_wm_protocol::Command::Present(
+                    solium_wm_protocol::Present {
+                        id,
+                        rect: rect.map(to_wire::rect),
+                        opacity,
+                        client_opacity,
+                        matrix: matrix.map(to_wire::matrix),
+                        deform: deform.map(to_wire::deform),
+                        z,
+                        pivot,
+                        motion: to_wire::motion(animation),
+                        channels: to_wire::channels(channels),
+                    },
+                ));
             })
         })?,
     )?;
@@ -71,15 +73,17 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let channels = resolved(motion, animation);
-                pending.push(Command::PresentFrom {
-                    id,
-                    rect,
-                    opacity,
-                    client_opacity,
-                    animation,
-                    channels,
-                    deform,
-                });
+                pending.push(solium_wm_protocol::Command::PresentFrom(
+                    solium_wm_protocol::PresentFrom {
+                        id,
+                        rect: to_wire::rect(rect),
+                        opacity,
+                        client_opacity,
+                        motion: to_wire::motion(animation),
+                        channels: to_wire::channels(channels),
+                        deform: deform.map(to_wire::deform),
+                    },
+                ));
             })
         })?,
     )?;
@@ -89,7 +93,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, id: u64| {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.push(Command::Clear { id, animation });
+                pending.push(solium_wm_protocol::Command::Clear((
+                    id,
+                    to_wire::motion(animation),
+                )));
             })
         })?,
     )?;
@@ -125,11 +132,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.push(Command::Group {
-                    name: name.clone(),
-                    selection: selection.clone(),
-                    animation,
-                });
+                pending.push(solium_wm_protocol::Command::Group((
+                    name.clone(),
+                    selection.clone().map(to_wire::selection),
+                    to_wire::motion(animation),
+                )));
             })
         })?,
     )?;
@@ -145,11 +152,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let (duration, easing) = motion_from(motion.as_ref())?;
                 with_pending(lua, |pending| {
                     let animation = pending.animation.with(duration, easing);
-                    pending.push(Command::PresentGroup {
-                        name: name.clone(),
-                        to,
-                        animation,
-                    });
+                    pending.push(solium_wm_protocol::Command::PresentGroup((
+                        name.clone(),
+                        to_wire::shift(to),
+                        to_wire::motion(animation),
+                    )));
                 })
             },
         )?,
@@ -161,10 +168,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let (duration, easing) = motion_from(motion.as_ref())?;
             with_pending(lua, |pending| {
                 let animation = pending.animation.with(duration, easing);
-                pending.push(Command::ClearGroup {
-                    name: name.clone(),
-                    animation,
-                });
+                pending.push(solium_wm_protocol::Command::ClearGroup((
+                    name.clone(),
+                    to_wire::motion(animation),
+                )));
             })
         })?,
     )?;
@@ -235,11 +242,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
             };
             with_pending(lua, |pending| {
-                pending.push(Command::Warp(Warp {
+                pending.push(solium_wm_protocol::Command::Warp(to_wire::warp(Warp {
                     to,
                     motion,
                     interrupt,
-                }));
+                })));
             })
         })?,
     )?;

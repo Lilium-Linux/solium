@@ -11,6 +11,7 @@ mod load;
 mod motion;
 mod pending;
 mod runs;
+pub(crate) mod to_wire;
 
 pub(crate) use api::*;
 pub(crate) use bindings::*;

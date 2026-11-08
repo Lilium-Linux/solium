@@ -503,9 +503,6 @@ pub(crate) fn resolved(
     })
 }
 
-/// The properties `sol.present`'s `motion` can time apart (#293).
-pub(crate) const PRESENT_MOTIONS: [&str; 5] = ["x", "y", "size", "opacity", "client_opacity"];
-
 /// A present's or a `present_from`'s `motion` (#293): a timing per property, `x` and `y` for the
 /// drawn rect's centre, `size` for its width and height, `opacity`, and
 /// `client_opacity` for its client's inside it (#296), each

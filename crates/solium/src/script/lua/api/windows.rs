@@ -419,11 +419,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 None => None,
             };
             with_pending(lua, |pending| {
-                pending.push(Command::Focus {
+                let cause = to_wire::focus_cause(pending.source);
+                pending.push(solium_wm_protocol::Command::Focus((
                     id,
-                    source: pending.source,
-                    warp,
-                });
+                    cause,
+                    warp.map(to_wire::warp),
+                )));
             })
         })?,
     )?;
@@ -716,15 +717,17 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let moved = pending.moving == Some(id);
-                pending.push(Command::Place {
-                    id,
-                    rect,
-                    animation,
-                    tile,
-                    inside,
-                    cramped,
-                    moved,
-                });
+                pending.push(solium_wm_protocol::Command::Place(
+                    solium_wm_protocol::Place {
+                        id,
+                        rect: to_wire::rect(rect),
+                        motion: to_wire::motion(animation),
+                        tile,
+                        inside: inside.map(to_wire::rect),
+                        cramped,
+                        moved,
+                    },
+                ));
             })
         })?,
     )?;

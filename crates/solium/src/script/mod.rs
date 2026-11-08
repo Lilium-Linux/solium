@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow};
 mod command;
 pub(crate) mod doc;
 mod keep;
-mod lua;
+pub(crate) mod lua;
 pub(crate) mod settings;
 mod types;
 
