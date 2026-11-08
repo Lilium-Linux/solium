@@ -2336,6 +2336,7 @@ dependencies = [
  "solium-auth",
  "solium-effects",
  "solium-layout",
+ "solium-wm-protocol",
  "tracing",
  "tracing-subscriber",
  "wayland-client",

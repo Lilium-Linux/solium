@@ -23,6 +23,7 @@ solium-effects = { path = "../effects" }
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
 solium-layout = { path = "../layout" }
+solium-wm-protocol = { path = "../wm-protocol" }
 
 # The lock screen's password check (#281): the protocol the `solium-auth`
 # helper speaks and the zeroised `Secret`, both sides of which live there so

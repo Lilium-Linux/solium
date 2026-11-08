@@ -1,0 +1,200 @@
+//! What changed since the last batch: the compositor remembers what it told
+//! the window manager, and each batch carries only the rows that differ,
+//! whole, so the window manager's mirror is the snapshot without the
+//! snapshot crossing the socket every time.
+
+use std::collections::HashMap;
+
+use solium_wm_protocol as wire;
+use wire::Change;
+
+use super::convert;
+use crate::script::Snapshot;
+
+/// What the window manager was last told.
+#[derive(Debug, Default)]
+pub(crate) struct Told {
+    windows: HashMap<u64, wire::Window>,
+    stacking: Vec<u64>,
+    monitors: Vec<wire::Monitor>,
+    work_area: Option<wire::Rect>,
+    cursor: Option<(f64, f64)>,
+    keyboard: Option<wire::Keyboard>,
+    shortcuts_owner: Option<Option<u64>>,
+    text_field: Option<Option<wire::TextField>>,
+    problems: Option<Vec<wire::Problem>>,
+    locked: Option<bool>,
+}
+
+impl Told {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The changes that bring a mirror of what was told up to `snapshot`,
+    /// and remember them as told.
+    pub(crate) fn changes(&mut self, snapshot: &Snapshot) -> Vec<Change> {
+        let mut changes = Vec::new();
+
+        let stacking: Vec<u64> = snapshot.windows.iter().map(|window| window.id).collect();
+        let gone: Vec<u64> = self
+            .stacking
+            .iter()
+            .copied()
+            .filter(|id| !stacking.contains(id))
+            .collect();
+        for id in gone {
+            self.windows.remove(&id);
+            changes.push(Change::WindowGone(id));
+        }
+        // What a mirror's order will be once it has these changes: a window
+        // it has not seen goes on top as it arrives. The order is told only
+        // when that is not the order the windows are in.
+        let mut expected: Vec<u64> = self
+            .stacking
+            .iter()
+            .copied()
+            .filter(|id| stacking.contains(id))
+            .collect();
+        for window in &snapshot.windows {
+            let row = convert::window(window);
+            if self.windows.get(&window.id) != Some(&row) {
+                if !self.windows.contains_key(&window.id) {
+                    expected.insert(0, window.id);
+                }
+                self.windows.insert(window.id, row.clone());
+                changes.push(Change::Window(row));
+            }
+        }
+        if expected != stacking {
+            changes.push(Change::Stacking(stacking.clone()));
+        }
+        self.stacking = stacking;
+
+        let monitors: Vec<wire::Monitor> = snapshot.monitors.iter().map(convert::monitor).collect();
+        if monitors != self.monitors {
+            self.monitors.clone_from(&monitors);
+            changes.push(Change::Monitors(monitors));
+        }
+        let work_area = convert::rect(snapshot.work_area);
+        if self.work_area.as_ref() != Some(&work_area) {
+            self.work_area = Some(work_area.clone());
+            changes.push(Change::WorkArea(work_area));
+        }
+        if self.cursor != Some(snapshot.cursor) {
+            self.cursor = Some(snapshot.cursor);
+            changes.push(Change::Cursor(snapshot.cursor));
+        }
+        let keyboard = convert::keyboard(&snapshot.keyboard);
+        if self.keyboard.as_ref() != Some(&keyboard) {
+            self.keyboard = Some(keyboard.clone());
+            changes.push(Change::Keyboard(keyboard));
+        }
+        if self.shortcuts_owner != Some(snapshot.shortcuts_owner) {
+            self.shortcuts_owner = Some(snapshot.shortcuts_owner);
+            changes.push(Change::ShortcutsOwner(snapshot.shortcuts_owner));
+        }
+        let field = snapshot.text_input.as_ref().map(convert::text_field);
+        if self.text_field.as_ref() != Some(&field) {
+            self.text_field = Some(field.clone());
+            changes.push(Change::TextField(field));
+        }
+        let problems: Vec<wire::Problem> = snapshot.problems.iter().map(convert::problem).collect();
+        if self.problems.as_ref() != Some(&problems) {
+            self.problems = Some(problems.clone());
+            changes.push(Change::Problems(problems));
+        }
+        if self.locked != Some(snapshot.locked) {
+            self.locked = Some(snapshot.locked);
+            changes.push(Change::Locked(snapshot.locked));
+        }
+        changes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use solium_wm_protocol::Change;
+    use solium_wm_protocol::mirror::Mirror;
+
+    use super::Told;
+    use crate::script::{Rect, Snapshot, WindowInfo};
+    use crate::wm::convert;
+
+    fn snapshot(windows: &[(u64, &str)]) -> Snapshot {
+        Snapshot {
+            windows: windows
+                .iter()
+                .map(|(id, title)| {
+                    let mut window = WindowInfo::test(*id);
+                    window.title = (*title).to_owned();
+                    window.rect = Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 400.0,
+                        h: 300.0,
+                    };
+                    window
+                })
+                .collect(),
+            ..Snapshot::default()
+        }
+    }
+
+    /// A mirror fed the changes is the snapshot, whatever came before.
+    fn assert_mirrors(mirror: &Mirror, snapshot: &Snapshot) {
+        let mirrored: Vec<_> = mirror.windows().cloned().collect();
+        let expected: Vec<_> = snapshot.windows.iter().map(convert::window).collect();
+        assert_eq!(mirrored, expected);
+    }
+
+    #[test]
+    fn the_first_batch_tells_everything_and_an_unchanged_desk_nothing() {
+        let mut told = Told::new();
+        let desk = snapshot(&[(2, "top"), (1, "bottom")]);
+        let first = told.changes(&desk);
+        assert!(
+            first
+                .iter()
+                .any(|change| matches!(change, Change::Window(window) if window.id == 2))
+        );
+        let mut mirror = Mirror::new();
+        mirror.apply_all(first);
+        assert_mirrors(&mirror, &desk);
+
+        assert!(
+            told.changes(&desk).is_empty(),
+            "nothing changed, nothing sent"
+        );
+    }
+
+    #[test]
+    fn only_the_window_that_changed_is_sent() {
+        let mut told = Told::new();
+        let mut mirror = Mirror::new();
+        mirror.apply_all(told.changes(&snapshot(&[(3, "a"), (2, "b"), (1, "c")])));
+        let renamed = snapshot(&[(3, "a"), (2, "renamed"), (1, "c")]);
+        let changes = told.changes(&renamed);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(matches!(&changes[0], Change::Window(window) if window.id == 2));
+        mirror.apply_all(changes);
+        assert_mirrors(&mirror, &renamed);
+    }
+
+    #[test]
+    fn closed_raised_and_opened_windows_leave_the_mirror_in_order() {
+        let mut told = Told::new();
+        let mut mirror = Mirror::new();
+        mirror.apply_all(told.changes(&snapshot(&[(3, "a"), (2, "b"), (1, "c")])));
+        for desk in [
+            snapshot(&[(1, "c"), (3, "a"), (2, "b")]),
+            snapshot(&[(1, "c"), (2, "b")]),
+            snapshot(&[(4, "new"), (1, "c"), (2, "b")]),
+            snapshot(&[(1, "c"), (5, "under"), (4, "new"), (2, "b")]),
+        ] {
+            let changes = told.changes(&desk);
+            mirror.apply_all(changes);
+            assert_mirrors(&mirror, &desk);
+        }
+    }
+}

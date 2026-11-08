@@ -409,3 +409,47 @@ pub(crate) struct UnknownSetting {
     pub(crate) key: String,
     pub(crate) meant: Option<String>,
 }
+
+#[cfg(test)]
+impl WindowInfo {
+    /// An ordinary window for a test: shown, on `DP-1`, 800 by 600 at
+    /// (100, 100), named after its id, with nothing else set.
+    pub(crate) fn test(id: u64) -> Self {
+        Self {
+            id,
+            rect: Rect {
+                x: 100.0,
+                y: 100.0,
+                w: 800.0,
+                h: 600.0,
+            },
+            insets: crate::decoration::Insets::default(),
+            drawn: Drawn::default(),
+            title: format!("window {id}"),
+            focused: false,
+            monitor: "DP-1".to_owned(),
+            modal: false,
+            parent: Parentage::None,
+            leaving: false,
+            minimized: false,
+            above: false,
+            icon: None,
+            app_id: String::new(),
+            min: None,
+            max: None,
+            cramped: false,
+            shown: true,
+            fullscreen: false,
+            maximized: false,
+            style: String::new(),
+            client_side: false,
+            blur_region: false,
+            x11_type: None,
+            accepts_input: true,
+            class: None,
+            instance: None,
+            content_type: "none",
+            pid: None,
+        }
+    }
+}

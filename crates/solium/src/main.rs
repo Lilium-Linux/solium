@@ -93,6 +93,8 @@ mod tty;
 mod warm;
 mod warp;
 mod winit;
+#[cfg(test)]
+mod wm;
 mod xwayland;
 
 use std::{io::IsTerminal, path::PathBuf};
