@@ -4768,7 +4768,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "workspaces",
         lua.create_function(|lua, declared: Table| {
-            let declared = declared_workspaces(&declared)?;
+            let declared =
+                settings::workspaces::parse(&lua::convert::doc_of(&Value::Table(declared))?)
+                    .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Workspaces(declared));
             })
@@ -4977,67 +4979,6 @@ fn focused_id(lua: &Lua) -> Option<u64> {
             .iter()
             .find(|window| window.focused)
             .map(|window| window.id)
-    })
-}
-
-/// A `sol.workspaces` table, read: a workspace's `name` left out is its id,
-/// `col` and `row` are 1, and it is not `hidden`.
-/// `tests::sol_workspaces_declares_groups_and_windows`.
-fn declared_workspaces(declared: &Table) -> mlua::Result<crate::models::workspaces::Declared> {
-    use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
-    let strings = |table: Option<Table>| -> mlua::Result<Vec<String>> {
-        table.map_or_else(
-            || Ok(Vec::new()),
-            |table| table.sequence_values::<String>().collect(),
-        )
-    };
-    let arrangement = match declared.get::<Option<Table>>("arrangement")? {
-        Some(shape) => Arrangement {
-            kind: shape.get::<Option<String>>("kind")?.unwrap_or_default(),
-            columns: shape.get::<Option<u32>>("columns")?.unwrap_or(1),
-            rows: shape.get::<Option<u32>>("rows")?.unwrap_or(1),
-        },
-        None => Arrangement::default(),
-    };
-    let mut groups = Vec::new();
-    if let Some(list) = declared.get::<Option<Table>>("groups")? {
-        for group in list.sequence_values::<Table>() {
-            let group = group?;
-            let mut workspaces = Vec::new();
-            if let Some(list) = group.get::<Option<Table>>("workspaces")? {
-                for workspace in list.sequence_values::<Table>() {
-                    let workspace = workspace?;
-                    let id: String = workspace.get("id")?;
-                    workspaces.push(Workspace {
-                        name: workspace
-                            .get::<Option<String>>("name")?
-                            .unwrap_or_else(|| id.clone()),
-                        col: workspace.get::<Option<u32>>("col")?.unwrap_or(1),
-                        row: workspace.get::<Option<u32>>("row")?.unwrap_or(1),
-                        hidden: workspace.get::<Option<bool>>("hidden")?.unwrap_or(false),
-                        id,
-                    });
-                }
-            }
-            groups.push(Group {
-                id: group.get("id")?,
-                monitors: strings(group.get("monitors")?)?,
-                showing: strings(group.get("showing")?)?,
-                workspaces,
-            });
-        }
-    }
-    let mut windows = std::collections::BTreeMap::new();
-    if let Some(map) = declared.get::<Option<Table>>("windows")? {
-        for pair in map.pairs::<u64, Table>() {
-            let (id, list) = pair?;
-            windows.insert(id, strings(Some(list))?);
-        }
-    }
-    Ok(Declared {
-        arrangement,
-        groups,
-        windows,
     })
 }
 

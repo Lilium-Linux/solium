@@ -24,4 +24,5 @@ pub(crate) mod run;
 pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod toplevels;
+pub(crate) mod workspaces;
 pub(crate) mod x11;
