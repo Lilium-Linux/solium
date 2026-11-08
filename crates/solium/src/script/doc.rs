@@ -55,6 +55,8 @@ impl Doc {
 
     /// A table's named key, `None` when absent or not a table.
     pub(crate) fn field(&self, key: &str) -> Option<&Doc> {
+        #[cfg(test)]
+        tests::note_read(key);
         match self {
             Self::Table(table) => table.fields.get(key),
             _ => None,
@@ -90,6 +92,15 @@ impl Doc {
             )]
             Self::Int(whole) => Some(*whole as f64),
             Self::Num(fraction) => Some(*fraction),
+            _ => None,
+        }
+    }
+
+    /// An integer, as Lua's `as_i64` reads one: a float, even a whole one,
+    /// is not.
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(whole) => Some(*whole),
             _ => None,
         }
     }
@@ -198,8 +209,44 @@ pub(crate) fn describe(doc: &Doc) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::RefCell;
+
     use super::{Doc, describe};
     use crate::script::lua::convert::{describe_value, doc_of};
+
+    thread_local! {
+        static READ: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn note_read(key: &str) {
+        READ.with(|read| {
+            if let Some(read) = read.borrow_mut().as_mut() {
+                read.push(key.to_owned());
+            }
+        });
+    }
+
+    /// The named keys `parse` asked a document for, sorted, each once: what
+    /// a section reads, seen rather than listed.
+    pub(crate) fn keys_read(parse: impl FnOnce()) -> Vec<String> {
+        READ.with(|read| *read.borrow_mut() = Some(Vec::new()));
+        parse();
+        let mut keys = READ
+            .with(|read| read.borrow_mut().take())
+            .unwrap_or_default();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    #[test]
+    fn the_keys_a_parser_reads_are_seen() {
+        let read = keys_read(|| {
+            let section = Doc::table();
+            let _ = (section.get("b"), section.field("a"), section.get("b"));
+        });
+        assert_eq!(read, ["a", "b"]);
+    }
 
     /// `lua`, evaluated, as a document.
     pub(crate) fn doc(lua: &str) -> Doc {

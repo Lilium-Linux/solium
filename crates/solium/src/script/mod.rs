@@ -3912,19 +3912,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "pane_build",
         lua.create_function(|lua, millis: Value| {
-            let budget = match millis {
-                Value::Nil => return Ok(()),
-                Value::Integer(whole) => u64::try_from(whole).ok().map(Duration::from_millis),
-                Value::Number(part) if part.is_finite() && part >= 0.0 => {
-                    Some(Duration::from_secs_f64(part / 1000.0))
-                }
-                _ => None,
-            };
-            let Some(budget) = budget else {
-                tracing::warn!(
-                    ?millis,
-                    "pane_build is a number of milliseconds, 0 or more; keeping what it was"
-                );
+            let Some(budget) = settings::pane::build_budget(&lua::convert::doc_of(&millis)?) else {
                 return Ok(());
             };
             with_pending(lua, |pending| {
@@ -3998,34 +3986,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "loading",
         lua.create_function(|lua, options: mlua::Table| {
-            // Read as `Value` and matched, never `get::<Option<T>>`: on a table
-            // that *errors* rather than answering None, and the `?` would take
-            // the whole handler down with it.
-            let mut loading = Loading::default();
-            // Numbers and booleans read straight through; a missing key is
-            // None, which leaves the default alone. `scene` is read as a
-            // `Value` and matched instead, because asking mlua for an
-            // `Option<String>` errors on anything that is not string-like
-            // rather than answering None -- and `?` here would take the whole
-            // handler down with it, which is how bezier easings once silently
-            // stopped working.
-            if let Some(millis) = options.get::<Option<u64>>("patience")? {
-                loading.patience = Duration::from_millis(millis);
-            }
-            if let Some(reserves) = options.get::<Option<bool>>("reserves_a_slot")? {
-                loading.reserves_a_slot = reserves;
-            }
-            if let Some(decorated) = options.get::<Option<bool>>("decorated")? {
-                loading.decorated = decorated;
-            }
-            if let Some(millis) = options.get::<Option<u64>>("fade")? {
-                loading.fade = Duration::from_millis(millis);
-            }
-            if let Ok(Value::String(scene)) = options.get::<Value>("scene")
-                && let Ok(scene) = scene.to_str()
-            {
-                loading.scene = Some(scene.to_string());
-            }
+            let loading = settings::pane::loading(&lua::convert::doc_of(&Value::Table(options))?)
+                .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Loading(loading.clone()));
             })
@@ -4064,150 +4026,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "resize",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let options = match options {
-                Some(table) => table,
-                None => lua.create_table()?,
-            };
-            let mut resize = crate::resizing::Settings::default();
-            // Read as a `Value` and matched rather than asked for as an
-            // `Option<String>`: mlua *errors* on anything that is not
-            // string-like instead of answering None, and the `?` would take the
-            // whole handler down with it. Same reasoning as `scene` above, and
-            // it is how bezier easings once silently stopped working.
-            //
-            // A name that is not one of the four is named in the log and the
-            // default kept, rather than guessed at. Someone who wrote `fill =
-            // "stretched"` wants to be told, and a compositor that silently
-            // picks for them is one they cannot debug.
-            if let Ok(Value::String(name)) = options.get::<Value>("fill")
-                && let Ok(name) = name.to_str()
-            {
-                match crate::resizing::Fill::named(&name) {
-                    Some(fill) => {
-                        // Said out loud rather than left to be discovered.
-                        // `scene` is a real setting and its render path is
-                        // real, but the only pane that has a scene to draw is
-                        // one whose application has not painted yet -- so on
-                        // an ordinary window it is `anchor` today, and someone
-                        // who chose it and saw no difference deserves to be
-                        // told why rather than left doubting their config.
-                        // `crate::resizing::Fill::Scene` carries the whole of
-                        // it, including what arming one would cost.
-                        if fill == crate::resizing::Fill::Scene {
-                            tracing::warn!(
-                                "resize.fill = \"scene\" only draws a scene a window already \
-                                 has, which today means one resized before its application \
-                                 painted; anywhere else it behaves as \"anchor\""
-                            );
-                        }
-                        resize.fill = fill;
-                    }
-                    None => tracing::warn!(
-                        fill = %name,
-                        "resize.fill is one of anchor, crop, stretch or scene; keeping the \
-                         default"
-                    ),
-                }
-            }
-            // The same for the colour of what a picture does not cover, for
-            // the same reasons. `the_shipped_resize_setting_reaches_the_compositor`.
-            if let Ok(Value::String(name)) = options.get::<Value>("background")
-                && let Ok(name) = name.to_str()
-            {
-                match crate::resizing::background_named(&name) {
-                    Some(background) => resize.background = background,
-                    None => tracing::warn!(
-                        background = %name,
-                        "resize.background is \"edge\", \"#rrggbb\", \"#rrggbbaa\" or \"none\"; \
-                         keeping the default"
-                    ),
-                }
-            }
-            // And how long a picture waits for its client once a change is
-            // over (#233): milliseconds, 0 to `resizing::PATIENCE_MAX`, under
-            // the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
-            match options.get::<Value>("patience") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(value) => {
-                    let most = crate::resizing::PATIENCE_MAX.as_secs_f64() * 1000.0;
-                    match number(&value)
-                        .filter(|millis| (0.0..=most).contains(millis))
-                        .and_then(|millis| {
-                            std::time::Duration::try_from_secs_f64(millis / 1000.0).ok()
-                        }) {
-                        Some(patience) => resize.patience = patience,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            most_ms = most,
-                            "resize.patience is a number of milliseconds from 0 to most_ms; \
-                             keeping the default"
-                        ),
-                    }
-                }
-            }
-            // And how long the windows a layout's drag moves wait for one
-            // another's applications: milliseconds, 0 to `resizing::SYNC_MAX`,
-            // under the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
-            match options.get::<Value>("sync") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(value) => {
-                    let most = crate::resizing::SYNC_MAX.as_secs_f64() * 1000.0;
-                    match number(&value)
-                        .filter(|millis| (0.0..=most).contains(millis))
-                        .and_then(|millis| {
-                            std::time::Duration::try_from_secs_f64(millis / 1000.0).ok()
-                        }) {
-                        Some(sync) => resize.sync = sync,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            most_ms = most,
-                            "resize.sync is a number of milliseconds from 0 to most_ms; \
-                             keeping the default"
-                        ),
-                    }
-                }
-            }
-            // And whether a window being resized is told to draw its next
-            // size while its last is still being drawn: true or false, under
-            // the same contract. `the_shipped_resize_setting_reaches_the_compositor`.
-            match options.get::<Value>("overlap") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(Value::Boolean(overlap)) => resize.overlap = overlap,
-                Ok(value) => tracing::warn!(
-                    value = describe(&value),
-                    "resize.overlap is true or false; keeping the default"
-                ),
-            }
-            // What a window being dragged is drawn at: the size its
-            // application has drawn, or the pointer's rectangle. Under the same
-            // contract. `the_shipped_resize_setting_reaches_the_compositor`.
-            if let Ok(Value::String(name)) = options.get::<Value>("follow")
-                && let Ok(name) = name.to_str()
-            {
-                match crate::resizing::Follow::named(&name) {
-                    Some(follow) => resize.follow = follow,
-                    None => tracing::warn!(
-                        follow = %name,
-                        "resize.follow is \"app\" or \"pointer\"; keeping the default"
-                    ),
-                }
-            }
-            // And how often a window being dragged is told its new size: 0 on
-            // every frame, or at most that many times a second. Under the
-            // same contract. `the_shipped_resize_setting_reaches_the_compositor`,
-            // `resize_tell_hz_is_every_frame_or_a_rate`.
-            match options.get::<Value>("tell_hz") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(value) => match number(&value).and_then(crate::resizing::tell_every) {
-                    Some(tell) => resize.tell = tell,
-                    None => tracing::warn!(
-                        value = describe(&value),
-                        most = crate::resizing::TELL_HZ_MAX,
-                        "resize.tell_hz is 0 (every frame) or a number of times a second \
-                         from 1 to most; keeping the default"
-                    ),
-                },
-            }
+            let resize = settings::resize::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Resize(resize));
             })
@@ -4222,19 +4041,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "fullscreen",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut covers = crate::stack::Covers::default();
-            if let Some(options) = options
-                && let Ok(Value::String(name)) = options.get::<Value>("covers")
-                && let Ok(name) = name.to_str()
-            {
-                match crate::stack::Covers::named(&name) {
-                    Some(named) => covers = named,
-                    None => tracing::warn!(
-                        covers = %name,
-                        "fullscreen.covers is \"top\" or \"none\"; keeping the default"
-                    ),
-                }
-            }
+            let covers = settings::fullscreen::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Fullscreen(covers));
             })
@@ -4270,75 +4077,11 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "cursor_theme",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            // **`Option<Table>`, like `sol.keyboard` and `sol.monitors`, and
-            // for the same reason those two have it.** The documented way to
-            // override the configuration is a single `~/.config/solium/
-            // config.lua`, and a copy written before this setting existed has
-            // no `cursor` key at all -- so shipped `lua/init.lua` calls
-            // `sol.cursor_theme(nil)` and a `Table` parameter fails the *whole
-            // configuration*, not just the pointer. No layouts, no bindings,
-            // no decorations, over a setting nobody asked for. That is the
-            // same class of break as the `sol.cursor` name collision above,
-            // which silently stopped every window being placed.
-            //
-            // Absent is not "reset it": it means the configuration did not
-            // say, which is the default `Configured` below, which is what lets
-            // `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
-            let options = options.unwrap_or(lua.create_table()?);
-            let mut configured = crate::cursor::theme::Configured::default();
-            // `theme` read as a `Value` and matched rather than as an
-            // `Option<String>`: mlua *errors* on anything that is not
-            // string-like instead of answering None, and the `?` would take
-            // the whole handler down with it -- which is how bezier easings
-            // once silently stopped working. Same reasoning as `scene` above.
-            if let Ok(Value::String(name)) = options.get::<Value>("theme")
-                && let Ok(name) = name.to_str()
-                && !name.is_empty()
-            {
-                configured.theme = Some(name.to_string());
-            }
-            // And `size` the same way, for the same reason. `size = "big"` and
-            // `size = 24.5` are both mlua *conversion errors* rather than a
-            // None, and an `Option<i32>` with a `?` on it would take the whole
-            // configuration down over a typo in one field -- exactly what the
-            // line above is written the way it is to avoid.
-            //
-            // A size out of *range* is a different thing and is not refused
-            // here. `Settings::resolve` is the one place that decides what a
-            // size that is not a size means, and it needs to see it to fall
-            // through to the environment rather than to a clamp -- a second
-            // opinion in this line would agree with it today and be free to
-            // drift. That is only true of numbers, which is what is passed on;
-            // a value that is not a number at all is not a size `resolve`
-            // could be shown.
-            match options.get::<Value>("size") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(value) => match value.as_i32() {
-                    Some(size) => configured.size = Some(size),
-                    None => tracing::warn!(
-                        size = ?value,
-                        "cursor size is not a whole number; ignoring it"
-                    ),
-                },
-            }
-            // `scene` the same way: a path or a name, as `shell.scene` is, and
-            // anything else is no scene and a line in the log rather than a
-            // configuration that does not load.
-            // `tests::a_configured_cursor_scene_reaches_the_compositor`.
-            match options.get::<Value>("scene") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(Value::String(scene)) => {
-                    if let Ok(scene) = scene.to_str()
-                        && !scene.is_empty()
-                    {
-                        configured.scene = Some(scene.to_string());
-                    }
-                }
-                Ok(value) => tracing::warn!(
-                    scene = ?value,
-                    "cursor scene is not a file name; ignoring it"
-                ),
-            }
+            // `Option<Table>`, because a copy of `config.lua` written before
+            // this setting existed has no `cursor` key, and shipped `init.lua`
+            // calls `sol.cursor_theme(nil)`: a required table would fail the
+            // whole configuration over a setting nobody asked for.
+            let configured = settings::cursor::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Cursor(configured.clone()));
             })
@@ -4355,66 +4098,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "qml",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut configured = crate::qml::renderer::Configured::default();
-            let Some(options) = options else {
-                lua.set_app_data(configured);
-                return Ok(());
-            };
-            match options.get::<Value>("renderer") {
-                Ok(Value::String(name)) => {
-                    configured.renderer = Some(name.to_string_lossy());
-                }
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    renderer = ?other,
-                    "qml.renderer is one of auto, gpu or software; using auto"
-                ),
-            }
-            match options.get::<Value>("probe_timeout") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(value) => match value.as_u64().filter(|&millis| millis > 0) {
-                    Some(millis) => {
-                        configured.probe_timeout = Some(Duration::from_millis(millis));
-                    }
-                    None => tracing::warn!(
-                        probe_timeout = ?value,
-                        "qml.probe_timeout is a whole number of milliseconds above 0; \
-                         keeping the default"
-                    ),
-                },
-            }
-            // How a GPU scene's buffer is sized (`qml::buffers`): a key left
-            // out keeps its default, and a table out of bounds, or with a key
-            // that is not a whole number, keeps both.
-            // `tests::a_configured_qml_renderer_is_read_before_qt_starts`.
-            match options.get::<Value>("buffers") {
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(Value::Table(buffers)) => {
-                    let whole = |key: &str, default: i32| match buffers.get::<Value>(key) {
-                        Ok(Value::Nil) | Err(_) => Some(default),
-                        Ok(value) => value.as_i32(),
-                    };
-                    let step = whole("step", crate::qml::buffers::STEP);
-                    let shrink = whole("shrink", crate::qml::buffers::SHRINK);
-                    match step
-                        .zip(shrink)
-                        .and_then(|(step, shrink)| crate::qml::buffers::Buffers::new(step, shrink))
-                    {
-                        Some(policy) => configured.buffers = Some(policy),
-                        None => tracing::warn!(
-                            ?step,
-                            ?shrink,
-                            "qml.buffers.step is a whole number of pixels from 0 to 1024 and \
-                             qml.buffers.shrink a whole number of steps from 2 to 64; keeping \
-                             the defaults"
-                        ),
-                    }
-                }
-                Ok(other) => tracing::warn!(
-                    buffers = ?other,
-                    "qml.buffers is a table, {{ step = , shrink = }}; keeping the defaults"
-                ),
-            }
+            let configured = settings::qml::parse(&lua::convert::section(options)?);
             lua.set_app_data(configured);
             Ok(())
         })?,
@@ -12871,8 +12555,14 @@ mod tests {
     /// in it, so this cannot be a restatement of the reads and cannot drift
     /// from them however they are spelled -- `sol.keyboard` reads five of its
     /// keys through a closure and three directly, and an `options.get(` scan
-    /// would see only three.
+    /// would see only three. A section read from a document is asked the same
+    /// way, through the document's own record of what was asked of it.
     fn keys_read_by(name: &str) -> Vec<String> {
+        if name == "cursor_theme" {
+            return doc::tests::keys_read(|| {
+                let _ = settings::cursor::parse(&Doc::table());
+            });
+        }
         let directory = std::env::temp_dir().join(format!("solium-script-test-reads-{name}"));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("a temporary directory");

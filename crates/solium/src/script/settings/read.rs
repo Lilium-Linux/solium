@@ -49,6 +49,55 @@ pub(crate) fn texts(section: &Doc, key: &str) -> Result<Option<Vec<String>>, Str
     }
 }
 
+/// A whole number of zero or more under `key`, as Lua reads one for a
+/// Rust `u64`: a whole float and numeric text are read, and anything with a
+/// fraction, negative or past the type is refused as out of range.
+pub(crate) fn unsigned(section: &Doc, key: &str) -> Result<Option<u64>, String> {
+    let value = section.get(key);
+    let out_of_range = || format!("{} (out of range)", not_a(value, "u64"));
+    let number = match value {
+        Doc::Nil => return Ok(None),
+        Doc::Int(whole) => return u64::try_from(*whole).map(Some).map_err(|_| out_of_range()),
+        Doc::Num(number) => *number,
+        Doc::Text(text) => match text.trim().parse::<i64>() {
+            Ok(whole) => return u64::try_from(whole).map(Some).map_err(|_| out_of_range()),
+            Err(_) => text.trim().parse::<f64>().map_err(|_| {
+                format!(
+                    "{} (expected number or string coercible to number)",
+                    not_a(value, "u64")
+                )
+            })?,
+        },
+        _ => {
+            return Err(format!(
+                "{} (expected number or string coercible to number)",
+                not_a(value, "u64")
+            ));
+        }
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "checked to be whole and within u64 first"
+    )]
+    if number.fract() == 0.0 && number >= 0.0 && number < u64::MAX as f64 {
+        Ok(Some(number as u64))
+    } else {
+        Err(out_of_range())
+    }
+}
+
+/// A flag under `key`: `None` when absent, and otherwise true for anything
+/// but `false`, as Lua reads one for a Rust `bool`.
+pub(crate) fn flag(section: &Doc, key: &str) -> Option<bool> {
+    match section.get(key) {
+        Doc::Nil => None,
+        Doc::Bool(on) => Some(*on),
+        _ => Some(true),
+    }
+}
+
 /// How Lua writes a float as text: C's `%.14g`, with `.0` after a whole
 /// number so it still reads as a float.
 fn lua_number_text(number: f64) -> String {
@@ -99,7 +148,7 @@ fn g14(number: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{table, text, texts};
+    use super::{flag, table, text, texts, unsigned};
     use crate::script::doc::tests::doc;
 
     #[test]
@@ -122,6 +171,22 @@ mod tests {
             texts(&doc("{ l = { 'x', 1 } }"), "l"),
             Ok(Some(vec!["x".to_owned(), "1".to_owned()]))
         );
+    }
+
+    #[test]
+    fn unsigned_and_flag_read_as_luas_own_conversions_do() {
+        let lua = mlua::Lua::new();
+        for source in ["5", "2.7", "3.0", "'12'", "-1", "1e30", "{}", "true"] {
+            let table: mlua::Table = lua
+                .load(format!("return {{ x = {source} }}"))
+                .eval()
+                .expect("the test's Lua");
+            let lua_says = table.get::<Option<u64>>("x").map_err(|err| err.to_string());
+            let section = doc(&format!("{{ x = {source} }}"));
+            assert_eq!(unsigned(&section, "x"), lua_says, "{source}");
+            let lua_flag = table.get::<Option<bool>>("x").expect("a flag always reads");
+            assert_eq!(flag(&section, "x"), lua_flag, "{source}");
+        }
     }
 
     #[test]
