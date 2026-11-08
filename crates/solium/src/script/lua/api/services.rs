@@ -228,7 +228,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 token,
                 expire_timeout,
             };
-            with_pending(lua, |pending| pending.push(Command::Notify(own)))
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Notify(to_wire::notify(own)));
+            })
         })?,
     )?;
 

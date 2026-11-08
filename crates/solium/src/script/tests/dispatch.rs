@@ -1981,17 +1981,19 @@ fn every_key_a_section_accepts_is_one_the_compositor_reads() {
 
 #[test]
 fn a_tray_action_is_refused_from_a_binding_at_the_lock() {
-    let act = |action: &str| Command::Act {
-        attempt: 0,
-        action: action.to_owned(),
-        data: crate::json::Json::Null,
-        source: FocusSource::Binding,
+    let reaches = |action: &str| {
+        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Act((
+            0,
+            action.to_owned(),
+            "null".to_owned(),
+            solium_wm_protocol::FocusCause::Binding,
+        )))
     };
-    assert!(act("tray.activate").reaches_past_the_lock());
-    assert!(act("tray.open_menu").reaches_past_the_lock());
-    assert!(!act("audio.mute").reaches_past_the_lock());
+    assert!(reaches("tray.activate"));
+    assert!(reaches("tray.open_menu"));
+    assert!(!reaches("audio.mute"));
     // A media key plays and pauses at the lock: it reaches no window.
-    assert!(!act("media.play_pause").reaches_past_the_lock());
+    assert!(!reaches("media.play_pause"));
 }
 
 /// **The shipped `workspaces.lua` declares its workspaces**: one group per

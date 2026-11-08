@@ -59,14 +59,18 @@ fn other_kind(kind: &str) -> &'static str {
     }
 }
 
-/// Whether a binding at the lock screen may not ask for this: what acts on
-/// a window or a workspace, or ends the session, as
-/// [`crate::script::Command::reaches_past_the_lock`] says of the
-/// compositor's own commands.
+/// Whether a binding at the lock screen may not ask for this: act on a
+/// window or a workspace, or end the session, which is how someone would
+/// get to the desktop underneath a lock (see `input::escape`, which refuses
+/// Ctrl+Alt+Backspace there for the same reason). A binding allowed at the
+/// lock may not ask for any of it (#224); everything else it may, which is
+/// what a volume, brightness or media key needs.
+///
+/// Every command named, with no catch-all, so that one added to the
+/// protocol is decided here rather than allowed by default.
 pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
     use wire::Command as C;
     match command {
-        C::Configure((section, _)) => section == "workspaces",
         C::Present(_)
         | C::PresentFrom(_)
         | C::Group(_)
@@ -91,7 +95,52 @@ pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
         | C::Unplace(_)
         | C::Close(_)
         | C::Quit => true,
-        _ => false,
+        // Declaring the workspaces moves windows between them.
+        C::Configure((section, _)) => section == "workspaces",
+        // `sol.act`'s verbs on windows and workspaces; `apps.launch` is a
+        // spawn, and `folder` opens one. `notifications.invoke` brings the
+        // sender's window forward, and a tray item's actions reach into its
+        // application.
+        C::Act((_, action, ..)) => {
+            action.starts_with("windows.")
+                || action.starts_with("workspaces.")
+                || action.starts_with("tray.")
+                || action == "notifications.invoke"
+        }
+        C::Keep(_)
+        | C::Listen(_)
+        | C::Bind(_)
+        | C::Unbind(_)
+        | C::Grab(_)
+        | C::Status(_)
+        | C::Decoration(_)
+        | C::PaneValues(_)
+        // What a frame shows, which is nothing over a lock.
+        | C::FrameValues(_)
+        | C::Surface(_)
+        | C::SurfaceGone(_)
+        | C::Power(_)
+        | C::Spawn(_)
+        | C::RunDetached(_)
+        | C::Run(_)
+        | C::Timer(_)
+        | C::TimerCancel(_)
+        | C::FileRead(_)
+        | C::FileWrite(_)
+        | C::Watch(_)
+        | C::WatchCancel(_)
+        | C::Store(_)
+        | C::Notify(_)
+        // Over a lock, it changes nothing.
+        | C::LockNow
+        // Nor does a peek, which is nothing over a lock.
+        | C::LockPeek(_)
+        // No window holds the shortcuts at the lock, and taking them back
+        // gives a window nothing.
+        | C::TakeShortcutsBack
+        // Nor the pointer: nothing holds it at the lock.
+        | C::ReleasePointer
+        | C::Reload => false,
     }
 }
 
@@ -242,6 +291,78 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             },
             source: focus_source(cause),
         },
+        W::Act((attempt, action, data, cause)) => Command::Act {
+            attempt,
+            action,
+            data: json(&data)?,
+            source: focus_source(cause),
+        },
+        W::PaneValues(values) => Command::PaneValues(object(&values)?),
+        W::FrameValues((id, values)) => Command::FrameValues {
+            id,
+            fields: object(&values)?,
+        },
+        W::Surface(surface) => Command::Surface(Box::new(declaration(surface)?)),
+        W::RunDetached(mut argv) => {
+            if argv.is_empty() {
+                return Err("run needs a program to run".to_owned());
+            }
+            let program = argv.remove(0);
+            Command::Run {
+                program,
+                args: argv,
+            }
+        }
+        W::Run(run) => Command::RunRead(crate::runs::Request {
+            id: run.id,
+            argv: run.argv,
+            cwd: run.cwd,
+            env: run.env,
+            timeout: duration(run.timeout_ms)?,
+            max_output: usize::try_from(run.max_output).unwrap_or(usize::MAX),
+            lines: run.lines,
+        }),
+        W::Timer(timer) => Command::Timer {
+            id: timer.id,
+            after: duration(timer.after_ms)?,
+            period: timer.period_ms.map(duration).transpose()?,
+        },
+        W::TimerCancel(id) => Command::TimerCancel(id),
+        W::FileRead(read) => Command::FileRead(crate::files::ReadRequest {
+            id: read.id,
+            path: read.path.into(),
+            max: usize::try_from(read.max).unwrap_or(usize::MAX),
+        }),
+        W::FileWrite(write) => Command::FileWrite(crate::files::WriteRequest {
+            id: write.id,
+            path: write.path.into(),
+            data: write.data,
+            report: write.report,
+        }),
+        W::Watch(watch) => Command::Watch {
+            id: watch.id,
+            path: watch.path.into(),
+            shown: watch.shown,
+        },
+        W::WatchCancel(id) => Command::WatchCancel(id),
+        W::Store((name, text)) => Command::StoreLoaded { name, text },
+        W::Notify(notify) => {
+            use crate::services::notifications::model::Urgency;
+            Command::Notify(crate::services::notifications::Own {
+                summary: notify.summary,
+                body: notify.body,
+                icon: notify.icon,
+                urgency: match notify.urgency.as_str() {
+                    "low" => Urgency::Low,
+                    "normal" => Urgency::Normal,
+                    "critical" => Urgency::Critical,
+                    other => return Err(format!("`{other}` is not an urgency")),
+                },
+                actions: notify.actions,
+                token: notify.token,
+                expire_timeout: notify.expire_timeout,
+            })
+        }
         W::LockNow => Command::LockNow,
         W::LockPeek(progress) => {
             Command::LockPeek(progress.map(|progress| progress.clamp(0.0, 1.0)))
@@ -398,22 +519,89 @@ fn curve(easing: &wire::Easing) -> crate::present::Curve {
     }
 }
 
-/// A motion's timing, or why it is none: a duration that is not a number
-/// of milliseconds of zero or more. `tests::a_motion_crosses_to_the_nanosecond`.
-fn animation(motion: &wire::Motion) -> Result<crate::script::AnimationSpec, String> {
-    // Read back to the nanosecond, rounded, so a duration that crossed as
-    // milliseconds is the duration that was sent, not one a float's last
-    // digit away from it.
-    let nanos = (motion.duration_ms * 1e6).round();
+/// A duration that crossed as milliseconds, read back to the nanosecond.
+fn duration(millis: f64) -> Result<std::time::Duration, String> {
+    let nanos = (millis * 1e6).round();
     if !(0.0..=u64::MAX as f64).contains(&nanos) {
-        return Err(format!("a motion of {} ms", motion.duration_ms));
+        return Err(format!("{millis} ms is not a duration"));
     }
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "rounded, and checked to be within u64"
     )]
-    let duration = std::time::Duration::from_nanos(nanos as u64);
+    Ok(std::time::Duration::from_nanos(nanos as u64))
+}
+
+/// JSON text as a value, or why it is not JSON.
+fn json(text: &str) -> Result<crate::json::Json, String> {
+    crate::json::Json::parse(text).ok_or_else(|| "data that is not JSON".to_owned())
+}
+
+/// JSON text as an object's fields.
+fn object(text: &str) -> Result<std::collections::BTreeMap<String, crate::json::Json>, String> {
+    match json(text)? {
+        crate::json::Json::Object(fields) => Ok(fields),
+        _ => Err("values that are not a JSON object".to_owned()),
+    }
+}
+
+/// A scene surface's declaration as the compositor's.
+fn declaration(surface: wire::Surface) -> Result<crate::scripted::Declaration, String> {
+    use crate::scripted::{Declaration, Edges, KeyPolicy, Layer, On, Outside, OutsideClick};
+    let outside = |outside: wire::Outside| match outside {
+        wire::Outside::Swallow => Outside::Swallow,
+        wire::Outside::Pass => Outside::Pass,
+    };
+    Ok(Declaration {
+        name: surface.name,
+        scene: surface.scene.into(),
+        layer: match surface.layer {
+            wire::Layer::Background => Layer::Background,
+            wire::Layer::Bottom => Layer::Bottom,
+            wire::Layer::Top => Layer::Top,
+            wire::Layer::Overlay => Layer::Overlay,
+        },
+        on: match surface.on {
+            wire::Placement::EveryMonitor => On::EveryMonitor,
+            wire::Placement::Primary => On::Primary,
+            wire::Placement::Monitor(name) => On::Monitor(name),
+            wire::Placement::Rect((x, y, w, h)) => {
+                On::Rect(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()))
+            }
+        },
+        properties: crate::scripted::Properties::new(object(&surface.properties)?),
+        interactive: surface.interactive,
+        reserve: Edges {
+            top: surface.reserve.top,
+            right: surface.reserve.right,
+            bottom: surface.reserve.bottom,
+            left: surface.reserve.left,
+        },
+        outside_click: OutsideClick {
+            default: outside(surface.outside_click.default),
+            named: surface
+                .outside_click
+                .named
+                .into_iter()
+                .map(|(name, policy)| (name, outside(policy)))
+                .collect(),
+        },
+        keyboard: match surface.keyboard {
+            wire::KeyPolicy::ExceptClaimed => KeyPolicy::ExceptClaimed,
+            wire::KeyPolicy::All => KeyPolicy::All,
+            wire::KeyPolicy::NoBindings => KeyPolicy::NoBindings,
+        },
+    })
+}
+
+/// A motion's timing, or why it is none: a duration that is not a number
+/// of milliseconds of zero or more. `tests::a_motion_crosses_to_the_nanosecond`.
+fn animation(motion: &wire::Motion) -> Result<crate::script::AnimationSpec, String> {
+    // Read back to the nanosecond, rounded, so a duration that crossed as
+    // milliseconds is the duration that was sent, not one a float's last
+    // digit away from it.
+    let duration = duration(motion.duration_ms)?;
     Ok(crate::script::AnimationSpec {
         duration,
         easing: curve(&motion.easing),

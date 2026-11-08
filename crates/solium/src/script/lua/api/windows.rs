@@ -314,7 +314,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
 
             with_pending(lua, |pending| {
-                pending.push(Command::Surface(Box::new(crate::scripted::Declaration {
+                pending.push(solium_wm_protocol::Command::Surface(to_wire::surface(
+                    crate::scripted::Declaration {
                         name: name.clone(),
                         scene: scene.clone(),
                         layer,
@@ -324,7 +325,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         reserve,
                         outside_click: outside_click.clone(),
                         keyboard,
-                    })));
+                    },
+                )));
             })?;
             Ok(Value::Nil)
         })?,
@@ -769,12 +771,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let data = crate::json::Json::from_lua(&data)?.unwrap_or(crate::json::Json::Null);
                 let attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
-                    pending.push(Command::Act {
+                    let cause = to_wire::focus_cause(pending.source);
+                    pending.push(solium_wm_protocol::Command::Act((
                         attempt,
                         action,
-                        data,
-                        source: pending.source,
-                    });
+                        data.render(),
+                        cause,
+                    )));
                 })?;
                 if let Some(done) = done {
                     let attempts: Table = lua.globals().get::<Table>("sol")?.get("_attempts")?;

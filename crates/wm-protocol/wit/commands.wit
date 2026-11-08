@@ -1,7 +1,7 @@
 /// What a window manager asks of the compositor. Each command is applied in
 /// order, all of an answer's at once, on the next frame at the latest.
 interface commands {
-    use types.{rect, touch-event, doc};
+    use types.{rect, insets, touch-event, doc};
 
     /// How a motion moves: by name, a cubic bezier, or a spring.
     variant easing {
@@ -154,9 +154,56 @@ interface commands {
         argv: list<string>,
         cwd: option<string>,
         env: list<tuple<string, option<string>>>,
-        timeout-ms: u64,
+        timeout-ms: f64,
         max-output: u64,
         lines: bool,
+    }
+
+    /// A directory watched for changes: its absolute path, and the path as
+    /// the window manager wrote it, which is what it is told back.
+    record watch {
+        id: u64,
+        path: string,
+        shown: string,
+    }
+
+    /// The layer a scene surface is drawn in.
+    enum layer { background, bottom, top, overlay }
+
+    /// Where a scene surface is: on every monitor, the primary one, one by
+    /// name, or a rectangle `x`, `y`, `w`, `h`.
+    variant placement {
+        every-monitor,
+        primary,
+        monitor(string),
+        rect(tuple<s32, s32, s32, s32>),
+    }
+
+    /// What a press outside a surface's grab does: swallowed, or passed on.
+    enum outside { swallow, pass }
+
+    record outside-click {
+        default: outside,
+        named: list<tuple<string, outside>>,
+    }
+
+    /// Which keys a surface holding the keyboard gets: all but the bound
+    /// ones, all of them, or all with bindings off.
+    enum key-policy { except-claimed, all, no-bindings }
+
+    /// A QML scene the window manager puts on the desktop: a bar, a dock, a
+    /// launcher.
+    record surface {
+        name: string,
+        scene: string,
+        layer: layer,
+        on: placement,
+        /// Its properties, as a JSON object: what the scene reads.
+        properties: string,
+        interactive: bool,
+        reserve: insets,
+        outside-click: outside-click,
+        keyboard: key-policy,
     }
 
     record file-read {
@@ -228,22 +275,28 @@ interface commands {
         show-minimized(tuple<u64, bool>),
         keep-above(tuple<u64, option<bool>>),
         close(u64),
-        act(tuple<u64, string, doc, focus-cause>),
+        /// An action of a scene's, its data as JSON text: what the scene
+        /// sends with `Solium.send`.
+        act(tuple<u64, string, string, focus-cause>),
 
         decoration(option<string>),
-        pane-values(doc),
-        frame-values(tuple<u64, doc>),
-        surface(doc),
+        /// Values every pane style's frames read, as a JSON object.
+        pane-values(string),
+        /// Values one window's frame reads, as a JSON object.
+        frame-values(tuple<u64, string>),
+        surface(surface),
         surface-gone(string),
         power(tuple<option<string>, bool>),
 
         spawn(list<string>),
+        /// A program run and left to itself, its output not kept.
+        run-detached(list<string>),
         run(run),
         timer(timer),
         timer-cancel(u64),
         file-read(file-read),
         file-write(file-write),
-        watch(tuple<u64, string>),
+        watch(watch),
         watch-cancel(u64),
         store(tuple<string, string>),
         notify(notify),

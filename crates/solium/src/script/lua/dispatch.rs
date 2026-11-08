@@ -585,7 +585,7 @@ impl Scripts {
                             })
                             .unwrap_or_default();
                         for command in dropped {
-                            if let Some(attempt) = command.attempt() {
+                            if let solium_wm_protocol::Command::Act((attempt, ..)) = command {
                                 attempts.set(attempt, Value::Nil)?;
                             }
                         }
@@ -679,7 +679,7 @@ impl Scripts {
                 with_pending(lua, |pending| {
                     pending.commands.extend(
                         gone.into_iter()
-                            .map(|each| Queued::from(Command::TimerCancel(each))),
+                            .map(solium_wm_protocol::Command::TimerCancel),
                     );
                 })?;
             }
@@ -760,7 +760,7 @@ impl Scripts {
                 with_pending(lua, |pending| {
                     pending.commands.extend(
                         gone.into_iter()
-                            .map(|each| Queued::from(Command::WatchCancel(each))),
+                            .map(solium_wm_protocol::Command::WatchCancel),
                     );
                 })?;
             }
@@ -881,14 +881,11 @@ impl Scripts {
     }
 }
 
-/// The commands a dispatch queued, as the compositor applies them: the
-/// protocol's converted in [`crate::wm::convert::commands_of`].
-pub(crate) fn applied(queued: Vec<Queued>) -> Vec<Command> {
+/// The commands a dispatch queued, as the compositor applies them,
+/// converted in [`crate::wm::convert::commands_of`].
+pub(crate) fn applied(queued: Vec<solium_wm_protocol::Command>) -> Vec<Command> {
     queued
         .into_iter()
-        .flat_map(|command| match command {
-            Queued::Internal(command) => vec![command],
-            Queued::Wire(command) => crate::wm::convert::commands_of(command),
-        })
+        .flat_map(crate::wm::convert::commands_of)
         .collect()
 }

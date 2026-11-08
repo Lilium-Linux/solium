@@ -1992,8 +1992,12 @@ fn sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach() {
         "no id and nothing focused presses nothing"
     );
     assert!(
-        press(super::Press::Button(0x110)).reaches_past_the_lock(),
-        "a press is allowed to a binding at the lock"
+        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Press((
+            1,
+            solium_wm_protocol::Press::Button(0x110),
+            solium_wm_protocol::FocusCause::Binding,
+        ))),
+        "a press reaches past the lock, so a binding at the lock cannot make one"
     );
 }
 
@@ -2058,22 +2062,25 @@ fn sol_minimize_names_the_focused_window_when_given_none_and_reaches_past_the_lo
             }
         )]
     );
-    let act = |action: &str| Command::Act {
-        attempt: 1,
-        action: action.to_owned(),
-        data: crate::json::Json::Null,
-        source: FocusSource::Script,
+    use solium_wm_protocol::Command as W;
+    let act = |action: &str| {
+        W::Act((
+            1,
+            action.to_owned(),
+            "null".to_owned(),
+            solium_wm_protocol::FocusCause::Script,
+        ))
     };
     for command in [
-        Command::Minimize { id: 3 },
-        Command::Unminimize { id: 3 },
-        Command::ShowMinimized { id: 3, shown: true },
+        W::Minimize(3),
+        W::Unminimize(3),
+        W::ShowMinimized((3, true)),
         act("windows.minimize"),
         act("windows.unminimize"),
     ] {
         assert!(
-            command.reaches_past_the_lock(),
-            "{command:?} is allowed to a binding at the lock"
+            crate::wm::convert::reaches_past_the_lock(&command),
+            "{command:?} reaches past the lock, so a binding at the lock cannot ask for it"
         );
     }
 }

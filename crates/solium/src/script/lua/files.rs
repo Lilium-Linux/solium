@@ -5,7 +5,6 @@ use std::time::Duration;
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Ids for reads, writes and watches (#473), counting up across reloads as
 /// `RUNS` and `TIMERS` do.
@@ -92,7 +91,7 @@ impl mlua::UserData for WatchHandle {
             }
             watches.set(this.0, Value::Nil)?;
             let _ = with_pending(lua, |pending| {
-                pending.push(Command::WatchCancel(this.0));
+                pending.push(solium_wm_protocol::Command::WatchCancel(this.0));
             });
             Ok(())
         });

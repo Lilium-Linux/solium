@@ -6,7 +6,6 @@ use std::time::Duration;
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Ids for `sol.run{}`'s runs and for timers, counting up across reloads,
 /// so an old configuration's id never names a new configuration's run or
@@ -122,7 +121,15 @@ pub(crate) fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua
         lines: lines.is_some(),
     };
     with_pending(lua, |pending| {
-        pending.push(Command::RunRead(request));
+        pending.push(solium_wm_protocol::Command::Run(solium_wm_protocol::Run {
+            id: request.id,
+            argv: request.argv,
+            cwd: request.cwd,
+            env: request.env,
+            timeout_ms: to_wire::millis(request.timeout),
+            max_output: u64::try_from(request.max_output).unwrap_or(u64::MAX),
+            lines: request.lines,
+        }));
     })?;
     if lines.is_some() || done.is_some() {
         let kept = lua.create_table()?;
@@ -155,11 +162,13 @@ pub(crate) fn set_timer(
         .map_err(|_| mlua::Error::runtime(format!("{name}: {ms} ms is too long")))?;
     let id = TIMERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     with_pending(lua, |pending| {
-        pending.push(Command::Timer {
-            id,
-            after,
-            period: every.then_some(after),
-        });
+        pending.push(solium_wm_protocol::Command::Timer(
+            solium_wm_protocol::Timer {
+                id,
+                after_ms: to_wire::millis(after),
+                period_ms: every.then_some(to_wire::millis(after)),
+            },
+        ));
     })?;
     let timers: Table = lua.globals().get::<Table>("sol")?.get("_timers")?;
     timers.set(id, run)?;
@@ -184,7 +193,7 @@ impl mlua::UserData for TimerHandle {
             }
             timers.set(this.0, Value::Nil)?;
             let _ = with_pending(lua, |pending| {
-                pending.push(Command::TimerCancel(this.0));
+                pending.push(solium_wm_protocol::Command::TimerCancel(this.0));
             });
             Ok(())
         });

@@ -41,8 +41,8 @@ interface messages {
         problems(list<problem>),
         locked(bool),
         /// A session service's view (`notifications`, `audio`, `tray`,
-        /// `media`, `apps`), as a document.
-        service(tuple<string, doc>),
+        /// `media`, `apps`), as JSON text.
+        service(tuple<string, string>),
     }
 
     /// Why the keyboard moved.
@@ -112,11 +112,12 @@ interface messages {
         closing(u64),
         close-landed(u64),
         refused(u64),
-        notification(doc),
-        notifications(doc),
-        audio(doc),
-        tray(doc),
-        media(doc),
+        /// The services' events, each as JSON text.
+        notification(string),
+        notifications(string),
+        audio(string),
+        tray(string),
+        media(string),
         notify-forget(list<u64>),
         notify-action(tuple<u64, string>),
         minimized(u64),
@@ -124,8 +125,9 @@ interface messages {
         monitors-changed,
         problems-changed,
         restored,
-        frame-action(tuple<u64, string, doc>),
-        surface-action(tuple<string, string, doc>),
+        /// A frame's or a scene's action, its data as JSON text.
+        frame-action(tuple<u64, string, string>),
+        surface-action(tuple<string, string, string>),
         attempts-settled(list<settled>),
         runs(list<run-heard>),
         timers(list<tuple<u64, bool>>),

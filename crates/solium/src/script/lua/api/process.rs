@@ -107,10 +107,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             if args.is_empty() {
                 return Err(mlua::Error::runtime("sol.run needs a program to run"));
             }
-            let program = args.remove(0);
-            let args = args.into_iter().collect();
+            let argv = args.drain(..).collect();
             with_pending(lua, |pending| {
-                pending.push(Command::Run { program, args });
+                pending.push(solium_wm_protocol::Command::RunDetached(argv));
             })
         })?,
     )?;
@@ -143,11 +142,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 .map_or(crate::files::MAX_READ, |settings| settings.max_read);
             let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             with_pending(lua, |pending| {
-                pending.push(Command::FileRead(crate::files::ReadRequest {
-                    id,
-                    path: absolute,
-                    max,
-                }));
+                pending.push(solium_wm_protocol::Command::FileRead(
+                    solium_wm_protocol::FileRead {
+                        id,
+                        path: absolute.to_string_lossy().into_owned(),
+                        max: u64::try_from(max).unwrap_or(u64::MAX),
+                    },
+                ));
             })?;
             let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
             files.set(id, done)?;
@@ -165,12 +166,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     .map_err(|why| mlua::Error::runtime(format!("sol.write: {why}")))?;
                 let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
-                    pending.push(Command::FileWrite(crate::files::WriteRequest {
-                        id,
-                        path: absolute,
-                        data: data.as_bytes().to_vec(),
-                        report: done.is_some(),
-                    }));
+                    pending.push(solium_wm_protocol::Command::FileWrite(
+                        solium_wm_protocol::FileWrite {
+                            id,
+                            path: absolute.to_string_lossy().into_owned(),
+                            data: data.as_bytes().to_vec(),
+                            report: done.is_some(),
+                        },
+                    ));
                 })?;
                 if let Some(done) = done {
                     let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
@@ -202,11 +205,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             }
             let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             with_pending(lua, |pending| {
-                pending.push(Command::Watch {
-                    id,
-                    path: absolute,
-                    shown: path,
-                });
+                pending.push(solium_wm_protocol::Command::Watch(
+                    solium_wm_protocol::Watch {
+                        id,
+                        path: absolute.to_string_lossy().into_owned(),
+                        shown: path,
+                    },
+                ));
             })?;
             let watches: Table = lua.globals().get::<Table>("sol")?.get("_watches")?;
             watches.set(id, run)?;
@@ -258,7 +263,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                             let text = loaded.render();
                             let name = name.clone();
                             with_pending(lua, |pending| {
-                                pending.push(Command::StoreLoaded { name, text });
+                                pending.push(solium_wm_protocol::Command::Store((name, text)));
                             })?;
                             Some(loaded)
                         }

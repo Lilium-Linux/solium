@@ -202,7 +202,7 @@ mod tests {
         });
         let answer = 3; // `message`'s fourth case
         let unplace = 14; // `command`'s fifteenth case
-        let quit = 52; // `command`'s last case
+        let quit = 53; // `command`'s last case
         assert_eq!(
             message.to_bytes(),
             [answer, 0xac, 0x02, 1, 2, unplace, 5, quit],

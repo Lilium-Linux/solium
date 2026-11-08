@@ -166,7 +166,7 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Queued::Wire(solium_wm_protocol::Command::Configure((section, nodes)))
+                    solium_wm_protocol::Command::Configure((section, nodes))
                         if section == "effects" =>
                     {
                         crate::wm::convert::doc(nodes).ok().map(|options| {
@@ -191,7 +191,7 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Queued::Wire(solium_wm_protocol::Command::Configure((section, nodes)))
+                    solium_wm_protocol::Command::Configure((section, nodes))
                         if section == "effects" =>
                     {
                         crate::wm::convert::doc(nodes).ok().map(|options| {
@@ -352,10 +352,7 @@ impl Scripts {
                 pending
                     .commands
                     .iter()
-                    .filter_map(|command| match command {
-                        Queued::Wire(command) => crate::wm::convert::refusal(command),
-                        Queued::Internal(_) => None,
-                    })
+                    .filter_map(crate::wm::convert::refusal)
                     .collect()
             })
             .unwrap_or_default()

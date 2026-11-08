@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Change, Doc, Keyboard, Monitor, Problem, Rect, TextField, Window};
+use crate::{Change, Keyboard, Monitor, Problem, Rect, TextField, Window};
 
 /// The desktop as the last batch left it.
 #[derive(Clone, Debug, Default)]
@@ -20,8 +20,8 @@ pub struct Mirror {
     pub text_field: Option<TextField>,
     pub problems: Vec<Problem>,
     pub locked: bool,
-    /// Each session service's view, by name.
-    pub services: HashMap<String, Doc>,
+    /// Each session service's view, by name, as JSON text.
+    pub services: HashMap<String, String>,
 }
 
 impl Mirror {

@@ -8,50 +8,10 @@ use crate::script::*;
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
 /// dispatch, so no compositor state is borrowed while Lua runs.
-/// A command a handler asked for: one in the protocol a window manager
-/// speaks, or one of the compositor's own that has not moved to it yet.
-#[derive(Clone, Debug)]
-pub(crate) enum Queued {
-    Wire(solium_wm_protocol::Command),
-    Internal(Command),
-}
-
-impl From<Command> for Queued {
-    fn from(command: Command) -> Self {
-        Self::Internal(command)
-    }
-}
-
-impl From<solium_wm_protocol::Command> for Queued {
-    fn from(command: solium_wm_protocol::Command) -> Self {
-        Self::Wire(command)
-    }
-}
-
-impl Queued {
-    /// The attempt a `sol.act` command makes, if this is one.
-    pub(crate) fn attempt(&self) -> Option<u64> {
-        match self {
-            Self::Internal(Command::Act { attempt, .. }) => Some(*attempt),
-            Self::Wire(solium_wm_protocol::Command::Act((attempt, ..))) => Some(*attempt),
-            _ => None,
-        }
-    }
-
-    /// Whether a binding at the lock screen may not ask for it: see
-    /// [`Command::reaches_past_the_lock`] and its twin for the protocol's
-    /// commands, [`crate::wm::convert::reaches_past_the_lock`].
-    pub(crate) fn reaches_past_the_lock(&self) -> bool {
-        match self {
-            Self::Wire(command) => crate::wm::convert::reaches_past_the_lock(command),
-            Self::Internal(command) => command.reaches_past_the_lock(),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Pending {
-    pub(crate) commands: Vec<Queued>,
+    /// What the handlers asked for, in the window manager protocol's terms.
+    pub(crate) commands: Vec<solium_wm_protocol::Command>,
     pub(crate) animation: AnimationSpec,
     /// Whether `sol.animate` set `animation` in this dispatch. See
     /// [`Outcome::motion`].
@@ -112,8 +72,8 @@ pub(crate) fn focused_id(lua: &Lua) -> Option<u64> {
 
 impl Pending {
     /// Queue a command.
-    pub(crate) fn push(&mut self, command: impl Into<Queued>) {
-        self.commands.push(command.into());
+    pub(crate) fn push(&mut self, command: solium_wm_protocol::Command) {
+        self.commands.push(command);
     }
 }
 
@@ -131,7 +91,7 @@ pub(crate) fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Res
             if pending.at_the_lock
                 && pending.commands[before..]
                     .iter()
-                    .any(Queued::reaches_past_the_lock)
+                    .any(crate::wm::convert::reaches_past_the_lock)
             {
                 pending.commands.truncate(before);
                 return Err(mlua::Error::runtime(
