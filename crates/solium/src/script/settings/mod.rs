@@ -3,3 +3,5 @@
 //! whatever language the document was written in.
 
 pub(crate) mod idle;
+pub(crate) mod input;
+pub(crate) mod read;

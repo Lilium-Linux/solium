@@ -29,10 +29,8 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use mlua::{Lua, Table, Value};
-use smithay::reexports::input::{AccelProfile, ScrollMethod, TapButtonMap};
 use smithay::utils::{Logical, Point, Size};
 
-use crate::input::devices::{DeviceKind, DeviceMatch, InputConfig, Settings as InputSettings};
 use crate::present::Curve;
 
 mod command;
@@ -141,64 +139,6 @@ fn press_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard::Keysym>> {
     }
     keysyms.push(keysym);
     Some(keysyms)
-}
-
-/// Validate protocol policy before emitting any commands from `sol.input`.
-fn shortcuts_settings(table: &Table) -> mlua::Result<crate::shortcuts_inhibit::Settings> {
-    use crate::shortcuts_inhibit::{Allow, Settings};
-    let refused = |why: &str| mlua::Error::runtime(format!("input.shortcuts_inhibit: {why}"));
-    let allow = match table.get::<Value>("allow")? {
-        Value::Nil | Value::Boolean(true) => Allow::Always,
-        Value::Boolean(false) => Allow::Never,
-        Value::String(value) if value.to_str()?.as_ref() == "fullscreen" => Allow::Fullscreen,
-        _ => return Err(refused("allow must be true, false or 'fullscreen'")),
-    };
-    let mut settings = Settings {
-        allow,
-        ..Settings::default()
-    };
-    if let Some(escape) = table.get::<Option<String>>("escape")? {
-        let normal = normalise_combo(&escape);
-        // Validate the original components: normalization intentionally keeps
-        // only the last non-modifier, which would turn `typo+q` into `q`.
-        let modifiers = escape.rsplit_once('+').map(|(modifiers, _)| modifiers);
-        if press_keysyms(&escape).is_none()
-            || modifiers.is_some_and(|modifiers| {
-                modifiers.split('+').any(|name| {
-                    !matches!(
-                        name.trim().to_ascii_lowercase().as_str(),
-                        "ctrl"
-                            | "control"
-                            | "alt"
-                            | "meta"
-                            | "shift"
-                            | "super"
-                            | "logo"
-                            | "win"
-                            | "cmd"
-                    )
-                })
-            })
-        {
-            return Err(refused("escape must name a key combination"));
-        }
-        settings.escape = normal;
-    }
-    if let Some(apps) = table.get::<Option<Table>>("apps")?
-        && let Some(deny) = apps.get::<Option<Vec<String>>>("deny")?
-    {
-        for pattern in deny {
-            if pattern.is_empty() || pattern.strip_suffix('*').unwrap_or(&pattern).contains('*') {
-                return Err(refused(
-                    "apps.deny entries must be exact names, '*' or trailing-star prefixes",
-                ));
-            }
-            settings
-                .deny
-                .push(crate::effect::rules::Glob::parse(&pattern));
-        }
-    }
-    Ok(settings)
 }
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
@@ -765,207 +705,6 @@ fn lock_scene_settings(
         }
     }
     settings
-}
-
-/// A `devices` entry's `vendor` or `product`: a whole number from 0 to
-/// `u32::MAX`, as `libinput list-devices` or `lsusb` print it. Anything else
-/// is named in the log and the match criterion is left unset -- which, since
-/// [`crate::input::devices::DeviceMatch::matches`] requires at least one
-/// criterion, can turn an override that meant to match by vendor *and*
-/// product into one that matches by product alone. Worth warning about for
-/// exactly that reason.
-fn usb_id_field(row: &Table, key: &str) -> mlua::Result<Option<u32>> {
-    Ok(match row.get::<Value>(key)? {
-        Value::Nil => None,
-        Value::Integer(value) => match u32::try_from(value) {
-            Ok(id) => Some(id),
-            Err(_) => {
-                tracing::warn!(
-                    key,
-                    value,
-                    "devices: not a usb id (0 to 0xffffffff); unmatched"
-                );
-                None
-            }
-        },
-        other => {
-            tracing::warn!(
-                key,
-                value = describe(&other),
-                "devices: vendor and product are numbers; unmatched"
-            );
-            None
-        }
-    })
-}
-
-/// One table of libinput options -- a device type's defaults in `config.lua`'s
-/// `input` section, or one `devices` entry -- read field by field. A key left
-/// out keeps that field `None` (`crate::input::devices::Settings`'s own
-/// meaning: "config.lua did not say, leave it alone"); a key present but the
-/// wrong shape -- `tap = "yes"`, `accel_profile = "fastest"` -- is named in
-/// the log with `context` (the type's key, or `"devices"`) and left `None`
-/// too, the same policy `idle` and `cursor` already use. One field being
-/// wrong does not fail the rest of the table.
-/// `sol_input_warns_on_an_unrecognised_option_value_and_keeps_it_unset`.
-fn settings_from_table(table: &Table, context: &str) -> mlua::Result<InputSettings> {
-    let output = match table.get::<Value>("output")? {
-        Value::Nil => None,
-        Value::String(text) => Some(text.to_str()?.to_owned()),
-        other => {
-            tracing::warn!(
-                context,
-                value = describe(&other),
-                "input.output: a connector name string; leaving it unset"
-            );
-            None
-        }
-    };
-    let bool_field = |key: &str| -> mlua::Result<Option<bool>> {
-        Ok(match table.get::<Value>(key)? {
-            Value::Nil => None,
-            Value::Boolean(value) => Some(value),
-            other => {
-                tracing::warn!(
-                    context,
-                    key,
-                    value = describe(&other),
-                    "input: true or false; leaving it unset"
-                );
-                None
-            }
-        })
-    };
-
-    let tap_button_map = match table.get::<Value>("tap_button_map")? {
-        Value::Nil => None,
-        Value::String(ref text) => match text.to_string_lossy().as_ref() {
-            "left_right_middle" => Some(TapButtonMap::LeftRightMiddle),
-            "left_middle_right" => Some(TapButtonMap::LeftMiddleRight),
-            other => {
-                tracing::warn!(
-                    context,
-                    value = other,
-                    "input.tap_button_map: \"left_right_middle\" or \"left_middle_right\"; \
-                     leaving it unset"
-                );
-                None
-            }
-        },
-        other => {
-            tracing::warn!(
-                context,
-                value = describe(&other),
-                "input.tap_button_map: a string; leaving it unset"
-            );
-            None
-        }
-    };
-
-    let scroll_method = match table.get::<Value>("scroll_method")? {
-        Value::Nil => None,
-        Value::String(ref text) => match text.to_string_lossy().as_ref() {
-            "two_finger" => Some(ScrollMethod::TwoFinger),
-            "edge" => Some(ScrollMethod::Edge),
-            "button" => Some(ScrollMethod::OnButtonDown),
-            "no_scroll" => Some(ScrollMethod::NoScroll),
-            other => {
-                tracing::warn!(
-                    context,
-                    value = other,
-                    "input.scroll_method: \"two_finger\", \"edge\", \"button\" or \"no_scroll\"; \
-                     leaving it unset"
-                );
-                None
-            }
-        },
-        other => {
-            tracing::warn!(
-                context,
-                value = describe(&other),
-                "input.scroll_method: a string; leaving it unset"
-            );
-            None
-        }
-    };
-
-    let accel_profile = match table.get::<Value>("accel_profile")? {
-        Value::Nil => None,
-        Value::String(ref text) => match text.to_string_lossy().as_ref() {
-            "flat" => Some(AccelProfile::Flat),
-            "adaptive" => Some(AccelProfile::Adaptive),
-            other => {
-                tracing::warn!(
-                    context,
-                    value = other,
-                    "input.accel_profile: \"flat\" or \"adaptive\"; leaving it unset"
-                );
-                None
-            }
-        },
-        other => {
-            tracing::warn!(
-                context,
-                value = describe(&other),
-                "input.accel_profile: a string; leaving it unset"
-            );
-            None
-        }
-    };
-
-    let accel_speed = match table.get::<Value>("accel_speed")? {
-        Value::Nil => None,
-        other => match number(&other).filter(|speed| (-1.0..=1.0).contains(speed)) {
-            Some(speed) => Some(speed),
-            None => {
-                tracing::warn!(
-                    context,
-                    value = describe(&other),
-                    "input.accel_speed: a number from -1 to 1; leaving it unset"
-                );
-                None
-            }
-        },
-    };
-
-    // A whole number of milliseconds from 1 to 1000 (#284): shorter follows a
-    // change of direction sooner, longer smooths a noisy screen.
-    let velocity_window_ms = match table.get::<Value>("velocity_window_ms")? {
-        Value::Nil => None,
-        other => match number(&other).filter(|ms| ms.fract() == 0.0 && (1.0..=1000.0).contains(ms))
-        {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "checked to be a whole number from 1 to 1000"
-            )]
-            Some(ms) => Some(ms as u32),
-            None => {
-                tracing::warn!(
-                    context,
-                    value = describe(&other),
-                    "input.velocity_window_ms: a whole number of milliseconds from 1 to 1000; leaving it unset"
-                );
-                None
-            }
-        },
-    };
-
-    Ok(InputSettings {
-        output,
-        velocity_window_ms,
-        tap: bool_field("tap")?,
-        tap_button_map,
-        drag: bool_field("drag")?,
-        drag_lock: bool_field("drag_lock")?,
-        natural_scroll: bool_field("natural_scroll")?,
-        scroll_method,
-        accel_profile,
-        accel_speed,
-        disable_while_typing: bool_field("disable_while_typing")?,
-        left_handed: bool_field("left_handed")?,
-        middle_emulation: bool_field("middle_emulation")?,
-    })
 }
 
 /// What the configuration being replaced asked to keep, waiting in the new Lua
@@ -4248,34 +3987,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "input",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let mut config = InputConfig::default();
-            let mut shortcuts = crate::shortcuts_inhibit::Settings::default();
-            if let Some(options) = options {
-                if let Some(table) = options.get::<Option<mlua::Table>>("shortcuts_inhibit")? {
-                    shortcuts = shortcuts_settings(&table)?;
-                }
-                for (kind, key) in DeviceKind::CONFIGURABLE {
-                    if let Some(table) = options.get::<Option<mlua::Table>>(key)? {
-                        config.set_default(kind, settings_from_table(&table, key)?);
-                    }
-                }
-                if let Some(rows) = options.get::<Option<Vec<mlua::Table>>>("devices")? {
-                    for row in rows {
-                        let name_contains = row.get::<Option<String>>("name")?;
-                        let vendor = usb_id_field(&row, "vendor")?;
-                        let product = usb_id_field(&row, "product")?;
-                        let settings = settings_from_table(&row, "devices")?;
-                        config.push_override(
-                            DeviceMatch {
-                                name_contains,
-                                vendor,
-                                product,
-                            },
-                            settings,
-                        );
-                    }
-                }
-            }
+            let (config, shortcuts) = settings::input::parse(&lua::convert::section(options)?)
+                .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Input(config));
                 pending.commands.push(Command::ShortcutsInhibit(shortcuts));
@@ -8212,6 +7925,7 @@ pub(crate) use tests::logged_while;
 mod tests {
     use super::*;
     use crate::input::devices::DeviceInfo;
+    use crate::input::devices::{DeviceKind, InputConfig};
     use crate::present::Frame;
     use smithay::utils::Rectangle;
 
@@ -10069,7 +9783,10 @@ mod tests {
                 ))
                 .eval()
                 .expect("table");
-            let settings = shortcuts_settings(&table).expect("valid policy");
+            let settings = settings::input::shortcuts(
+                &lua::convert::doc_of(&Value::Table(table)).expect("a document"),
+            )
+            .expect("valid policy");
             assert_eq!(settings.allow, allowed);
             assert_eq!(settings.escape, "super+x");
             assert!(settings.deny[0].matches("blocked.viewer"));
@@ -10085,7 +9802,10 @@ mod tests {
         ] {
             let table: Table = lua.load(format!("return {spec}")).eval().expect("table");
             assert!(
-                shortcuts_settings(&table).is_err(),
+                settings::input::shortcuts(
+                    &lua::convert::doc_of(&Value::Table(table)).expect("a document")
+                )
+                .is_err(),
                 "accepted invalid policy {spec}"
             );
         }

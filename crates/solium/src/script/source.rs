@@ -15,7 +15,9 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("mod.rs", include_str!("mod.rs")),
     ("reference.rs", include_str!("reference.rs")),
     ("settings/idle.rs", include_str!("settings/idle.rs")),
+    ("settings/input.rs", include_str!("settings/input.rs")),
     ("settings/mod.rs", include_str!("settings/mod.rs")),
+    ("settings/read.rs", include_str!("settings/read.rs")),
     ("source.rs", include_str!("source.rs")),
     ("types.rs", include_str!("types.rs")),
 ];
