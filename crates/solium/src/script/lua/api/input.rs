@@ -54,7 +54,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(Value::Nil);
             }
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Keyboard(request.clone()));
+                pending.push(Command::Keyboard(request.clone()));
             })?;
             Ok(Value::Nil)
         })?,
@@ -101,7 +101,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "take_shortcuts_back",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::TakeShortcutsBack);
+                pending.push(Command::TakeShortcutsBack);
             })
         })?,
     )?;
@@ -112,7 +112,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "release_pointer",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ReleasePointer);
+                pending.push(Command::ReleasePointer);
             })
         })?,
     )?;
@@ -146,9 +146,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     ));
                 }
             };
-            with_pending(lua, |pending| {
-                pending.commands.push(Command::Touch { slot, action })
-            })
+            with_pending(lua, |pending| pending.push(Command::Touch { slot, action }))
         })?,
     )?;
     sol.set(
@@ -159,9 +157,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     "sol.click: coordinates must be finite",
                 ));
             }
-            with_pending(lua, |pending| {
-                pending.commands.push(Command::Click { x, y })
-            })
+            with_pending(lua, |pending| pending.push(Command::Click { x, y }))
         })?,
     )?;
 
@@ -194,7 +190,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime(format!("sol.press: {id} {why}")));
             }
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Press {
+                pending.push(Command::Press {
                     id,
                     press,
                     source: pending.source,

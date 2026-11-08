@@ -19,7 +19,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let (rules, settings) =
                 settings::effects::parse(&lua::convert::section(options)?, given);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Effects { rules, settings });
+                pending.push(Command::Effects { rules, settings });
             })
         })?,
     )?;
@@ -35,7 +35,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 Some(table) => crate::warm::startup(&lua::convert::doc_of(&Value::Table(table))?),
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Startup(read));
+                pending.push(Command::Startup(read));
             })
         })?,
     )?;
@@ -52,9 +52,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "idle",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let idle = settings::idle::parse(&lua::convert::section(options)?);
+            let options = lua::convert::wire_section(options)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Idle(idle));
+                pending.push(solium_wm_protocol::Command::Configure((
+                    "idle".to_owned(),
+                    options,
+                )));
             })
         })?,
     )?;
@@ -73,7 +76,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let settings = settings::reload::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::AutoReload(settings));
+                pending.push(Command::AutoReload(settings));
             })
         })?,
     )?;
@@ -106,8 +109,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let (config, shortcuts) = settings::input::parse(&lua::convert::section(options)?)
                 .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Input(config));
-                pending.commands.push(Command::ShortcutsInhibit(shortcuts));
+                pending.push(Command::Input(config));
+                pending.push(Command::ShortcutsInhibit(shortcuts));
             })
         })?,
     )?;
@@ -126,9 +129,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let (settings, auth, scene) = settings::lock::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Lock(settings));
-                pending.commands.push(Command::LockAuth(auth));
-                pending.commands.push(Command::LockScene(scene));
+                pending.push(Command::Lock(settings));
+                pending.push(Command::LockAuth(auth));
+                pending.push(Command::LockScene(scene));
             })
         })?,
     )?;
@@ -145,7 +148,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let settings = settings::layer_shell::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::LayerShell(settings));
+                pending.push(Command::LayerShell(settings));
             })
         })?,
     )?;
@@ -168,7 +171,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Frames(settings));
+                pending.push(Command::Frames(settings));
             })
         })?,
     )?;
@@ -184,7 +187,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let settings = settings::toplevels::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Toplevels(settings));
+                pending.push(Command::Toplevels(settings));
             })
         })?,
     )?;
@@ -201,7 +204,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let settings = settings::x11::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::X11(settings));
+                pending.push(Command::X11(settings));
             })
         })?,
     )?;
@@ -225,7 +228,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 after_close,
             } = settings::focus::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::FocusMode {
+                pending.push(Command::FocusMode {
                     click,
                     follow,
                     clear_on_empty_click,
@@ -239,7 +242,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "pane",
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Decoration { name });
+                pending.push(Command::Decoration { name });
             })
         })?,
     )?;
@@ -255,7 +258,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::PaneBuild(budget));
+                pending.push(Command::PaneBuild(budget));
             })
         })?,
     )?;
@@ -269,7 +272,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, values: mlua::Table| {
             let fields = crate::json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::PaneValues(fields));
+                pending.push(Command::PaneValues(fields));
             })
         })?,
     )?;
@@ -284,7 +287,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (id, values): (u64, mlua::Table)| {
             let fields = crate::json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::FrameValues { id, fields });
+                pending.push(Command::FrameValues { id, fields });
             })
         })?,
     )?;
@@ -328,7 +331,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let loading = settings::pane::loading(&lua::convert::doc_of(&Value::Table(options))?)
                 .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Loading(loading.clone()));
+                pending.push(Command::Loading(loading.clone()));
             })
         })?,
     )?;
@@ -347,7 +350,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let sizes = settings::client_sizes::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ClientSizes(sizes.clone()));
+                pending.push(Command::ClientSizes(sizes.clone()));
             })
         })?,
     )?;
@@ -367,7 +370,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let resize = settings::resize::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Resize(resize));
+                pending.push(Command::Resize(resize));
             })
         })?,
     )?;
@@ -382,7 +385,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| {
             let covers = settings::fullscreen::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Fullscreen(covers));
+                pending.push(Command::Fullscreen(covers));
             })
         })?,
     )?;
@@ -422,7 +425,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             // whole configuration over a setting nobody asked for.
             let configured = settings::cursor::parse(&lua::convert::section(options)?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Cursor(configured.clone()));
+                pending.push(Command::Cursor(configured.clone()));
             })
         })?,
     )?;

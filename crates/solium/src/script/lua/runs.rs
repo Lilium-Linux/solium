@@ -122,7 +122,7 @@ pub(crate) fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua
         lines: lines.is_some(),
     };
     with_pending(lua, |pending| {
-        pending.commands.push(Command::RunRead(request));
+        pending.push(Command::RunRead(request));
     })?;
     if lines.is_some() || done.is_some() {
         let kept = lua.create_table()?;
@@ -155,7 +155,7 @@ pub(crate) fn set_timer(
         .map_err(|_| mlua::Error::runtime(format!("{name}: {ms} ms is too long")))?;
     let id = TIMERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     with_pending(lua, |pending| {
-        pending.commands.push(Command::Timer {
+        pending.push(Command::Timer {
             id,
             after,
             period: every.then_some(after),
@@ -184,7 +184,7 @@ impl mlua::UserData for TimerHandle {
             }
             timers.set(this.0, Value::Nil)?;
             let _ = with_pending(lua, |pending| {
-                pending.commands.push(Command::TimerCancel(this.0));
+                pending.push(Command::TimerCancel(this.0));
             });
             Ok(())
         });

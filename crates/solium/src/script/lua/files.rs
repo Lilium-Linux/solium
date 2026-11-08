@@ -92,7 +92,7 @@ impl mlua::UserData for WatchHandle {
             }
             watches.set(this.0, Value::Nil)?;
             let _ = with_pending(lua, |pending| {
-                pending.commands.push(Command::WatchCancel(this.0));
+                pending.push(Command::WatchCancel(this.0));
             });
             Ok(())
         });

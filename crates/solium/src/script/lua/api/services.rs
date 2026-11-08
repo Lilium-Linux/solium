@@ -45,7 +45,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let config = settings::services::notifications(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Notifications(config));
+                pending.push(Command::Notifications(config));
             })?;
             Ok(Value::Nil)
         })?,
@@ -86,7 +86,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let config = settings::services::tray(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Tray(config));
+                pending.push(Command::Tray(config));
             })?;
             Ok(Value::Nil)
         })?,
@@ -107,7 +107,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let config = settings::services::media(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Media(config));
+                pending.push(Command::Media(config));
             })?;
             Ok(Value::Nil)
         })?,
@@ -125,7 +125,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "audio",
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
-                with_pending(lua, |pending| pending.commands.push(Command::Audio(None)))?;
+                with_pending(lua, |pending| pending.push(Command::Audio(None)))?;
                 let snapshot = snapshot(lua)?;
                 let view = &snapshot.audio;
                 let table = lua.create_table()?;
@@ -164,9 +164,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(Value::Table(table));
             };
             let settings = settings::services::audio(&lua::convert::section(Some(options))?);
-            with_pending(lua, |pending| {
-                pending.commands.push(Command::Audio(Some(settings)))
-            })?;
+            with_pending(lua, |pending| pending.push(Command::Audio(Some(settings))))?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -236,7 +234,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 token,
                 expire_timeout,
             };
-            with_pending(lua, |pending| pending.commands.push(Command::Notify(own)))
+            with_pending(lua, |pending| pending.push(Command::Notify(own)))
         })?,
     )?;
 

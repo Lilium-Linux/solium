@@ -166,7 +166,7 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Command::Effects { rules, .. } => Some(rules.clone()),
+                    Queued::Internal(Command::Effects { rules, .. }) => Some(rules.clone()),
                     _ => None,
                 })
         })
@@ -185,7 +185,7 @@ impl Scripts {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    Command::Effects { settings, .. } => Some(settings.clone()),
+                    Queued::Internal(Command::Effects { settings, .. }) => Some(settings.clone()),
                     _ => None,
                 })
         })

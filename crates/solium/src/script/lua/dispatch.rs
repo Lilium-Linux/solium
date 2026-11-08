@@ -140,7 +140,7 @@ impl Scripts {
         self.lua.set_app_data(Pending::default());
         Outcome {
             handled: false,
-            commands: pending.commands,
+            commands: applied(pending.commands),
             grab: pending.grab,
             status: pending.status,
             motion: pending.animated.then_some(pending.animation),
@@ -585,7 +585,7 @@ impl Scripts {
                             })
                             .unwrap_or_default();
                         for command in dropped {
-                            if let Command::Act { attempt, .. } = command {
+                            if let Some(attempt) = command.attempt() {
                                 attempts.set(attempt, Value::Nil)?;
                             }
                         }
@@ -677,9 +677,10 @@ impl Scripts {
             }
             if !gone.is_empty() {
                 with_pending(lua, |pending| {
-                    pending
-                        .commands
-                        .extend(gone.into_iter().map(Command::TimerCancel));
+                    pending.commands.extend(
+                        gone.into_iter()
+                            .map(|each| Queued::from(Command::TimerCancel(each))),
+                    );
                 })?;
             }
             Ok(true)
@@ -757,9 +758,10 @@ impl Scripts {
                 gone.sort_unstable();
                 gone.dedup();
                 with_pending(lua, |pending| {
-                    pending
-                        .commands
-                        .extend(gone.into_iter().map(Command::WatchCancel));
+                    pending.commands.extend(
+                        gone.into_iter()
+                            .map(|each| Queued::from(Command::WatchCancel(each))),
+                    );
                 })?;
             }
             Ok(true)
@@ -871,10 +873,22 @@ impl Scripts {
 
         Outcome {
             handled,
-            commands: pending.commands,
+            commands: applied(pending.commands),
             grab: pending.grab,
             status: pending.status,
             motion: pending.animated.then_some(pending.animation),
         }
     }
+}
+
+/// The commands a dispatch queued, as the compositor applies them: the
+/// protocol's converted in [`crate::wm::convert::commands_of`].
+pub(crate) fn applied(queued: Vec<Queued>) -> Vec<Command> {
+    queued
+        .into_iter()
+        .flat_map(|command| match command {
+            Queued::Internal(command) => vec![command],
+            Queued::Wire(command) => crate::wm::convert::commands_of(command),
+        })
+        .collect()
 }

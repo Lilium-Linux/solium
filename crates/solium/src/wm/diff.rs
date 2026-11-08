@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use solium_wm_protocol as wire;
 use wire::Change;
 
-use super::convert;
+use super::rows as convert;
 use crate::script::Snapshot;
 
 /// What the window manager was last told.
@@ -119,7 +119,7 @@ mod tests {
 
     use super::Told;
     use crate::script::{Rect, Snapshot, WindowInfo};
-    use crate::wm::convert;
+    use crate::wm::rows as convert;
 
     fn snapshot(windows: &[(u64, &str)]) -> Snapshot {
         Snapshot {

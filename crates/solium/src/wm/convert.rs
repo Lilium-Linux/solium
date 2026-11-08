@@ -1,111 +1,135 @@
-//! The compositor's types as the protocol's: plain rows, with no Smithay or
-//! renderer type in them, made in this one place so the wire never sees an
-//! internal type.
+//! The protocol's commands as the compositor's own, converted in this one
+//! place so that what a window manager asks for is applied as a script's
+//! request always was.
 
 use solium_wm_protocol as wire;
 
-use crate::script::{MonitorInfo, Parentage, ProblemRow, Rect, WindowInfo};
+/// A settings document off the wire as the compositor's own, or why it is
+/// not one: a node index past the end, or a table that holds itself.
+pub(crate) fn doc(nodes: &[wire::DocNode]) -> Result<crate::script::Doc, String> {
+    doc_at(nodes, 0, 0)
+}
 
-pub(crate) fn rect(rect: Rect) -> wire::Rect {
-    wire::Rect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
+/// How deep a document is followed: the depth its Lua conversion allows.
+const DOC_DEPTH: usize = 32;
+
+fn doc_at(nodes: &[wire::DocNode], at: u32, depth: usize) -> Result<crate::script::Doc, String> {
+    use crate::script::{Doc, DocTable};
+    if depth > DOC_DEPTH {
+        return Err(format!("a document nested deeper than {DOC_DEPTH}"));
+    }
+    let node = usize::try_from(at)
+        .ok()
+        .and_then(|at| nodes.get(at))
+        .ok_or_else(|| format!("a document's node {at} is past its end"))?;
+    Ok(match node {
+        wire::DocNode::Nil => Doc::Nil,
+        wire::DocNode::Boolean(on) => Doc::Bool(*on),
+        wire::DocNode::Integer(whole) => Doc::Int(*whole),
+        wire::DocNode::Number(number) => Doc::Num(*number),
+        wire::DocNode::Text(text) => Doc::Text(text.clone()),
+        wire::DocNode::Other(kind) => Doc::Other(other_kind(kind)),
+        wire::DocNode::Table(table) => {
+            let mut read = DocTable::default();
+            for item in &table.list {
+                read.list.push(doc_at(nodes, *item, depth + 1)?);
+            }
+            for (name, item) in &table.fields {
+                read.fields
+                    .insert(name.clone(), doc_at(nodes, *item, depth + 1)?);
+            }
+            for (key, item) in &table.numbered {
+                read.numbered.insert(*key, doc_at(nodes, *item, depth + 1)?);
+            }
+            Doc::Table(read)
+        }
+    })
+}
+
+/// A kind of value a setting cannot be, by the name its language gives it,
+/// as the `'static` name a [`crate::script::Doc::Other`] holds.
+fn other_kind(kind: &str) -> &'static str {
+    match kind {
+        "function" => "function",
+        "userdata" => "userdata",
+        "thread" => "thread",
+        "lightuserdata" => "lightuserdata",
+        "string that is not UTF-8" => "string that is not UTF-8",
+        _ => "value",
     }
 }
 
-pub(crate) fn window(window: &WindowInfo) -> wire::Window {
-    let size = |size: smithay::utils::Size<i32, smithay::utils::Logical>| wire::Size {
-        w: size.w,
-        h: size.h,
-    };
-    wire::Window {
-        id: window.id,
-        rect: rect(window.rect),
-        insets: wire::Insets {
-            top: window.insets.top,
-            right: window.insets.right,
-            bottom: window.insets.bottom,
-            left: window.insets.left,
+/// Whether a binding at the lock screen may not ask for this: what acts on
+/// a window or a workspace, or ends the session, as
+/// [`crate::script::Command::reaches_past_the_lock`] says of the
+/// compositor's own commands.
+pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
+    use wire::Command as C;
+    match command {
+        C::Configure((section, _)) => section == "workspaces",
+        C::Present(_)
+        | C::PresentFrom(_)
+        | C::Group(_)
+        | C::PresentGroup(_)
+        | C::ClearGroup(_)
+        | C::Clear(_)
+        | C::Touch(_)
+        | C::Click(_)
+        | C::Focus(_)
+        | C::Warp(_)
+        | C::ToggleFullscreen(_)
+        | C::ToggleMaximize(_)
+        | C::DragHold(_)
+        | C::DragGrip(_)
+        | C::ResizeHold(_)
+        | C::Minimize(_)
+        | C::Unminimize(_)
+        | C::ShowMinimized(_)
+        | C::KeepAbove(_)
+        | C::Press(_)
+        | C::Place(_)
+        | C::Unplace(_)
+        | C::Close(_)
+        | C::Quit => true,
+        _ => false,
+    }
+}
+
+/// A command off the wire as the compositor's own commands, which may be
+/// none, one or several: a settings section becomes the commands that apply
+/// it. One that cannot be applied is named in the log and left out.
+pub(crate) fn commands_of(command: wire::Command) -> Vec<crate::script::Command> {
+    match command {
+        wire::Command::Configure((section, nodes)) => match doc(&nodes) {
+            Ok(options) => configure(&section, &options),
+            Err(why) => {
+                tracing::warn!(
+                    section,
+                    why,
+                    "a settings document that cannot be read; left out"
+                );
+                Vec::new()
+            }
         },
-        title: window.title.clone(),
-        focused: window.focused,
-        monitor: window.monitor.clone(),
-        modal: window.modal,
-        parent: match window.parent {
-            Parentage::None => wire::Parentage::None,
-            Parentage::Unknown => wire::Parentage::Unknown,
-            Parentage::Window(id) => wire::Parentage::Window(id),
-        },
-        leaving: window.leaving,
-        minimized: window.minimized,
-        above: window.above,
-        icon: window.icon.map(rect),
-        app_id: window.app_id.clone(),
-        min: window.min.map(size),
-        max: window.max.map(size),
-        cramped: window.cramped,
-        shown: window.shown,
-        fullscreen: window.fullscreen,
-        maximized: window.maximized,
-        style: window.style.clone(),
-        client_side: window.client_side,
-        blur_region: window.blur_region,
-        x11_type: window.x11_type.clone(),
-        accepts_input: window.accepts_input,
-        class: window.class.clone(),
-        instance: window.instance.clone(),
-        content_type: window.content_type.to_owned(),
-        pid: window.pid,
+        other => {
+            tracing::warn!(
+                ?other,
+                "a command the compositor does not apply yet; left out"
+            );
+            Vec::new()
+        }
     }
 }
 
-pub(crate) fn monitor(monitor: &MonitorInfo) -> wire::Monitor {
-    wire::Monitor {
-        name: monitor.name.clone(),
-        area: rect(monitor.area),
-        whole: rect(monitor.whole),
-        scale: monitor.scale,
-        focused: monitor.focused,
-        primary: monitor.primary,
-        transform: monitor.transform.clone(),
-        off: monitor.off,
-    }
-}
-
-pub(crate) fn keyboard(keyboard: &crate::keymap::State) -> wire::Keyboard {
-    wire::Keyboard {
-        layouts: keyboard.layouts.clone(),
-        short_names: keyboard.short.clone(),
-        active: u32::try_from(keyboard.active).unwrap_or(u32::MAX),
-        caps: keyboard.caps,
-        num: keyboard.num,
-        repeat_rate: keyboard.repeat_rate,
-        repeat_delay: keyboard.repeat_delay,
-    }
-}
-
-pub(crate) fn text_field(field: &crate::text_input::Field) -> wire::TextField {
-    wire::TextField {
-        window: field.window,
-        caret: field.caret.map(|caret| wire::Rect {
-            x: caret.loc.x,
-            y: caret.loc.y,
-            w: caret.size.w,
-            h: caret.size.h,
-        }),
-        framed: field.framed,
-    }
-}
-
-pub(crate) fn problem(problem: &ProblemRow) -> wire::Problem {
-    wire::Problem {
-        effect: problem.effect.clone(),
-        file: problem.file.clone(),
-        line: problem.line,
-        column: problem.column,
-        message: problem.message.clone(),
-        severity: problem.severity.to_owned(),
+/// A settings section as the commands that apply it.
+fn configure(section: &str, options: &crate::script::Doc) -> Vec<crate::script::Command> {
+    use crate::script::Command;
+    use crate::script::settings;
+    match section {
+        "idle" => vec![Command::Idle(settings::idle::parse(options))],
+        other => {
+            tracing::warn!(section = other, "not a settings section; left out");
+            Vec::new()
+        }
     }
 }

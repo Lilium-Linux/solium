@@ -9,9 +9,7 @@ use crate::script::*;
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "reload",
-        lua.create_function(|lua, ()| {
-            with_pending(lua, |pending| pending.commands.push(Command::Reload))
-        })?,
+        lua.create_function(|lua, ()| with_pending(lua, |pending| pending.push(Command::Reload)))?,
     )?;
 
     // Lock the session now, the way `config.lock` says: Solium's own lock, or
@@ -22,7 +20,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "lock_now",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::LockNow);
+                pending.push(Command::LockNow);
             })
         })?,
     )?;
@@ -59,7 +57,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let progress = progress.map(|progress| progress.clamp(0.0, 1.0));
             with_pending(lua, |pending| {
-                pending.commands.push(Command::LockPeek(progress));
+                pending.push(Command::LockPeek(progress));
             })
         })?,
     )?;
@@ -76,7 +74,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let program = args.remove(0);
             let args = args.into_iter().collect();
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Spawn { program, args });
+                pending.push(Command::Spawn { program, args });
             })
         })?,
     )?;
@@ -109,7 +107,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let program = args.remove(0);
             let args = args.into_iter().collect();
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Run { program, args });
+                pending.push(Command::Run { program, args });
             })
         })?,
     )?;
@@ -142,13 +140,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 .map_or(crate::files::MAX_READ, |settings| settings.max_read);
             let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             with_pending(lua, |pending| {
-                pending
-                    .commands
-                    .push(Command::FileRead(crate::files::ReadRequest {
-                        id,
-                        path: absolute,
-                        max,
-                    }));
+                pending.push(Command::FileRead(crate::files::ReadRequest {
+                    id,
+                    path: absolute,
+                    max,
+                }));
             })?;
             let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
             files.set(id, done)?;
@@ -166,14 +162,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     .map_err(|why| mlua::Error::runtime(format!("sol.write: {why}")))?;
                 let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
-                    pending
-                        .commands
-                        .push(Command::FileWrite(crate::files::WriteRequest {
-                            id,
-                            path: absolute,
-                            data: data.as_bytes().to_vec(),
-                            report: done.is_some(),
-                        }));
+                    pending.push(Command::FileWrite(crate::files::WriteRequest {
+                        id,
+                        path: absolute,
+                        data: data.as_bytes().to_vec(),
+                        report: done.is_some(),
+                    }));
                 })?;
                 if let Some(done) = done {
                     let files: Table = lua.globals().get::<Table>("sol")?.get("_files")?;
@@ -205,7 +199,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             }
             let id = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Watch {
+                pending.push(Command::Watch {
                     id,
                     path: absolute,
                     shown: path,
@@ -261,7 +255,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                             let text = loaded.render();
                             let name = name.clone();
                             with_pending(lua, |pending| {
-                                pending.commands.push(Command::StoreLoaded { name, text });
+                                pending.push(Command::StoreLoaded { name, text });
                             })?;
                             Some(loaded)
                         }
@@ -306,9 +300,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // only way out is hardcoded is not a configurable one.
     sol.set(
         "quit",
-        lua.create_function(|lua, ()| {
-            with_pending(lua, |pending| pending.commands.push(Command::Quit))
-        })?,
+        lua.create_function(|lua, ()| with_pending(lua, |pending| pending.push(Command::Quit)))?,
     )?;
 
     Ok(())

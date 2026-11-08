@@ -38,11 +38,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let places = settings::monitors::parse(&lua::convert::doc_of(&Value::Table(rows))?)
                 .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
-                pending
-                    .commands
-                    .push(Command::Monitors(crate::monitor::Arrangement::new(
-                        places.clone(),
-                    )));
+                pending.push(Command::Monitors(crate::monitor::Arrangement::new(
+                    places.clone(),
+                )));
             })?;
             Ok(Value::Nil)
         })?,
@@ -73,7 +71,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let monitor = (which != "all").then_some(which);
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Power { monitor, on });
+                pending.push(Command::Power { monitor, on });
             })
         })?,
     )?;
@@ -108,7 +106,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "output_management",
         lua.create_function(|lua, offered: bool| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::OutputManagement(offered));
+                pending.push(Command::OutputManagement(offered));
             })
         })?,
     )?;
@@ -120,7 +118,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "workspaces_offered",
         lua.create_function(|lua, offered: bool| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::WorkspacesOffered(offered));
+                pending.push(Command::WorkspacesOffered(offered));
             })
         })?,
     )?;
@@ -135,7 +133,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 settings::workspaces::parse(&lua::convert::doc_of(&Value::Table(declared))?)
                     .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Workspaces(declared));
+                pending.push(Command::Workspaces(declared));
             })
         })?,
     )?;

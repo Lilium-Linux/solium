@@ -179,7 +179,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 // the same thing.
                 _ => {
                     with_pending(lua, |pending| {
-                        pending.commands.push(Command::SurfaceGone(name.clone()));
+                        pending.push(Command::SurfaceGone(name.clone()));
                     })?;
                     return Ok(Value::Nil);
                 }
@@ -314,9 +314,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
 
             with_pending(lua, |pending| {
-                pending
-                    .commands
-                    .push(Command::Surface(Box::new(crate::scripted::Declaration {
+                pending.push(Command::Surface(Box::new(crate::scripted::Declaration {
                         name: name.clone(),
                         scene: scene.clone(),
                         layer,
@@ -421,7 +419,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 None => None,
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Focus {
+                pending.push(Command::Focus {
                     id,
                     source: pending.source,
                     warp,
@@ -456,7 +454,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ToggleFullscreen { id });
+                pending.push(Command::ToggleFullscreen { id });
             })
         })?,
     )?;
@@ -473,7 +471,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Minimize { id });
+                pending.push(Command::Minimize { id });
             })
         })?,
     )?;
@@ -485,7 +483,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Unminimize { id });
+                pending.push(Command::Unminimize { id });
             })
         })?,
     )?;
@@ -501,7 +499,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "show_minimized",
         lua.create_function(|lua, (id, shown): (u64, Option<bool>)| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ShowMinimized {
+                pending.push(Command::ShowMinimized {
                     id,
                     shown: shown.unwrap_or(true),
                 });
@@ -535,7 +533,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::KeepAbove { id, on });
+                pending.push(Command::KeepAbove { id, on });
             })
         })?,
     )?;
@@ -547,7 +545,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ToggleMaximize { id });
+                pending.push(Command::ToggleMaximize { id });
             })
         })?,
     )?;
@@ -561,7 +559,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "drag_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::DragHold { id, held });
+                pending.push(Command::DragHold { id, held });
             })
         })?,
     )?;
@@ -588,7 +586,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 ));
             }
             with_pending(lua, |pending| {
-                pending.commands.push(Command::DragGrip { id, along, by });
+                pending.push(Command::DragGrip { id, along, by });
             })
         })?,
     )?;
@@ -603,7 +601,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "resize_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.commands.push(Command::ResizeHold { id, held });
+                pending.push(Command::ResizeHold { id, held });
             })
         })?,
     )?;
@@ -718,7 +716,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let moved = pending.moving == Some(id);
-                pending.commands.push(Command::Place {
+                pending.push(Command::Place {
                     id,
                     rect,
                     animation,
@@ -738,16 +736,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "unplace",
         lua.create_function(|lua, id: u64| {
-            with_pending(lua, |pending| {
-                pending.commands.push(Command::Unplace { id })
-            })
+            with_pending(lua, |pending| pending.push(Command::Unplace { id }))
         })?,
     )?;
 
     sol.set(
         "close",
         lua.create_function(|lua, id: u64| {
-            with_pending(lua, |pending| pending.commands.push(Command::Close { id }))
+            with_pending(lua, |pending| pending.push(Command::Close { id }))
         })?,
     )?;
 
@@ -766,7 +762,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let data = crate::json::Json::from_lua(&data)?.unwrap_or(crate::json::Json::Null);
                 let attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
-                    pending.commands.push(Command::Act {
+                    pending.push(Command::Act {
                         attempt,
                         action,
                         data,

@@ -37,7 +37,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let channels = resolved(motion, animation);
-                pending.commands.push(Command::Present {
+                pending.push(Command::Present {
                     id,
                     rect,
                     opacity,
@@ -71,7 +71,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let channels = resolved(motion, animation);
-                pending.commands.push(Command::PresentFrom {
+                pending.push(Command::PresentFrom {
                     id,
                     rect,
                     opacity,
@@ -89,7 +89,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, id: u64| {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.commands.push(Command::Clear { id, animation });
+                pending.push(Command::Clear { id, animation });
             })
         })?,
     )?;
@@ -125,7 +125,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.commands.push(Command::Group {
+                pending.push(Command::Group {
                     name: name.clone(),
                     selection: selection.clone(),
                     animation,
@@ -145,7 +145,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let (duration, easing) = motion_from(motion.as_ref())?;
                 with_pending(lua, |pending| {
                     let animation = pending.animation.with(duration, easing);
-                    pending.commands.push(Command::PresentGroup {
+                    pending.push(Command::PresentGroup {
                         name: name.clone(),
                         to,
                         animation,
@@ -161,7 +161,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let (duration, easing) = motion_from(motion.as_ref())?;
             with_pending(lua, |pending| {
                 let animation = pending.animation.with(duration, easing);
-                pending.commands.push(Command::ClearGroup {
+                pending.push(Command::ClearGroup {
                     name: name.clone(),
                     animation,
                 });
@@ -235,7 +235,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
             };
             with_pending(lua, |pending| {
-                pending.commands.push(Command::Warp(Warp {
+                pending.push(Command::Warp(Warp {
                     to,
                     motion,
                     interrupt,

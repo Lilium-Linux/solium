@@ -199,3 +199,140 @@ impl Kept {
         })
     }
 }
+
+/// A Lua value as the protocol's settings document: its nodes, the first
+/// the root, a table's children by index. The same reading as [`doc_of`]:
+/// a list part keyed 1 to n, named and numbered keys, other keys not read,
+/// a function and the like named by its type, and a table nested past 32
+/// refused.
+pub(crate) fn wire_doc_of(value: &Value) -> mlua::Result<solium_wm_protocol::Doc> {
+    let mut nodes = Vec::new();
+    wire_node(value, 0, &mut nodes)?;
+    Ok(nodes)
+}
+
+/// A settings section as its Lua function takes it, as a document: a table,
+/// or nothing, which reads as an empty section.
+pub(crate) fn wire_section(options: Option<Table>) -> mlua::Result<solium_wm_protocol::Doc> {
+    wire_doc_of(&options.map_or(Value::Nil, Value::Table)).map(|nodes| {
+        if matches!(nodes.first(), Some(solium_wm_protocol::DocNode::Nil)) {
+            vec![solium_wm_protocol::DocNode::Table(
+                solium_wm_protocol::DocTable {
+                    list: Vec::new(),
+                    fields: Vec::new(),
+                    numbered: Vec::new(),
+                },
+            )]
+        } else {
+            nodes
+        }
+    })
+}
+
+fn wire_node(
+    value: &Value,
+    depth: usize,
+    nodes: &mut Vec<solium_wm_protocol::DocNode>,
+) -> mlua::Result<u32> {
+    use solium_wm_protocol::{DocNode, DocTable};
+    let at = u32::try_from(nodes.len())
+        .map_err(|_| mlua::Error::runtime("a settings document of more than 2^32 values"))?;
+    let node = match value {
+        Value::Nil => DocNode::Nil,
+        Value::Boolean(on) => DocNode::Boolean(*on),
+        Value::Integer(whole) => DocNode::Integer(*whole),
+        Value::Number(fraction) => DocNode::Number(*fraction),
+        Value::String(text) => match text.to_str() {
+            Ok(text) => DocNode::Text(text.to_owned()),
+            Err(_) => DocNode::Other("string that is not UTF-8".to_owned()),
+        },
+        Value::Table(table) => {
+            if depth >= DOC_DEPTH {
+                return Err(mlua::Error::runtime(format!(
+                    "a table nested deeper than {DOC_DEPTH}: one that holds itself?"
+                )));
+            }
+            // Its place is taken first, so its children come after it.
+            nodes.push(DocNode::Nil);
+            let mut numbered = std::collections::BTreeMap::new();
+            let mut fields = std::collections::BTreeMap::new();
+            for pair in table.pairs::<Value, Value>() {
+                let (key, value) = pair?;
+                match key {
+                    Value::Integer(key) => {
+                        numbered.insert(key, value);
+                    }
+                    Value::String(name) => {
+                        fields.insert(name.to_string_lossy(), value);
+                    }
+                    _ => {}
+                }
+            }
+            let mut read = DocTable {
+                list: Vec::new(),
+                fields: Vec::new(),
+                numbered: Vec::new(),
+            };
+            let mut next = 1;
+            while let Some(item) = numbered.remove(&next) {
+                read.list.push(wire_node(&item, depth + 1, nodes)?);
+                next += 1;
+            }
+            for (key, item) in numbered {
+                read.numbered
+                    .push((key, wire_node(&item, depth + 1, nodes)?));
+            }
+            for (name, item) in fields {
+                read.fields
+                    .push((name, wire_node(&item, depth + 1, nodes)?));
+            }
+            nodes[at as usize] = DocNode::Table(read);
+            return Ok(at);
+        }
+        other => DocNode::Other(other.type_name().to_owned()),
+    };
+    nodes.push(node);
+    Ok(at)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{doc_of, wire_doc_of};
+
+    /// A Lua value read straight into a document, and read as a wire
+    /// document and back, is the same document: what a window manager
+    /// sends is what an in-process configuration was read as.
+    #[test]
+    fn a_wire_document_reads_back_as_the_document_lua_makes() {
+        let lua = mlua::Lua::new();
+        for source in [
+            "nil",
+            "true",
+            "7",
+            "7.5",
+            "1/0",
+            "'text'",
+            "{}",
+            "{ 1, 2, 3 }",
+            r#"{ "blur", passes = 3, [10] = "a hole", f = function() end }"#,
+            "{ timeouts = { low = 5000, normal = 7000 }, history = { max = 200 } }",
+            "{ devices = { { name = 'Mouse', vendor = 0x046d, tap = true } } }",
+            "{ [0] = 'zero', [-1] = 'minus', { 'nested', { deeper = { 1 } } } }",
+        ] {
+            let value: mlua::Value = lua.load(source).eval().expect("the test's Lua");
+            let direct = doc_of(&value).expect("reads");
+            let wire = wire_doc_of(&value).expect("reads");
+            assert_eq!(crate::wm::convert::doc(&wire), Ok(direct), "{source}");
+        }
+    }
+
+    #[test]
+    fn a_table_that_holds_itself_is_refused_on_the_wire_too() {
+        let lua = mlua::Lua::new();
+        let value: mlua::Value = lua
+            .load("local t = {} t.again = t return t")
+            .eval()
+            .expect("the test's Lua");
+        assert!(wire_doc_of(&value).is_err());
+    }
+}

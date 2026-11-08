@@ -31,7 +31,7 @@ mod command;
 pub(crate) mod doc;
 mod keep;
 mod lua;
-mod settings;
+pub(crate) mod settings;
 mod types;
 
 pub(crate) use command::*;
