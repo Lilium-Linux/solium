@@ -22,12 +22,11 @@ use super::build_api;
 /// The definitions file, as the documentation site reads it.
 const SOL_LUA: &str = include_str!("../../lua/meta/sol.lua");
 
-/// The production half of `script.rs`: everything before its first
-/// `#[cfg(test)]`, which is the test module. The same cut
-/// `every_event_listened_for_is_one_that_is_sent` makes, for the same reason.
+/// The production half of `script/`: each file before its first
+/// `#[cfg(test)]`. The same cut `every_event_listened_for_is_one_that_is_sent`
+/// makes, for the same reason.
 fn production_script() -> &'static str {
-    const SOURCE: &str = include_str!("../script.rs");
-    SOURCE.split("#[cfg(test)]").next().unwrap_or_default()
+    super::source::production()
 }
 
 /// Every key of a Lua table, as text.
@@ -112,7 +111,7 @@ fn userdata_methods(name: &str) -> BTreeSet<String> {
     let header = format!("impl mlua::UserData for {name} {{");
     let start = source
         .find(&header)
-        .unwrap_or_else(|| panic!("no `{header}` in script.rs"));
+        .unwrap_or_else(|| panic!("no `{header}` in script/"));
     // The block ends at the first line that closes an item at column zero.
     let block = &source[start..];
     let end = block.find("\n}\n").map_or(block.len(), |at| at + 3);
@@ -213,7 +212,7 @@ fn declared() -> Vec<Declared> {
 /// its signature, and a `---@return`. Every field has a description.
 ///
 /// Also the events: `sol.lua`'s `sol.Event` alias is the event table on the
-/// page, so it has to be the set `script.rs` dispatches.
+/// page, so it has to be the set `script/` dispatches.
 #[test]
 fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
     let registered = registered();
@@ -301,12 +300,12 @@ fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
         .collect();
     assert!(
         dispatched.len() >= 8,
-        "only {} events found in script.rs; the scan is broken",
+        "only {} events found in script/; the scan is broken",
         dispatched.len()
     );
     assert_eq!(
         events, dispatched,
-        "sol.lua's `sol.Event` alias is not the set of events script.rs dispatches"
+        "sol.lua's `sol.Event` alias is not the set of events script/ dispatches"
     );
 }
 

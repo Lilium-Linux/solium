@@ -9556,6 +9556,8 @@ fn binding_note_and_options(said: Option<Value>) -> mlua::Result<(Option<String>
 // production code as everything before its first `#[cfg(test)]`.
 #[cfg(test)]
 mod reference;
+#[cfg(test)]
+mod source;
 
 /// The one test helper other modules' tests share.
 /// `state::tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
@@ -18390,18 +18392,15 @@ mod shipped {
     /// A layout that misspells `"monitors"` does not fail -- it stops
     /// rearranging when a screen is unplugged, which reads as a compositor bug.
     ///
-    /// The vocabulary is read out of `script.rs` itself rather than listed
+    /// The vocabulary is read out of `script/` itself rather than listed
     /// here, because a list is a second copy and two copies of a vocabulary
     /// drifting apart is the defect this whole module exists for.
     #[test]
     fn every_event_listened_for_is_one_that_is_sent() {
-        // The production half of this file. Cut at the first `#[cfg(test)]`
+        // The production half of the module, each file cut at its first `#[cfg(test)]`
         // because everything below it -- including this test -- talks *about*
         // `call_listeners` and would otherwise be counted as calling it.
-        const SOURCE: &str = include_str!("script.rs");
-        let Some(production) = SOURCE.split("#[cfg(test)]").next() else {
-            panic!("script.rs is empty, which cannot be");
-        };
+        let production = super::source::production();
         // Decision hooks (`sol.on("notification")`) are dispatched by
         // `call_deciders`, and are events like any other.
         let dispatched: Vec<String> = named(production, "call_listeners(lua,")
@@ -18421,7 +18420,7 @@ mod shipped {
         assert_eq!(
             dispatched.len(),
             calls,
-            "{calls} dispatches in script.rs but only {} are `call_listeners(lua, \"name\")`; \
+            "{calls} dispatches in script/ but only {} are `call_listeners(lua, \"name\")`; \
              one of them is written some other way and this check cannot see it",
             dispatched.len()
         );
