@@ -49,43 +49,51 @@ pub(crate) fn texts(section: &Doc, key: &str) -> Result<Option<Vec<String>>, Str
     }
 }
 
-/// A whole number of zero or more under `key`, as Lua reads one for a
-/// Rust `u64`: a whole float and numeric text are read, and anything with a
-/// fraction, negative or past the type is refused as out of range.
-pub(crate) fn unsigned(section: &Doc, key: &str) -> Result<Option<u64>, String> {
+/// A whole number under `key` as Lua reads one for the Rust integer type
+/// `T`, named `type_name`: a whole float and numeric text are read, and
+/// anything with a fraction or outside the type is refused as out of range.
+pub(crate) fn whole<T: TryFrom<i64>>(
+    section: &Doc,
+    key: &str,
+    type_name: &str,
+) -> Result<Option<T>, String> {
     let value = section.get(key);
-    let out_of_range = || format!("{} (out of range)", not_a(value, "u64"));
-    let number = match value {
-        Doc::Nil => return Ok(None),
-        Doc::Int(whole) => return u64::try_from(*whole).map(Some).map_err(|_| out_of_range()),
-        Doc::Num(number) => *number,
-        Doc::Text(text) => match text.trim().parse::<i64>() {
-            Ok(whole) => return u64::try_from(whole).map(Some).map_err(|_| out_of_range()),
-            Err(_) => text.trim().parse::<f64>().map_err(|_| {
-                format!(
-                    "{} (expected number or string coercible to number)",
-                    not_a(value, "u64")
-                )
-            })?,
-        },
-        _ => {
-            return Err(format!(
-                "{} (expected number or string coercible to number)",
-                not_a(value, "u64")
-            ));
-        }
+    // A whole float is read as the integer it is, and named so, as Lua's
+    // own conversion names it.
+    let read_as = match value {
+        Doc::Num(number) if float_whole(*number).is_some() => "integer",
+        other => other.type_name(),
     };
+    let out_of_range = || format!("error converting Lua {read_as} to {type_name} (out of range)");
+    let not_a_number = || {
+        format!(
+            "{} (expected number or string coercible to number)",
+            not_a(value, type_name)
+        )
+    };
+    let whole = match value {
+        Doc::Nil => return Ok(None),
+        Doc::Int(whole) => *whole,
+        Doc::Num(number) => float_whole(*number).ok_or_else(out_of_range)?,
+        Doc::Text(text) => match text.trim().parse::<i64>() {
+            Ok(whole) => whole,
+            Err(_) => float_whole(text.trim().parse::<f64>().map_err(|_| not_a_number())?)
+                .ok_or_else(out_of_range)?,
+        },
+        _ => return Err(not_a_number()),
+    };
+    T::try_from(whole).map(Some).map_err(|_| out_of_range())
+}
+
+/// A float that is a whole number within `i64`, as that number.
+fn float_whole(number: f64) -> Option<i64> {
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
         clippy::cast_precision_loss,
-        reason = "checked to be whole and within u64 first"
+        reason = "checked to be whole and within i64 first"
     )]
-    if number.fract() == 0.0 && number >= 0.0 && number < u64::MAX as f64 {
-        Ok(Some(number as u64))
-    } else {
-        Err(out_of_range())
-    }
+    (number.fract() == 0.0 && number >= i64::MIN as f64 && number < i64::MAX as f64)
+        .then_some(number as i64)
 }
 
 /// A flag under `key`: `None` when absent, and otherwise true for anything
@@ -148,7 +156,7 @@ fn g14(number: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{flag, table, text, texts, unsigned};
+    use super::{flag, table, text, texts, whole};
     use crate::script::doc::tests::doc;
 
     #[test]
@@ -174,16 +182,20 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_and_flag_read_as_luas_own_conversions_do() {
+    fn whole_and_flag_read_as_luas_own_conversions_do() {
         let lua = mlua::Lua::new();
-        for source in ["5", "2.7", "3.0", "'12'", "-1", "1e30", "{}", "true"] {
+        for source in [
+            "5", "2.7", "3.0", "'12'", "'1.0'", "-1", "3e9", "1e30", "{}", "true",
+        ] {
             let table: mlua::Table = lua
                 .load(format!("return {{ x = {source} }}"))
                 .eval()
                 .expect("the test's Lua");
-            let lua_says = table.get::<Option<u64>>("x").map_err(|err| err.to_string());
             let section = doc(&format!("{{ x = {source} }}"));
-            assert_eq!(unsigned(&section, "x"), lua_says, "{source}");
+            let lua_says = table.get::<Option<u64>>("x").map_err(|err| err.to_string());
+            assert_eq!(whole::<u64>(&section, "x", "u64"), lua_says, "{source}");
+            let lua_says = table.get::<Option<i32>>("x").map_err(|err| err.to_string());
+            assert_eq!(whole::<i32>(&section, "x", "i32"), lua_says, "{source}");
             let lua_flag = table.get::<Option<bool>>("x").expect("a flag always reads");
             assert_eq!(flag(&section, "x"), lua_flag, "{source}");
         }

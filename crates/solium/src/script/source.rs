@@ -44,6 +44,8 @@ pub(crate) const FILES: &[(&str, &str)] = &[
         "settings/fullscreen.rs",
         include_str!("settings/fullscreen.rs"),
     ),
+    ("settings/services.rs", include_str!("settings/services.rs")),
+    ("settings/keyboard.rs", include_str!("settings/keyboard.rs")),
     ("settings/mod.rs", include_str!("settings/mod.rs")),
     ("settings/read.rs", include_str!("settings/read.rs")),
     ("source.rs", include_str!("source.rs")),

@@ -31,7 +31,7 @@ pub(crate) fn build_budget(millis: &Doc) -> Option<Duration> {
 /// words Lua's conversions use; `scene` that is not text is read as left out.
 pub(crate) fn loading(options: &Doc) -> Result<Loading, String> {
     let mut loading = Loading::default();
-    if let Some(millis) = read::unsigned(options, "patience")? {
+    if let Some(millis) = read::whole::<u64>(options, "patience", "u64")? {
         loading.patience = Duration::from_millis(millis);
     }
     if let Some(reserves) = read::flag(options, "reserves_a_slot") {
@@ -40,7 +40,7 @@ pub(crate) fn loading(options: &Doc) -> Result<Loading, String> {
     if let Some(decorated) = read::flag(options, "decorated") {
         loading.decorated = decorated;
     }
-    if let Some(millis) = read::unsigned(options, "fade")? {
+    if let Some(millis) = read::whole::<u64>(options, "fade", "u64")? {
         loading.fade = Duration::from_millis(millis);
     }
     if let Doc::Text(scene) = options.get("scene") {

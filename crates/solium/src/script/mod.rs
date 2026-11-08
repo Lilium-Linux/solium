@@ -2796,52 +2796,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 return Ok(Value::Table(table));
             };
 
-            let text =
-                |key: &str| -> mlua::Result<Option<String>> { options.get::<Option<String>>(key) };
-            let rules = text("rules")?;
-            let model = text("model")?;
-            let layout = text("layout")?;
-            let variant = text("variant")?;
-            let keyboard_options = text("options")?;
-
-            // A keymap is compiled only when a script named one of its parts.
-            // Recompiling to change the active layout would throw away the
-            // modifier state with it, and recompiling on every reload would
-            // make every client rebuild its xkb state for nothing.
-            let names = [&rules, &model, &layout, &variant, &keyboard_options];
-            let keymap = names.iter().any(|name| name.is_some()).then(|| {
-                crate::keymap::Keymap {
-                    rules: rules.clone().unwrap_or_default(),
-                    model: model.clone().unwrap_or_default(),
-                    layout: layout.clone().unwrap_or_default(),
-                    variant: variant.clone().unwrap_or_default(),
-                    // `None`, not `Some("")`. An empty string is a real
-                    // instruction to xkb meaning "no options at all", which is
-                    // not the same as "whatever the environment says".
-                    options: keyboard_options.clone().filter(|it| !it.is_empty()),
-                }
-            });
-
-            let rate = options.get::<Option<i32>>("repeat_rate")?;
-            let delay = options.get::<Option<i32>>("repeat_delay")?;
-            let repeat = match (rate, delay) {
-                (None, None) => None,
-                // One given and not the other keeps the other as it is, which
-                // is what every other key in this table does.
-                (rate, delay) => Some((
-                    rate.unwrap_or(crate::keymap::REPEAT_RATE),
-                    delay.unwrap_or(crate::keymap::REPEAT_DELAY),
-                )),
-            };
-
-            let request = crate::keymap::Request {
-                keymap,
-                repeat,
-                active: options.get::<Option<usize>>("active")?,
-                // `keymap::tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`.
-                caps: options.get::<Option<bool>>("caps")?,
-                num: options.get::<Option<bool>>("num")?,
-            };
+            let request = settings::keyboard::parse(&lua::convert::section(Some(options))?)
+                .map_err(mlua::Error::runtime)?;
             if request == crate::keymap::Request::default() {
                 return Ok(Value::Nil);
             }
@@ -3156,57 +3112,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 return Ok(Value::Table(table));
             };
-            let mut config = crate::services::notifications::Config::default();
-            match options.get::<Value>("serve") {
-                Ok(Value::Boolean(on)) => config.serve = on,
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    value = describe(&other),
-                    "notifications.serve: true or false; keeping the default, false"
-                ),
-            }
-            let millis = |table: &mlua::Table, key: &str| -> Option<Option<Duration>> {
-                let value = table.get::<Value>(key).ok()?;
-                if matches!(value, Value::Nil) {
-                    return None;
-                }
-                match number(&value).filter(|amount| *amount >= 0.0) {
-                    Some(0.0) => Some(None),
-                    Some(amount) => Duration::try_from_secs_f64(amount / 1000.0).ok().map(Some),
-                    None => {
-                        tracing::warn!(
-                            key,
-                            value = describe(&value),
-                            "notifications.timeouts: milliseconds of zero or more; keeping the default"
-                        );
-                        None
-                    }
-                }
-            };
-            if let Ok(Value::Table(timeouts)) = options.get::<Value>("timeouts") {
-                let defaults = &mut config.settings.timeouts;
-                if let Some(low) = millis(&timeouts, "low") {
-                    defaults.low = low;
-                }
-                if let Some(normal) = millis(&timeouts, "normal") {
-                    defaults.normal = normal;
-                }
-                if let Some(critical) = millis(&timeouts, "critical") {
-                    defaults.critical = critical;
-                }
-            }
-            if let Ok(Value::Table(history)) = options.get::<Value>("history") {
-                match history.get::<Value>("max") {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|n| *n >= 0.0 && *n <= 100_000.0) {
-                        Some(max) => config.settings.history_max = max as usize,
-                        None => tracing::warn!(
-                            value = describe(&value),
-                            "notifications.history.max: a count from 0 to 100000; keeping 200"
-                        ),
-                    },
-                }
-            }
+            let config = settings::services::notifications(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Notifications(config));
             })?;
@@ -3247,15 +3153,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 }
                 return Ok(Value::Table(table));
             };
-            let mut config = crate::services::tray::Config::default();
-            match options.get::<Value>("serve") {
-                Ok(Value::Boolean(on)) => config.serve = on,
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    value = describe(&other),
-                    "tray.serve: true or false; keeping the default, false"
-                ),
-            }
+            let config = settings::services::tray(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Tray(config));
             })?;
@@ -3276,42 +3174,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 let snapshot = snapshot(lua)?;
                 return snapshot.media.to_json().to_lua(lua);
             };
-            let mut config = crate::services::media::Config::default();
-            match options.get::<Value>("watch") {
-                Ok(Value::Boolean(on)) => config.watch = on,
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    value = describe(&other),
-                    "media.watch: true or false; keeping the default, false"
-                ),
-            }
-            match options.get::<Value>("ignore") {
-                Ok(Value::Table(names)) => {
-                    config.ignore = names
-                        .sequence_values::<String>()
-                        .filter_map(Result::ok)
-                        .take(64)
-                        .collect();
-                }
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    value = describe(&other),
-                    "media.ignore: a list of player names; keeping the default"
-                ),
-            }
-            match options.get::<Value>("position_interval_ms") {
-                Ok(Value::Integer(ms)) => {
-                    config.position_interval_ms = u32::try_from(ms.clamp(0, 60_000)).unwrap_or(0);
-                }
-                Ok(Value::Number(ms)) if ms.is_finite() => {
-                    config.position_interval_ms = ms.clamp(0.0, 60_000.0) as u32;
-                }
-                Ok(Value::Nil) | Err(_) => {}
-                Ok(other) => tracing::warn!(
-                    value = describe(&other),
-                    "media.position_interval_ms: milliseconds, 0 to 60000; keeping the default"
-                ),
-            }
+            let config = settings::services::media(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Media(config));
             })?;
@@ -3369,23 +3232,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 table.set("windows", windows)?;
                 return Ok(Value::Table(table));
             };
-            let mut settings = crate::services::audio::model::Settings::default();
-            for (key, slot, top) in [
-                ("max", &mut settings.max, 1.5),
-                ("step", &mut settings.step, 0.5),
-            ] {
-                match options.get::<Value>(key) {
-                    Ok(Value::Nil) | Err(_) => {}
-                    Ok(value) => match number(&value).filter(|n| *n > 0.0 && *n <= top) {
-                        Some(n) => *slot = n,
-                        None => tracing::warn!(
-                            key,
-                            value = describe(&value),
-                            "audio: a number above 0 and at most {top}; keeping the default"
-                        ),
-                    },
-                }
-            }
+            let settings = settings::services::audio(&lua::convert::section(Some(options))?);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Audio(Some(settings)))
             })?;
@@ -12549,53 +12396,23 @@ mod tests {
         found
     }
 
-    /// The keys a compositor function reads out of the table it is handed.
+    /// The keys a section's parser reads out of the document it is handed.
     ///
-    /// Asked of the function by handing it one that records what is looked up
-    /// in it, so this cannot be a restatement of the reads and cannot drift
-    /// from them however they are spelled -- `sol.keyboard` reads five of its
-    /// keys through a closure and three directly, and an `options.get(` scan
-    /// would see only three. A section read from a document is asked the same
-    /// way, through the document's own record of what was asked of it.
+    /// Asked of the parser through the document's own record of what was
+    /// looked up in it, so this cannot be a restatement of the reads and
+    /// cannot drift from them however they are spelled -- `keyboard` reads
+    /// five of its keys through a closure and three directly, and a scan for
+    /// `get(` would see only three.
     fn keys_read_by(name: &str) -> Vec<String> {
-        if name == "cursor_theme" {
-            return doc::tests::keys_read(|| {
+        doc::tests::keys_read(|| match name {
+            "cursor_theme" => {
                 let _ = settings::cursor::parse(&Doc::table());
-            });
-        }
-        let directory = std::env::temp_dir().join(format!("solium-script-test-reads-{name}"));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a temporary directory");
-        let config = directory.join("init.lua");
-        std::fs::write(
-            &config,
-            format!(
-                r#"
-                sol.bind("Super+P", function()
-                    local seen = {{}}
-                    sol.{name}(setmetatable({{}}, {{
-                        __index = function(_, key) seen[#seen + 1] = tostring(key) end,
-                    }}))
-                    table.sort(seen)
-                    sol.status(table.concat(seen, " "))
-                end)
-                "#
-            ),
-        )
-        .expect("writing the test script");
-
-        let mut scripts = Scripts::load(&config).expect("loading the test script");
-        let outcome = scripts.key("super+p", empty_snapshot());
-        let _ = std::fs::remove_dir_all(&directory);
-        let mut found: Vec<String> = outcome
-            .status
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(ToOwned::to_owned)
-            .collect();
-        // Sorted on the Lua side already; a key read twice is one key.
-        found.dedup();
-        found
+            }
+            "keyboard" => {
+                let _ = settings::keyboard::parse(&Doc::table());
+            }
+            other => panic!("no parser named for sol.{other}"),
+        })
     }
 
     /// **The key sets `config.lua` restates are the ones the compositor reads.**
