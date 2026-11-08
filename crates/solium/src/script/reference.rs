@@ -416,6 +416,7 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
                 .and_then(|end| end.to_str())
                 .is_some_and(|end| ["rs", "lua", "cpp", "h", "qml"].contains(&end))
                 && !path.ends_with("src/script/reference.rs")
+                && !test_file(&path)
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
                 let text = production(&path, &text);
@@ -434,6 +435,14 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
         out.push((build, text));
     }
     out
+}
+
+/// Whether a Rust file is test code throughout: one in a `tests` directory
+/// of `src`, declared from its parent under `#[cfg(test)]`, which has no
+/// `#[cfg(test)]` of its own to cut at.
+fn test_file(path: &Path) -> bool {
+    path.extension().is_some_and(|end| end == "rs")
+        && path.components().any(|part| part.as_os_str() == "tests")
 }
 
 /// Every double-quoted literal in `text` that starts with `prefix` and runs on

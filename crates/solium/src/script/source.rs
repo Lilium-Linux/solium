@@ -29,9 +29,9 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("lua/motion.rs", include_str!("lua/motion.rs")),
     ("lua/pending.rs", include_str!("lua/pending.rs")),
     ("lua/runs.rs", include_str!("lua/runs.rs")),
+    ("lua/dispatch.rs", include_str!("lua/dispatch.rs")),
+    ("lua/load.rs", include_str!("lua/load.rs")),
     ("lua/mod.rs", include_str!("lua/mod.rs")),
-    ("dispatch.rs", include_str!("dispatch.rs")),
-    ("load.rs", include_str!("load.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("reference.rs", include_str!("reference.rs")),
     ("settings/focus.rs", include_str!("settings/focus.rs")),
@@ -123,7 +123,6 @@ mod tests {
     /// `mlua` only in the Lua layer, and in the scans that look for it: the
     /// rest of the module is what a window manager in any language talks to.
     #[test]
-    #[ignore = "the split is under way: script/mod.rs still holds the Lua layer"]
     fn mlua_appears_only_under_lua() {
         let outside: Vec<&str> = FILES
             .iter()

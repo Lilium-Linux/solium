@@ -663,7 +663,7 @@ pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Resul
 /// test to apply as the command would.
 #[cfg(test)]
 pub(crate) fn deform_for_test(lua: &str) -> DeformSpec {
-    let state = Lua::new();
+    let state = mlua::Lua::new();
     let options: Table = state
         .load(format!("return {{ deform = {lua} }}"))
         .eval()
