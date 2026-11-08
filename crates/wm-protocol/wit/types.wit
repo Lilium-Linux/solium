@@ -1,0 +1,132 @@
+package solium:wm@0.1.0;
+
+/// What a window manager is told about the desktop: plain data, no handles.
+/// Every row here mirrors what the compositor's own scripts were told, field
+/// for field, so a window manager in any language sees what `sol.windows()`
+/// shows a Lua one.
+interface types {
+    /// A rectangle in the compositor's logical space.
+    record rect { x: f64, y: f64, w: f64, h: f64 }
+
+    /// A size in logical pixels.
+    record size { w: s32, h: s32 }
+
+    /// What a window's frame takes of its rectangle on each side.
+    record insets { top: s32, right: s32, bottom: s32, left: s32 }
+
+    /// Which window a window belongs to: none named, one named that cannot
+    /// be pointed at, or that window.
+    variant parentage { none, unknown, window(u64) }
+
+    /// A window, as `sol.windows()` lists it.
+    record window {
+        id: u64,
+        rect: rect,
+        insets: insets,
+        title: string,
+        focused: bool,
+        monitor: string,
+        modal: bool,
+        parent: parentage,
+        leaving: bool,
+        minimized: bool,
+        above: bool,
+        icon: option<rect>,
+        app-id: string,
+        min: option<size>,
+        max: option<size>,
+        cramped: bool,
+        shown: bool,
+        fullscreen: bool,
+        maximized: bool,
+        style: string,
+        client-side: bool,
+        blur-region: bool,
+        x11-type: option<string>,
+        accepts-input: bool,
+        class: option<string>,
+        instance: option<string>,
+        content-type: string,
+        pid: option<u32>,
+    }
+
+    /// A monitor, as `sol.monitors()` lists it.
+    record monitor {
+        name: string,
+        area: rect,
+        whole: rect,
+        scale: f64,
+        focused: bool,
+        primary: bool,
+        transform: string,
+        off: bool,
+    }
+
+    /// The keyboard: its layouts, the active one, the locks and repeat.
+    record keyboard {
+        layouts: list<string>,
+        short-names: list<string>,
+        active: u32,
+        caps: bool,
+        num: bool,
+        repeat-rate: s32,
+        repeat-delay: s32,
+    }
+
+    /// A text field that has the keyboard, and where its caret is.
+    record text-field {
+        window: u64,
+        caret: option<rect>,
+        framed: bool,
+    }
+
+    /// Something wrong in an effect, a rule or the configuration.
+    record problem {
+        effect: string,
+        file: string,
+        line: option<u32>,
+        column: option<u32>,
+        message: string,
+        severity: string,
+    }
+
+    /// A finger, in the compositor's space, routed to the window manager.
+    record touch-event {
+        kind: string,
+        slot: s32,
+        x: f64,
+        y: f64,
+        output: string,
+        target: string,
+        window: option<u64>,
+        control: bool,
+        edges: option<string>,
+        time: u32,
+        t: f64,
+        vx: f64,
+        vy: f64,
+    }
+
+    /// One node of a settings document; a table's children are nodes by
+    /// index into the same list, because WIT has no recursive types.
+    variant doc-node {
+        nil,
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        table(doc-table),
+        other(string),
+    }
+
+    /// A table: its list part, its named keys and its numbered keys, each
+    /// value an index into the document's nodes.
+    record doc-table {
+        %list: list<u32>,
+        fields: list<tuple<string, u32>>,
+        numbered: list<tuple<s64, u32>>,
+    }
+
+    /// A settings document: its nodes, the first the root.
+    type doc = list<doc-node>;
+}

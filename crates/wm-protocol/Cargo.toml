@@ -1,0 +1,15 @@
+[package]
+name = "solium-wm-protocol"
+description = "The protocol between Solium and the window manager that drives it: types and wire encoding generated from its WIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[build-dependencies]
+wit-parser = "0.263"

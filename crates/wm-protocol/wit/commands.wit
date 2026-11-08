@@ -1,0 +1,258 @@
+/// What a window manager asks of the compositor. Each command is applied in
+/// order, all of an answer's at once, on the next frame at the latest.
+interface commands {
+    use types.{rect, touch-event, doc};
+
+    /// How a motion moves: by name, a cubic bezier, or a spring.
+    variant easing {
+        linear,
+        out-cubic,
+        out-back,
+        in-out-quad,
+        in-out-cubic,
+        bezier(tuple<f64, f64, f64, f64>),
+        spring(spring),
+    }
+
+    record spring {
+        stiffness: f64,
+        damping: f64,
+        mass: f64,
+        initial-velocity: f64,
+        epsilon: f64,
+    }
+
+    /// How long a motion takes and how it moves.
+    record motion {
+        duration-ms: f64,
+        easing: easing,
+    }
+
+    /// A 4x4 matrix, row by row.
+    type matrix = list<f32>;
+
+    /// What a deform effect bends towards.
+    variant aim {
+        rect(rect),
+        window(u64),
+        surface(string),
+    }
+
+    /// A geometry effect applied to a window as it is presented.
+    record deform {
+        effect: string,
+        params: doc,
+        axis: option<string>,
+        progress: f64,
+        aim: aim,
+        seed: option<f64>,
+        failed: option<string>,
+        on-reload: option<string>,
+    }
+
+    /// Where a window is drawn, which need not be where it is.
+    record present {
+        id: u64,
+        rect: option<rect>,
+        opacity: option<f32>,
+        client-opacity: option<f32>,
+        matrix: option<matrix>,
+        deform: option<deform>,
+        z: f32,
+        pivot: tuple<f32, f32>,
+        motion: motion,
+        /// A motion of its own for each of `x`, `y`, `size`, `opacity` and
+        /// `client-opacity`, those not named moving by `motion`.
+        channels: list<tuple<string, motion>>,
+    }
+
+    /// A present that starts somewhere else and comes to where the window is.
+    record present-from {
+        id: u64,
+        rect: rect,
+        opacity: option<f32>,
+        client-opacity: option<f32>,
+        motion: motion,
+        channels: list<tuple<string, motion>>,
+        deform: option<deform>,
+    }
+
+    /// What a group of windows, surfaces and monitors holds.
+    record selection {
+        windows: list<u64>,
+        surfaces: list<string>,
+        monitors: list<string>,
+        on: option<string>,
+    }
+
+    /// How a whole group is shifted.
+    record shift {
+        dx: f64,
+        dy: f64,
+        opacity: f32,
+        matrix: matrix,
+    }
+
+    /// Where the pointer is sent.
+    variant warp-to {
+        point(tuple<f64, f64>),
+        window(tuple<u64, f64, f64>),
+    }
+
+    /// What stops a warp under way: the pointer moving, or the picture.
+    enum interrupt { pointer, picture }
+
+    record warp {
+        to: warp-to,
+        motion: option<motion>,
+        interrupt: interrupt,
+    }
+
+    /// Why the keyboard is moved, as the compositor is told it.
+    enum focus-cause {
+        binding, direction, move, click, scroll, drop, touch, hover,
+        surface, open, activate, settle, script,
+    }
+
+    /// A finger the window manager takes for itself, or hands a window.
+    variant touch-action {
+        capture,
+        move(u64),
+        resize(tuple<u64, string>),
+    }
+
+    /// A press sent to a window: a button, or keys by name.
+    variant press {
+        button(u32),
+        keys(list<string>),
+    }
+
+    /// A window placed by a layout.
+    record place {
+        id: u64,
+        rect: rect,
+        motion: motion,
+        tile: bool,
+        inside: option<rect>,
+        cramped: bool,
+        moved: bool,
+    }
+
+    /// A binding declared, so a key is answered without a question: the
+    /// compositor knows the combination is taken.
+    record binding {
+        combo: string,
+        note: option<string>,
+        repeating: bool,
+        locked: bool,
+        source: option<string>,
+    }
+
+    /// A program run for its output.
+    record run {
+        id: u64,
+        argv: list<string>,
+        cwd: option<string>,
+        env: list<tuple<string, option<string>>>,
+        timeout-ms: u64,
+        max-output: u64,
+        lines: bool,
+    }
+
+    record file-read {
+        id: u64,
+        path: string,
+        max: u64,
+    }
+
+    record file-write {
+        id: u64,
+        path: string,
+        data: list<u8>,
+        report: bool,
+    }
+
+    record timer {
+        id: u64,
+        after-ms: f64,
+        period-ms: option<f64>,
+    }
+
+    /// A notification of the window manager's own.
+    record notify {
+        token: u64,
+        summary: string,
+        body: string,
+        icon: string,
+        urgency: string,
+        actions: list<tuple<string, string>>,
+        expire-timeout: s32,
+    }
+
+    variant command {
+        /// A settings section, as a document: `idle`, `input`, `effects`,
+        /// `monitors` and the rest, each read as the configuration
+        /// reference documents it.
+        configure(tuple<string, doc>),
+        /// State to hand back when the window manager is restarted.
+        keep(tuple<string, doc>),
+        /// The events the window manager listens to; no other is sent.
+        listen(list<string>),
+        bind(binding),
+        unbind(string),
+        /// Whether a mode holds the pointer and touch, so a press goes to
+        /// the window manager without a question.
+        grab(bool),
+        status(string),
+
+        present(present),
+        present-from(present-from),
+        clear(tuple<u64, motion>),
+        group(tuple<string, option<selection>, motion>),
+        present-group(tuple<string, shift, motion>),
+        clear-group(tuple<string, motion>),
+        place(place),
+        unplace(u64),
+        focus(tuple<u64, focus-cause, option<warp>>),
+        warp(warp),
+        touch(tuple<s32, touch-action>),
+        click(tuple<f64, f64>),
+        press(tuple<u64, press, focus-cause>),
+        toggle-fullscreen(u64),
+        toggle-maximize(u64),
+        drag-hold(tuple<u64, bool>),
+        drag-grip(tuple<u64, tuple<f64, f64>, tuple<f64, f64>>),
+        resize-hold(tuple<u64, bool>),
+        minimize(u64),
+        unminimize(u64),
+        show-minimized(tuple<u64, bool>),
+        keep-above(tuple<u64, option<bool>>),
+        close(u64),
+        act(tuple<u64, string, doc, focus-cause>),
+
+        decoration(option<string>),
+        pane-values(doc),
+        frame-values(tuple<u64, doc>),
+        surface(doc),
+        surface-gone(string),
+        power(tuple<option<string>, bool>),
+
+        spawn(list<string>),
+        run(run),
+        timer(timer),
+        timer-cancel(u64),
+        file-read(file-read),
+        file-write(file-write),
+        watch(tuple<u64, string>),
+        watch-cancel(u64),
+        store(tuple<string, string>),
+        notify(notify),
+
+        lock-now,
+        lock-peek(option<f64>),
+        take-shortcuts-back,
+        release-pointer,
+        reload,
+        quit,
+    }
+}

@@ -1,0 +1,182 @@
+/// What crosses the socket: one `message` per frame.
+///
+/// The compositor sends a `batch` of what changed and what happened, at most
+/// one each time its event loop runs; the window manager answers it with an
+/// `answer` naming the same serial. A batch that asks a question (a key, a
+/// press, an open) is answered at once or the compositor goes on without the
+/// answer after `wm.ask-ms`; every other batch is never waited for. The
+/// window manager may also `submit` commands of its own whenever it likes.
+interface messages {
+    use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc};
+    use commands.{command};
+
+    /// The first message, from the compositor: the protocol it speaks, and
+    /// everything the window manager kept before it was restarted.
+    record hello {
+        version: string,
+        keeps: list<tuple<string, doc>>,
+    }
+
+    /// The window manager's reply to `hello`: the protocol it was built
+    /// for, and the commands that configure the desktop before its first
+    /// frame (settings, bindings, listeners).
+    record hello-answer {
+        version: string,
+        commands: list<command>,
+    }
+
+    /// What changed since the last batch. A window or monitor is sent whole
+    /// when any of it changed; the window manager keeps the latest of each.
+    variant change {
+        window(window),
+        window-gone(u64),
+        /// The windows, top to bottom, when their order changed.
+        stacking(list<u64>),
+        monitors(list<monitor>),
+        work-area(rect),
+        cursor(tuple<f64, f64>),
+        keyboard(keyboard),
+        shortcuts-owner(option<u64>),
+        text-field(option<text-field>),
+        problems(list<problem>),
+        locked(bool),
+        /// A session service's view (`notifications`, `audio`, `tray`,
+        /// `media`, `apps`), as a document.
+        service(tuple<string, doc>),
+    }
+
+    /// Why the keyboard moved.
+    enum focus-source {
+        binding, direction, move, click, scroll, drop, touch, hover,
+        surface, open, activate, settle, script,
+    }
+
+    /// Where a drag or a resize is.
+    enum phase { start, motion, end }
+
+    /// A program's output, a line at a time, and how it ended.
+    variant run-heard {
+        stdout(tuple<u64, list<u8>>),
+        stderr(tuple<u64, list<u8>>),
+        done(run-ended),
+    }
+
+    record run-ended {
+        id: u64,
+        code: option<s32>,
+        signal: option<s32>,
+        timed-out: bool,
+        truncated: bool,
+        stdout: list<u8>,
+        stderr: list<u8>,
+    }
+
+    /// What a file read, write or watch came to.
+    variant file-heard {
+        read(tuple<u64, result-bytes>),
+        wrote(tuple<u64, option<string>>),
+        watched(tuple<u64, file-change, string>),
+        watch-ended(u64),
+    }
+
+    variant result-bytes { ok(list<u8>), error(string) }
+
+    enum file-change { changed, created, removed }
+
+    /// A `sol.act` attempt's outcome.
+    record settled {
+        attempt: u64,
+        ok: bool,
+        reason: option<string>,
+    }
+
+    /// Something that happened, in the order it happened. Each is the event
+    /// a Lua configuration hears through `sol.on`, or a binding firing.
+    variant event {
+        /// The configuration was loaded: the desktop's first moment.
+        startup,
+        /// A bound key combination, in its canonical spelling.
+        key(string),
+        opened(u64),
+        fullscreen(tuple<u64, bool>),
+        maximize(tuple<u64, bool>),
+        click(tuple<f64, f64>),
+        touch(touch-event),
+        focused(tuple<u64, focus-source, bool>),
+        keyboard-changed(string),
+        lock-changed(string),
+        text-input(string),
+        activated(tuple<u64, string>),
+        resized(resized),
+        closed(u64),
+        closing(u64),
+        close-landed(u64),
+        refused(u64),
+        notification(doc),
+        notifications(doc),
+        audio(doc),
+        tray(doc),
+        media(doc),
+        notify-forget(list<u64>),
+        notify-action(tuple<u64, string>),
+        minimized(u64),
+        unminimized(u64),
+        monitors-changed,
+        problems-changed,
+        restored,
+        frame-action(tuple<u64, string, doc>),
+        surface-action(tuple<string, string, doc>),
+        attempts-settled(list<settled>),
+        runs(list<run-heard>),
+        timers(list<tuple<u64, bool>>),
+        files(list<file-heard>),
+        relayout,
+        dragged(pointer-move),
+        resizing(pointer-move),
+        dropped(tuple<u64, f64, f64>),
+        scrolled(tuple<f64, f64>),
+    }
+
+    /// A window's edge moved by its own resize.
+    record resized {
+        id: u64,
+        x: f64,
+        y: f64,
+        horizontal: option<string>,
+        vertical: option<string>,
+    }
+
+    /// A window being dragged or resized by the pointer.
+    record pointer-move {
+        id: u64,
+        phase: phase,
+        x: f64,
+        y: f64,
+    }
+
+    /// One pass of the compositor's event loop.
+    record batch {
+        serial: u64,
+        changes: list<change>,
+        events: list<event>,
+    }
+
+    /// What the window manager made of a batch.
+    record answer {
+        serial: u64,
+        /// Whether it took the batch's key, press or scroll; one it did not
+        /// take goes to the client.
+        handled: bool,
+        commands: list<command>,
+    }
+
+    variant message {
+        hello(hello),
+        hello-answer(hello-answer),
+        batch(batch),
+        answer(answer),
+        submit(list<command>),
+        /// Either side is closing the connection, and says why.
+        goodbye(string),
+    }
+}
