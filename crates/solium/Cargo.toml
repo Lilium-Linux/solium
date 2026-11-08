@@ -22,6 +22,7 @@ solium-effects = { path = "../effects" }
 
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
+solium-json = { path = "../json", features = ["lua"] }
 solium-layout = { path = "../layout" }
 solium-wm-protocol = { path = "../wm-protocol" }
 

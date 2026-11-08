@@ -1,0 +1,20 @@
+[package]
+name = "solium-json"
+description = "JSON values for what crosses between Solium, its scripts and its QML: written and read by hand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Converting to and from Lua values.
+lua = ["dep:mlua"]
+
+[dependencies]
+mlua = { version = "0.12.1", features = ["lua54", "vendored"], optional = true }

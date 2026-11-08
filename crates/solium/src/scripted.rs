@@ -974,29 +974,7 @@ pub(crate) fn find_scene(name: &str) -> Option<PathBuf> {
     own.is_file().then_some(own)
 }
 
-/// One JSON string, quoted and escaped.
-///
-/// The property bag is JSON text and the values in it come from a script,
-/// which means from a user. An unescaped quote in a file name ends the string
-/// early and takes the whole scene with it -- which presents as the surface
-/// silently not existing.
-pub(crate) fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+pub(crate) use solium_json::json_string;
 
 #[cfg(test)]
 mod tests {
