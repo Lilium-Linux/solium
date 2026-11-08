@@ -403,12 +403,12 @@ impl Desk {
 
     /// What `Solium::reload` does, with the desk as it is.
     fn reload(&mut self) {
-        let mut fresh = Scripts::load_carrying(&self.entry, self.scripts.kept())
+        self.scripts
+            .reload(&self.entry)
             .expect("reloading the scripts");
-        let mut commands = fresh.restored(self.snapshot()).commands;
-        commands.extend(fresh.monitors_changed(self.snapshot()).commands);
-        commands.extend(fresh.relayout(self.snapshot()).commands);
-        self.scripts = fresh;
+        let mut commands = self.scripts.restored(self.snapshot()).commands;
+        commands.extend(self.scripts.monitors_changed(self.snapshot()).commands);
+        commands.extend(self.scripts.relayout(self.snapshot()).commands);
         self.apply(&commands);
     }
 }

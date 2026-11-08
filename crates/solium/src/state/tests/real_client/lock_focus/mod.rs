@@ -2667,14 +2667,11 @@ mod escape {
     /// `layout`.
     fn reload(session: &mut Session, entry: &std::path::Path) {
         let state = &mut session.state;
-        let carried = state
-            .scripts
-            .as_ref()
-            .map(Scripts::kept)
-            .unwrap_or_default();
-        state.start_scripts(Some(
-            Scripts::load_carrying(entry, carried).expect("reloading the shipped overview"),
-        ));
+        let mut scripts = state.scripts.take().expect("the scripts loaded");
+        scripts
+            .reload(entry)
+            .expect("reloading the shipped overview");
+        state.start_scripts(Some(scripts));
         let snapshot = state.snapshot();
         let mut scripts = state.scripts.take().expect("the scripts reloaded");
         let restored = scripts.restored(snapshot);

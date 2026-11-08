@@ -566,7 +566,8 @@ impl Scripts {
     /// first `#[cfg(test)]` on purpose -- `every_event_listened_for_is_one_that_is_sent`
     /// reads this file's production half by cutting at the first one.
     pub(crate) fn evaluate(&self, chunk: &str) -> String {
-        self.lua
+        self.host
+            .lua
             .load(chunk)
             .eval::<String>()
             .unwrap_or_else(|err| format!("error: {err}"))
@@ -581,10 +582,12 @@ impl Scripts {
     pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
         let mut mirror = solium_wm_protocol::mirror::Mirror::new();
         mirror.apply_all(crate::wm::diff::Told::new().changes(&snapshot));
-        self.lua.set_app_data(mirror);
-        self.lua.set_app_data(crate::script::lua::Asker(Box::new(
-            crate::script::lua::dispatch::Answers(snapshot),
-        )));
+        self.host.lua.set_app_data(mirror);
+        self.host
+            .lua
+            .set_app_data(crate::script::lua::Asker(Box::new(
+                crate::wm::events::Answers(snapshot),
+            )));
         self.evaluate(chunk)
     }
 }

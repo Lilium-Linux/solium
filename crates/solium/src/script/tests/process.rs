@@ -479,7 +479,7 @@ fn a_store_takes_the_files_keys_and_keeps_the_defaults_it_lacks() {
 fn a_store_survives_a_reload_as_the_data_it_saves() {
     let state = crate::files::tests::scratch("script-store-reload");
     crate::files::tests::use_state_dir(&state);
-    let (directory, scripts) = loaded(
+    let (directory, mut scripts) = loaded(
         "solium-script-test-store-reload",
         r#"local s = sol.store("prefs", { volume = 50 })
            s.volume = 65
@@ -501,10 +501,10 @@ fn a_store_survives_a_reload_as_the_data_it_saves() {
            shown = tostring(s.volume) .. " " .. tostring(s.run)"#,
     )
     .expect("writing");
-    let scripts = Scripts::load_carrying(&config, scripts.kept()).expect("reloading");
+    scripts.reload(&config).expect("reloading");
     assert_eq!(scripts.evaluate("return shown"), "65 nil");
     std::fs::write(&config, r#"shown = sol.store("other", {}).kept"#).expect("writing");
-    let scripts = Scripts::load_carrying(&config, scripts.kept()).expect("reloading");
+    scripts.reload(&config).expect("reloading");
     assert_eq!(scripts.evaluate("return shown"), "yes");
     assert!(
         std::fs::read_dir(&state)

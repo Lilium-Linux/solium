@@ -1053,7 +1053,7 @@ pub(crate) fn finish(state: &mut Solium) {
 }
 
 /// Ask the configuration for the stores that changed, and save them.
-fn save_stores(state: &mut Solium) {
+pub(crate) fn save_stores(state: &mut Solium) {
     let snapshot = state.snapshot();
     let Some(mut scripts) = state.scripts.take() else {
         return;

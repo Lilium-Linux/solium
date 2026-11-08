@@ -1199,7 +1199,9 @@ mod reflow_on_close {
             }
 
             // A reload: a fresh Lua state, the layout still current.
-            let mut reloaded = Scripts::load_carrying(&entry, scripts.kept())
+            let mut reloaded = scripts;
+            reloaded
+                .reload(&entry)
                 .expect("reloading the shipped layout");
             let restored = placed(&reloaded.restored(desk(&before, &[1, 2, 3], &[3])).commands);
             assert!(
@@ -2004,7 +2006,7 @@ mod overflow {
         );
         everyone_home(&scripts, "DP-2", "a monitor change");
 
-        let mut scripts = Scripts::load_carrying(&entry, scripts.kept()).expect("reloading");
+        scripts.reload(&entry).expect("reloading");
         let restored = placed(&scripts.restored(desk_at(&ids, (500.0, 500.0))).commands);
         assert!(
             ids.iter().all(|id| restored.contains_key(id)),
@@ -3010,8 +3012,8 @@ mod client_sizes {
             "the premise"
         );
 
-        let mut fresh =
-            Scripts::load_carrying(&entry, scripts.kept()).expect("reloading the scripts");
+        let mut fresh = scripts;
+        fresh.reload(&entry).expect("reloading the scripts");
         let _ = fresh.restored(crowded());
         let _ = fresh.monitors_changed(crowded());
         let told = fresh.relayout(crowded());
@@ -3103,13 +3105,12 @@ mod reload {
     /// Exactly what `Solium::reload` does, in its order, with the world
     /// looking like `now` throughout. The new scripts, and every command
     /// the three announcements produced.
-    fn reload(scripts: &Scripts, entry: &Path, now: &Snapshot) -> (Scripts, Vec<Command>) {
-        let mut fresh =
-            Scripts::load_carrying(entry, scripts.kept()).expect("reloading the scripts");
-        let mut commands = fresh.restored(now.clone()).commands;
-        commands.extend(fresh.monitors_changed(now.clone()).commands);
-        commands.extend(fresh.relayout(now.clone()).commands);
-        (fresh, commands)
+    fn reload(mut scripts: Scripts, entry: &Path, now: &Snapshot) -> (Scripts, Vec<Command>) {
+        scripts.reload(entry).expect("reloading the scripts");
+        let mut commands = scripts.restored(now.clone()).commands;
+        commands.extend(scripts.monitors_changed(now.clone()).commands);
+        commands.extend(scripts.relayout(now.clone()).commands);
+        (scripts, commands)
     }
 
     /// The windows `ids` on `DP-1`, topmost first as the compositor lists
@@ -3282,21 +3283,26 @@ mod reload {
         );
         let tree = arrangement(&scripts, "tiling", "1@DP-1");
 
+        // A reload that fails goes on running the scripts it read the keep
+        // from, so reading it copies.
+        assert!(
+            scripts
+                .reload(&entry.with_file_name("missing.lua"))
+                .is_err()
+        );
+        assert_eq!(
+            arrangement(&scripts, "tiling", "1@DP-1"),
+            tree,
+            "reading the keep took the tree away from the running scripts"
+        );
         let (reloaded, commands) =
-            reload(&scripts, &entry, &desk(&rects, &[1, 3, 2], (900.0, 720.0)));
+            reload(scripts, &entry, &desk(&rects, &[1, 3, 2], (900.0, 720.0)));
         assert_eq!(
             arrangement(&reloaded, "tiling", "1@DP-1"),
             tree,
             "the reload came back with a different tree"
         );
         nothing_moved(&commands, &rects, &[1, 2, 3]);
-        // And the scripts it was read from still have theirs: a reload
-        // that fails goes on running them, so reading the keep copies.
-        assert_eq!(
-            arrangement(&scripts, "tiling", "1@DP-1"),
-            tree,
-            "reading the keep took the tree away from the running scripts"
-        );
     }
 
     /// **#118 as it was reported: on workspace 3, Firefox and then kitty,
@@ -3326,7 +3332,7 @@ mod reload {
         );
 
         let (scripts, commands) = reload(
-            &scripts,
+            scripts,
             &entry,
             &desk(&rects, &[kitty, firefox], (1900.0, 720.0)),
         );
@@ -3371,7 +3377,7 @@ mod reload {
 
             let away = desk(&rects, &[2, 1], (1280.0, 720.0));
             let mut scripts = if route == "a reload" {
-                reload(&scripts, &entry, &away).0
+                reload(scripts, &entry, &away).0
             } else {
                 let _ = scripts.monitors_changed(away.clone());
                 let _ = scripts.relayout(away);
@@ -3498,7 +3504,7 @@ mod reload {
             "a monitors event changed a strip, out of view or in it"
         );
 
-        let (scripts, commands) = reload(&scripts, &entry, &now);
+        let (scripts, commands) = reload(scripts, &entry, &now);
         assert_eq!(
             arrangement(&scripts, "scrolling", "2@DP-1"),
             shown,
@@ -3543,7 +3549,7 @@ mod reload {
             &entry,
             "require(\"config\").scrolling.widths = { 0.25, 0.75 }",
         );
-        let (mut scripts, _) = reload(&scripts, &entry, &desk(&rects, &[2, 1], cursor));
+        let (mut scripts, _) = reload(scripts, &entry, &desk(&rects, &[2, 1], cursor));
         assert_eq!(
             arrangement(&scripts, "scrolling", "1@DP-1"),
             before,

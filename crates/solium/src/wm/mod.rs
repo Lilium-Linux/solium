@@ -5,4 +5,8 @@
 
 pub(crate) mod convert;
 pub(crate) mod diff;
+pub(crate) mod events;
 pub(crate) mod rows;
+mod scripts;
+
+pub(crate) use scripts::Scripts;

@@ -1,225 +1,63 @@
-//! Loading a configuration, and what it said: bindings, settings read
-//! before the compositor starts, keeps and stores.
+//! Loading a configuration, and loading it again: the window manager's
+//! answer to `hello`, and to a reload, which carries what it kept.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
+use solium_wm_protocol::Answer;
 
 use crate::script::lua::*;
 use crate::script::*;
 
-impl Scripts {
-    /// Bytes Lua is holding. Its allocator does not hand memory back to the
-    /// system, so this rising while everything else is flat says the growth is
-    /// script-side rather than a compositor leak.
-    pub(crate) fn used_memory(&self) -> usize {
-        self.lua.used_memory()
+/// Where the configuration is: `SOLIUM_LUA_INIT` when it is set, else the
+/// user's own `init.lua`, else the shipped one. The user's file wins, and the
+/// shipped one is the fallback rather than a default that has to be copied
+/// before anything works.
+pub(crate) fn config_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
+        return std::path::PathBuf::from(path);
     }
-
-    /// Where the configuration is, in the order it is looked for.
-    ///
-    /// The user's own file wins, and the bundled one is the fallback rather
-    /// than a default that has to be copied before anything works.
-    /// Where a user's own scripts live, whether or not they have any.
-    pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
-            })
-            .map(|base| base.join("solium"))
+    if let Some(user) = user_config_dir() {
+        let path = user.join("init.lua");
+        if path.is_file() {
+            return path;
+        }
     }
+    crate::assets::lua().join("init.lua")
+}
 
-    /// Every binding the window manager declared, in its canonical
-    /// spelling, sorted.
-    pub(crate) fn bindings(&self) -> Vec<Binding> {
-        self.declared.bindings.clone()
-    }
-
-    /// Whether a combination is bound, in any spelling.
-    pub(crate) fn has_binding(&self, combo: &str) -> bool {
-        self.binding(combo).is_some()
-    }
-
-    /// What the binding for `combo` asked for, or `None` when nothing binds
-    /// it.
-    pub(crate) fn binding_options(&self, combo: &str) -> Option<BindingOptions> {
-        self.binding(combo).map(|binding| BindingOptions {
-            repeating: binding.repeating,
-            locked: binding.locked,
-            inhibited: binding.inhibited,
+/// Where a user's own scripts live, whether or not they have any.
+pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
         })
+        .map(|base| base.join("solium"))
+}
+
+impl Host {
+    /// Load the configuration and everything it pulls in, cold, and answer
+    /// with what its top level asked for and declared. For `--check`
+    /// (`checking`), nothing of the user's is changed: a store's broken file
+    /// stays where it is and is said in the declarations' notes (#473).
+    pub(crate) fn load(config: &Path, checking: bool) -> Result<(Self, Answer)> {
+        let (lua, loaded) = Self::load_as(config, Keep::new(), checking)?;
+        Ok((
+            Self {
+                lua,
+                mirror: solium_wm_protocol::mirror::Mirror::new(),
+            },
+            loaded,
+        ))
     }
 
-    /// The declared binding for `combo`. The key filter asks on every key,
-    /// so the sorted list is searched rather than walked.
-    fn binding(&self, combo: &str) -> Option<&Binding> {
-        let combo = normalise_combo(combo);
-        let bindings = &self.declared.bindings;
-        bindings
-            .binary_search_by(|binding| binding.combo.as_str().cmp(&combo))
-            .ok()
-            .and_then(|at| bindings.get(at))
-    }
-
-    /// Bindings the window manager deliberately took away, with what it
-    /// said about each. Reported apart from [`Self::bindings`] because a key
-    /// missing on purpose looks, in a list of what survived, identical to
-    /// one that was never there.
-    pub(crate) fn unbound(&self) -> Vec<Binding> {
-        self.declared.unbound.clone()
-    }
-
-    /// Settings the configuration wrote that its defaults do not define,
-    /// sorted by key, because the only reader is a person checking a file.
-    pub(crate) fn unknown_settings(&self) -> Vec<UnknownSetting> {
-        self.declared.unknown.clone()
-    }
-
-    /// The last settings section of this name the configuration handed over
-    /// as it loaded, as the document it was.
-    fn loaded_section(&self, name: &str) -> Option<Doc> {
-        self.loaded
-            .commands
-            .iter()
-            .rev()
-            .find_map(|command| match command {
-                solium_wm_protocol::Command::Configure((section, nodes)) if section == name => {
-                    crate::wm::convert::doc(nodes).ok()
-                }
-                _ => None,
-            })
-    }
-
-    /// The effect rules the configuration handed over as it loaded, the last
-    /// `sol.effects` winning, read without taking them, so `--check` sees
-    /// them and [`Self::startup`] still hands them over.
-    /// `check::tests::the_effects_a_rule_names_are_checked`.
-    pub(crate) fn effects_at_load(
-        &self,
-    ) -> Option<Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>> {
-        self.loaded_section("effects")
-            .map(|options| crate::script::settings::effects::parse(&options, true).0)
-    }
-
-    /// The engine's own keys the configuration handed over as it loaded,
-    /// the last `sol.effects` winning, as [`Self::effects_at_load`] reads
-    /// its rules: `--check` judges them as the session would.
-    /// `check::tests::a_refused_effects_key_fails_the_check`.
-    pub(crate) fn effect_settings_at_load(
-        &self,
-    ) -> Option<Result<crate::effect::settings::Settings, String>> {
-        self.loaded_section("effects")
-            .map(|options| crate::script::settings::effects::parse(&options, true).1)
-    }
-
-    /// What the configuration said through `sol.qml` as it loaded, if
-    /// anything: read before any scene starts Qt.
-    pub(crate) fn qml(&self) -> crate::qml::renderer::Configured {
-        self.loaded_section("qml")
-            .map(|options| crate::script::settings::qml::parse(&options))
-            .unwrap_or_default()
-    }
-
-    /// What the configuration said through `sol.session` as it loaded: the
-    /// default, both on, when it said nothing.
-    pub(crate) fn session(&self) -> crate::session::Settings {
-        self.loaded_section("session")
-            .map(|options| crate::script::settings::session::parse(&options))
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn config_path() -> std::path::PathBuf {
-        if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
-            return std::path::PathBuf::from(path);
-        }
-
-        let config_home = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
-            });
-
-        if let Some(home) = config_home {
-            let path = home.join("solium").join("init.lua");
-            if path.is_file() {
-                return path;
-            }
-        }
-
-        crate::assets::lua().join("init.lua")
-    }
-
-    /// Load the configuration script and everything it pulls in, cold.
-    ///
-    /// Nothing is carried, because at startup there is nothing to carry. A
-    /// reload goes through [`Self::load_carrying`].
-    pub(crate) fn load(config: &Path) -> Result<Self> {
-        Self::load_carrying(config, Keep::new())
-    }
-
-    /// Everything the running scripts asked the host to keep.
-    ///
-    /// Read off the *old* `Scripts` before the new ones are built, which is
-    /// the only moment both exist. Reading rather than moving: a load that
-    /// fails leaves the running configuration alone — a typo costs a log line,
-    /// not the session — and that promise only holds if collecting the keep
-    /// cannot damage the scripts it was collected from.
-    pub(crate) fn kept(&self) -> Keep {
-        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
-            return Keep::new();
-        };
-        let Ok(keeps) = sol.get::<Table>("_keeps") else {
-            return Keep::new();
-        };
-        let keeps = keeps
-            .pairs::<String, Value>()
-            .filter_map(Result::ok)
-            .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
-            .collect();
-        // A store is carried as the plain data it saves, so a reload gives
-        // back what a restart would (#473).
-        let stores = self.stores().into_iter().collect();
-        Keep { keeps, stores }
-    }
-
-    /// Every store, as the plain data it saves (#473): the ones this
-    /// configuration asked for, and the ones an earlier configuration did
-    /// and this one has not, which are kept for as long as the compositor
-    /// runs. What cannot be saved is left out, named in the log once per
-    /// key path; a store of more than 65536 values is not saved at all.
-    /// Rust only, so it runs between dispatches: no Lua is called.
-    /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
-    pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
-        stores_of(&self.lua)
-    }
-
-    /// Load the configuration for `solium --check`: as [`Self::load`] does,
-    /// except that nothing of the user's is changed, so a store's broken
-    /// file stays where it is and is said in [`Self::check_notes`] (#473).
-    pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
-        Self::load_as(config, Keep::new(), true)
-    }
-
-    /// The settings sections the configuration handed over as it loaded
-    /// that the compositor refuses, each with why: `--check` fails on them.
-    /// `check::tests::a_refused_settings_section_fails_the_check`.
-    pub(crate) fn refused_at_load(&self) -> Vec<String> {
-        self.loaded
-            .commands
-            .iter()
-            .filter_map(crate::wm::convert::refusal)
-            .collect()
-    }
-
-    /// What a check found that a session would act on, such as a store's
-    /// broken file, left where it is.
-    pub(crate) fn check_notes(&self) -> Vec<String> {
-        self.declared.notes.clone()
-    }
-
-    /// Load the configuration again, handing back what the last one kept.
+    /// Load the configuration again, carrying what the running one kept,
+    /// and answer as [`Self::load`] does. A configuration that fails to load
+    /// leaves the running one as it was: a typo costs a log line, not the
+    /// session. The mirror is the window manager's, not the configuration's,
+    /// so it is kept: the compositor tells it only what changed.
     ///
     /// ## What a script is entitled to know after a reload
     ///
@@ -240,12 +78,53 @@ impl Scripts {
     /// alternative is every script inventing its own answer, which is what
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
-    pub(crate) fn load_carrying(config: &Path, carried: Keep) -> Result<Self> {
-        Self::load_as(config, carried, false)
+    pub(crate) fn reload(&mut self, config: &Path) -> Result<Answer> {
+        let (lua, loaded) = Self::load_as(config, self.kept(), false)?;
+        self.lua = lua;
+        Ok(loaded)
     }
 
-    /// [`Self::load_carrying`], or for `--check` (`checking`).
-    fn load_as(config: &Path, carried: Keep, checking: bool) -> Result<Self> {
+    /// Bytes Lua is holding. Its allocator does not hand memory back to the
+    /// system, so this rising while everything else is flat says the growth is
+    /// script-side rather than a compositor leak.
+    pub(crate) fn used_memory(&self) -> usize {
+        self.lua.used_memory()
+    }
+
+    /// Everything the running scripts asked to keep, read rather than moved,
+    /// so a reload that fails leaves them as they were.
+    fn kept(&self) -> Keep {
+        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
+            return Keep::new();
+        };
+        let Ok(keeps) = sol.get::<Table>("_keeps") else {
+            return Keep::new();
+        };
+        let keeps = keeps
+            .pairs::<String, Value>()
+            .filter_map(Result::ok)
+            .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
+            .collect();
+        // A store is carried as the plain data it saves, so a reload gives
+        // back what a restart would (#473).
+        let stores = self.stores().into_iter().collect();
+        Keep { keeps, stores }
+    }
+
+    /// Every store, as the plain data it saves (#473): the ones this
+    /// configuration asked for, and the ones an earlier configuration did
+    /// and this one has not, which are kept for as long as the window
+    /// manager runs. What cannot be saved is left out, named in the log once
+    /// per key path; a store of more than 65536 values is not saved at all.
+    /// Rust only, so it runs between dispatches: no Lua is called.
+    /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
+    pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
+        stores_of(&self.lua)
+    }
+
+    /// Run the configuration in a new Lua state, handed `carried`, or for
+    /// `--check` (`checking`): the state, and the answer its top level made.
+    fn load_as(config: &Path, carried: Keep, checking: bool) -> Result<(Lua, Answer)> {
         let lua = Lua::new();
         if checking {
             lua.set_app_data(CheckOnly::default());
@@ -373,7 +252,7 @@ impl Scripts {
             let shipped_lua = crate::assets::lua();
             let shipped = shipped_lua.display();
             let mut search = format!("{directory}/?.lua;{shipped}/?.lua;{path}");
-            if let Some(user) = Self::user_config_dir() {
+            if let Some(user) = user_config_dir() {
                 search = format!("{}/?.lua;{search}", user.display());
             }
             package
@@ -399,7 +278,7 @@ impl Scripts {
         // declarations whole, whether or not anything was declared.
         let pending = lua.remove_app_data::<Pending>().unwrap_or_default();
         lua.set_app_data(Pending::default());
-        let mut loaded = solium_wm_protocol::Answer {
+        let mut loaded = Answer {
             serial: 0,
             handled: false,
             commands: Vec::new(),
@@ -418,29 +297,7 @@ impl Scripts {
             .commands
             .push(solium_wm_protocol::Command::Declare(declared));
 
-        let mut scripts = Self {
-            lua,
-            told: crate::wm::diff::Told::new(),
-            mirror: solium_wm_protocol::mirror::Mirror::new(),
-            serial: 0,
-            loaded: solium_wm_protocol::Answer {
-                serial: 0,
-                handled: false,
-                commands: Vec::new(),
-                motion: None,
-                decision: None,
-            },
-            started: false,
-            declared: solium_wm_protocol::Declarations {
-                bindings: Vec::new(),
-                unbound: Vec::new(),
-                unknown: Vec::new(),
-                notes: Vec::new(),
-            },
-        };
-        scripts.declarations_in(&loaded);
-        scripts.loaded = loaded;
-        Ok(scripts)
+        Ok((lua, loaded))
     }
 }
 

@@ -1134,11 +1134,11 @@ impl Solium {
     /// `super+shift+r`; the Lua state does not. So the second half of a reload
     /// is putting the new scripts back in touch with the session they have
     /// inherited, and it has two parts, both of which are the contract on
-    /// [`Scripts::load_carrying`]:
+    /// [`crate::script::lua::Host::reload`]:
     ///
-    ///  * `Scripts::kept` and `load_carrying` hand back what the old scripts
-    ///    asked to keep, *before* the new ones run, so a script's top level
-    ///    sees its own state rather than its defaults;
+    ///  * the window manager carries what the old scripts asked to keep into
+    ///    the new ones, *before* they run, so a script's top level sees its
+    ///    own state rather than its defaults;
     ///  * `restore`, `monitors` and `layout` re-announce the world, in that
     ///    order, so nothing has to be kept that could be recomputed.
     ///
@@ -1163,14 +1163,22 @@ impl Solium {
     /// `tests::real_client::a_reload_that_moves_the_primary_drops_the_old_primarys_scene`
     /// reloads.
     pub(crate) fn reload_from(&mut self, path: &std::path::Path) {
-        // Collected before the new configuration is even read, because reading
-        // it is what may fail, and the failure path has to leave the running
-        // scripts -- and therefore their keep -- untouched.
-        let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
         // The stores saved now, whatever the new configuration turns out to
         // be, so a reload never loses what a restart would keep (#473).
-        self.files.save(carried.stores());
-        match Scripts::load_carrying(path, carried) {
+        crate::files::save_stores(self);
+        // The window manager reloads itself, carrying what it kept; one
+        // that fails to load leaves the running configuration as it was.
+        let reloaded = match self.scripts.take() {
+            Some(mut scripts) => match scripts.reload(path) {
+                Ok(()) => Ok(scripts),
+                Err(err) => {
+                    self.scripts = Some(scripts);
+                    Err(err)
+                }
+            },
+            None => Scripts::load(path),
+        };
+        match reloaded {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 // Installed applications can change between one session and

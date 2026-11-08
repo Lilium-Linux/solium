@@ -1112,8 +1112,10 @@ fn a_reload_keeps_the_focus_model_tiling_was_switched_to() {
     );
 
     let config = directory.join("init.lua");
-    let mut reloaded =
-        Scripts::load_carrying(&config, scripts.kept()).expect("reloading the test scripts");
+    let mut reloaded = scripts;
+    reloaded
+        .reload(&config)
+        .expect("reloading the test scripts");
     let modes = focus_modes(reloaded.startup().commands);
     let _ = std::fs::remove_dir_all(&directory);
     assert_eq!(

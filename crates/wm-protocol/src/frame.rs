@@ -1,7 +1,7 @@
 //! Frames: each message on the socket, prefixed with its length.
 //!
 //! A frame is a `u32` byte count, little-endian, then that many bytes: one
-//! [`Message`](crate::Message) in the protocol's encoding. A peer reads
+//! [`crate::Message`] in the protocol's encoding. A peer reads
 //! whole frames out of whatever the socket hands it, which on a
 //! non-blocking socket can be half a frame or three and a half.
 

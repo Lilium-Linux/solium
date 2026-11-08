@@ -43,7 +43,7 @@ pub(crate) use types::*;
 use lua::convert::describe_value as describe;
 use lua::*;
 
-pub(crate) use lua::Scripts;
+pub(crate) use crate::wm::Scripts;
 
 /// Whether a program can be found on `PATH`.
 ///

@@ -139,8 +139,8 @@ fn a_failing_script_does_not_swallow_the_key() {
 /// The bug as it was reported: `super+shift+r` on workspace 3, and the
 /// desktop is drawn two screen-widths off-stage with no key that brings it
 /// back. Underneath it are three separate losses, and this drives all
-/// three through the same sequence `Solium::reload` runs -- `kept` and
-/// `load_carrying`, then `restore`, `monitors`, `layout`:
+/// three through the same sequence `Solium::reload` runs -- the reload,
+/// carrying what was kept, then `restore`, `monitors`, `layout`:
 ///
 ///  * which workspace each monitor is showing, so the desks are carried
 ///    relative to the one in view and not to desk 1;
@@ -216,9 +216,7 @@ fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
     );
 
     // Exactly what `Solium::reload` does, in the order it does it.
-    let carried_over = scripts.kept();
-    let mut scripts =
-        Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+    scripts.reload(&config).expect("reloading the test script");
     let restored = scripts.restored(one_screen(all));
     let monitors = scripts.monitors_changed(one_screen(all));
     let layout = scripts.relayout(one_screen(all));
@@ -351,9 +349,7 @@ fn a_reload_with_fewer_workspaces_leaves_no_window_on_a_desk_that_is_gone() {
     )
     .expect("writing the fixture user.lua");
 
-    let carried_over = scripts.kept();
-    let mut scripts =
-        Scripts::load_carrying(&config, carried_over).expect("reloading the test script");
+    scripts.reload(&config).expect("reloading the test script");
     let restored = scripts.restored(one_screen(all));
     let monitors = scripts.monitors_changed(one_screen(all));
     let layout = scripts.relayout(one_screen(all));
@@ -1104,13 +1100,13 @@ fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
         Some(true)
     );
 
-    let answer = scripts.handle(
+    let answer = scripts.host.handle(
         solium_wm_protocol::Batch {
             serial: 9,
             changes: Vec::new(),
             events: vec![solium_wm_protocol::Event::Relayout],
         },
-        Box::new(crate::script::lua::dispatch::Answers(empty_snapshot())),
+        Box::new(crate::wm::events::Answers(empty_snapshot())),
     );
     assert!(
         !answer

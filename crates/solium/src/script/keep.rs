@@ -50,11 +50,6 @@ impl Keep {
     pub(crate) fn new() -> Self {
         Self::default()
     }
-
-    /// The stores, by name, as they are saved.
-    pub(crate) fn stores(&self) -> impl Iterator<Item = (&String, &crate::json::Json)> {
-        self.stores.iter()
-    }
 }
 
 /// How deep a kept table is followed.
