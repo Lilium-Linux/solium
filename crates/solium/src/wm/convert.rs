@@ -109,8 +109,7 @@ pub(crate) fn reaches_past_the_lock(command: &wire::Command) -> bool {
         }
         C::Keep(_)
         | C::Listen(_)
-        | C::Bind(_)
-        | C::Unbind(_)
+        | C::Declare(_)
         | C::Grab(_)
         | C::Status(_)
         | C::Decoration(_)
@@ -490,6 +489,10 @@ fn configure(
             settings::files::parse(options).store_interval,
         )],
         "workspaces_offered" => vec![Command::WorkspacesOffered(flag(options)?)],
+        // Read once, before Qt and the session start, from the commands the
+        // window manager loaded with ([`crate::script::Scripts::qml`]); a
+        // later one changes nothing that is running.
+        "qml" | "session" => Vec::new(),
         other => return Err(format!("`{other}` is not a settings section")),
     })
 }

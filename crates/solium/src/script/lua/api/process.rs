@@ -279,11 +279,15 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                             // says so instead, and the session sets the
                             // file aside. `check::tests::a_check_leaves_a_broken_store_file_as_it_was`.
                             match lua.app_data_mut::<CheckOnly>() {
-                                Some(mut check) => check.0.push(format!(
-                                    "store `{name}`: {} is {why}; a session would start from the \
-                                     defaults and move it to {name}.json.broken",
-                                    path.display()
-                                )),
+                                Some(mut check) => {
+                                    check.0.push(format!(
+                                        "store `{name}`: {} is {why}; a session would start from the \
+                                         defaults and move it to {name}.json.broken",
+                                        path.display()
+                                    ));
+                                    drop(check);
+                                    undeclared(lua);
+                                }
                                 None => crate::files::set_aside(&name, &path),
                             }
                             None

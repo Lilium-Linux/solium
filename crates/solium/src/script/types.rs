@@ -367,21 +367,11 @@ pub(crate) enum Press {
     Keys(Vec<smithay::input::keyboard::Keysym>),
 }
 
-/// A key binding as `solium --check` reports it.
-///
-/// The note is what the script said about where the binding came from, and is
-/// `None` for the shipped ones -- which is most of them, and is why `--check`
-/// stays a plain list of combinations until a configuration has something to
-/// add. See `sol.bind`'s third argument.
-#[derive(Debug)]
-pub(crate) struct Binding {
-    pub(crate) combo: String,
-    pub(crate) note: Option<String>,
-    /// What else it asked for. See [`BindingOptions`].
-    pub(crate) repeating: bool,
-    pub(crate) locked: bool,
-    pub(crate) inhibited: bool,
-}
+/// A key binding as the window manager declares it, and as `solium --check`
+/// reports it: the protocol's record. The note is `None` for the shipped
+/// bindings, which is why `--check` stays a plain list of combinations until
+/// a configuration has something to add.
+pub(crate) use solium_wm_protocol::Binding;
 
 /// What a binding asked for besides its handler: the table form of
 /// `sol.bind`'s third argument (#224). Both are off unless asked for, which is
@@ -400,15 +390,10 @@ pub(crate) struct BindingOptions {
     pub(crate) inhibited: bool,
 }
 
-/// A setting a configuration wrote that nothing reads.
-///
-/// `meant` is the nearest key that does exist, when `config.lua` found one
-/// close enough to be worth naming.
-#[derive(Debug)]
-pub(crate) struct UnknownSetting {
-    pub(crate) key: String,
-    pub(crate) meant: Option<String>,
-}
+/// A setting a configuration wrote that nothing reads, and the nearest
+/// key that does exist when one is close enough to name: the protocol's
+/// record.
+pub(crate) use solium_wm_protocol::UnknownSetting;
 
 #[cfg(test)]
 impl WindowInfo {

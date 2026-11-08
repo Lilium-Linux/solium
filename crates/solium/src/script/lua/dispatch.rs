@@ -16,18 +16,6 @@ use crate::script::lua::*;
 use crate::script::*;
 
 impl Scripts {
-    pub(crate) fn has_binding(&self, combo: &str) -> bool {
-        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
-            return false;
-        };
-        let Ok(bindings) = sol.get::<Table>("_bindings") else {
-            return false;
-        };
-        bindings
-            .get::<Value>(normalise_combo(combo))
-            .is_ok_and(|value| matches!(value, Value::Function(_)))
-    }
-
     /// Run whatever a key combination is bound to. Handled when a binding
     /// ran; an unbound key, or one whose binding failed, belongs to the
     /// focused client.
@@ -87,21 +75,11 @@ impl Scripts {
     /// is simply dropped, silently, which is what happened to the first
     /// dock: no error, no items, nothing drawn.
     pub(crate) fn startup(&mut self) -> Outcome {
-        // Takes the buffer the configuration filled, rather than dispatching:
-        // a dispatch installs a fresh `Pending` before it calls anything, so
-        // routing this through it would throw away the very requests it is
-        // here to collect.
-        let pending = self.lua.remove_app_data::<Pending>().unwrap_or_default();
-        self.lua.set_app_data(Pending::default());
-        let mut answer = wire::Answer {
-            serial: 0,
-            handled: false,
-            commands: Vec::new(),
-            motion: None,
-            decision: None,
-        };
-        answered(&mut answer, pending);
-        outcome_of(answer)
+        // Handed over once: a second call would apply it all again.
+        if std::mem::replace(&mut self.started, true) {
+            return Outcome::default();
+        }
+        outcome_of(self.loaded.clone())
     }
 
     /// Focus moved to a window: `(id, source, changed)`, `source` the word
@@ -446,8 +424,25 @@ impl Scripts {
             events: vec![event],
         };
         let answer = self.handle(batch, Box::new(Answers(snapshot)));
+        self.declarations_in(&answer);
         let decision = answer.decision.clone();
         (decision, outcome_of(answer))
+    }
+
+    /// Keep what an answer declares: the key filter and `--check` ask
+    /// these, not the window manager.
+    pub(crate) fn declarations_in(&mut self, answer: &wire::Answer) {
+        if let Some(declared) = answer
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                wire::Command::Declare(declared) => Some(declared),
+                _ => None,
+            })
+        {
+            self.declared = declared.clone();
+        }
     }
 }
 
@@ -463,6 +458,8 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
         match command {
             wire::Command::Grab(grab) => outcome.grab = Some(grab),
             wire::Command::Status(status) => outcome.status = Some(status),
+            // Kept by [`Scripts::declarations_in`], not applied.
+            wire::Command::Declare(_) => {}
             command => outcome
                 .commands
                 .extend(crate::wm::convert::commands_of(command)),
@@ -474,10 +471,10 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
     outcome
 }
 
-/// What a handler's dispatch adds to an answer: its commands, then whether
+/// What a dispatch adds to an answer: its commands, then whether
 /// a mode holds input and the status line, as the commands of those names,
 /// and the motion `sol.animate` set.
-fn answered(answer: &mut wire::Answer, pending: Pending) {
+pub(crate) fn answered(answer: &mut wire::Answer, pending: Pending) {
     answer.commands.extend(pending.commands);
     if let Some(grab) = pending.grab {
         answer.commands.push(wire::Command::Grab(grab));
@@ -535,6 +532,7 @@ impl Scripts {
             let pending = self.lua.remove_app_data::<Pending>().unwrap_or_default();
             answer.handled |= handled;
             answered(&mut answer, pending);
+            answer.commands.extend(declare_if_changed(&self.lua));
             if decision.is_some() {
                 answer.decision = decision;
             }

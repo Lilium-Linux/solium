@@ -1,6 +1,6 @@
 //! Bindings as Lua writes them: a press spec, and a binding's note and options.
 
-use mlua::{Table, Value};
+use mlua::{Lua, Table, Value};
 
 use crate::script::*;
 
@@ -168,4 +168,102 @@ pub(crate) fn binding_note_and_options(
         }
     }
     Ok((note, asked))
+}
+
+/// Set when something the window manager declares has changed since it was
+/// last sent: a binding made or taken away, a setting nothing reads, a note
+/// for `--check`. The declarations are sent whole, and only then.
+#[derive(Debug, Default)]
+pub(crate) struct Undeclared;
+
+/// Mark the declarations as changed, so the next answer carries them.
+pub(crate) fn undeclared(lua: &Lua) {
+    lua.set_app_data(Undeclared);
+}
+
+/// The declarations, when they changed since they were last sent.
+pub(crate) fn declare_if_changed(lua: &Lua) -> Option<solium_wm_protocol::Command> {
+    lua.remove_app_data::<Undeclared>()
+        .map(|_| solium_wm_protocol::Command::Declare(declarations(lua)))
+}
+
+/// What this window manager declares, read from where `sol.bind`,
+/// `sol.unbind` and `sol.unknown` keep it. Each list is sorted: a person
+/// compares one run's `--check` to the next.
+pub(crate) fn declarations(lua: &Lua) -> solium_wm_protocol::Declarations {
+    let sol = lua.globals().get::<Table>("sol").ok();
+    let field = |name: &str| sol.as_ref().and_then(|sol| sol.get::<Table>(name).ok());
+    let bindings = field("_bindings");
+    let sources = field("_binding_sources");
+    let options = field("_binding_options");
+
+    let mut bound: Vec<Binding> = bindings
+        .iter()
+        .flat_map(|bindings| bindings.pairs::<String, Value>().filter_map(Result::ok))
+        .filter(|(_, handler)| matches!(handler, Value::Function(_)))
+        .map(|(combo, _)| {
+            let asked = options
+                .as_ref()
+                .and_then(|options| options.get::<Option<Table>>(combo.clone()).ok())
+                .flatten();
+            let flag = |name: &str| {
+                asked
+                    .as_ref()
+                    .is_some_and(|asked| asked.get::<bool>(name).unwrap_or(false))
+            };
+            Binding {
+                note: sources
+                    .as_ref()
+                    .and_then(|sources| sources.get::<Option<String>>(combo.clone()).ok())
+                    .flatten(),
+                repeating: flag("repeating"),
+                locked: flag("locked"),
+                inhibited: flag("inhibited"),
+                combo,
+            }
+        })
+        .collect();
+    bound.sort_by(|left, right| left.combo.cmp(&right.combo));
+
+    // A combination somebody said something about and which is now bound to
+    // nothing, which is exactly `sol.unbind`: in a list of what survived, a
+    // key missing on purpose looks identical to one that was never there.
+    let mut unbound: Vec<Binding> = sources
+        .iter()
+        .flat_map(|sources| sources.pairs::<String, String>().filter_map(Result::ok))
+        .filter(|(combo, _)| !bound.iter().any(|binding| &binding.combo == combo))
+        .map(|(combo, note)| Binding {
+            combo,
+            note: Some(note),
+            // Gone, so it asks for nothing.
+            repeating: false,
+            locked: false,
+            inhibited: false,
+        })
+        .collect();
+    unbound.sort_by(|left, right| left.combo.cmp(&right.combo));
+
+    let mut unknown: Vec<UnknownSetting> = field("_unknown_settings")
+        .iter()
+        .flat_map(|unknown| unknown.sequence_values::<Table>().filter_map(Result::ok))
+        .filter_map(|entry| {
+            Some(UnknownSetting {
+                key: entry.get::<String>("key").ok()?,
+                meant: entry.get::<Option<String>>("meant").ok().flatten(),
+            })
+        })
+        .collect();
+    unknown.sort_by(|left, right| left.key.cmp(&right.key));
+
+    let notes = lua
+        .app_data_ref::<CheckOnly>()
+        .map(|check| check.0.clone())
+        .unwrap_or_default();
+
+    solium_wm_protocol::Declarations {
+        bindings: bound,
+        unbound,
+        unknown,
+        notes,
+    }
 }

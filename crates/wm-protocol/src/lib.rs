@@ -209,7 +209,7 @@ mod tests {
             decision: None,
         });
         let answer = 3; // `message`'s fourth case
-        let unplace = 14; // `command`'s fifteenth case
+        let unplace = 13; // `command`'s fourteenth case
         let quit = 53; // `command`'s last case
         assert_eq!(
             message.to_bytes(),

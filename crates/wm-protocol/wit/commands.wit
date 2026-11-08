@@ -138,14 +138,37 @@ interface commands {
         moved: bool,
     }
 
-    /// A binding declared, so a key is answered without a question: the
-    /// compositor knows the combination is taken.
+    /// A key binding, so a key is answered without a question: the compositor
+    /// knows the combination is taken.
     record binding {
+        /// The combination, in its one spelling (`combo::normalise`).
         combo: string,
+        /// What it does, as the window manager says it.
         note: option<string>,
+        /// Fired again while held.
         repeating: bool,
+        /// Fired at the lock screen.
         locked: bool,
-        source: option<string>,
+        /// Fired over a window holding the keyboard shortcuts.
+        inhibited: bool,
+    }
+
+    /// A setting the window manager was given that it does not have, and
+    /// the one it probably meant.
+    record unknown-setting {
+        key: string,
+        meant: option<string>,
+    }
+
+    /// What the window manager has declared: its bindings, the shipped ones
+    /// it took away, the settings it was given and does not have, and what
+    /// a check of its configuration should say. Sent whole, whenever any of
+    /// it changes.
+    record declarations {
+        bindings: list<binding>,
+        unbound: list<binding>,
+        unknown: list<unknown-setting>,
+        notes: list<string>,
     }
 
     /// A program run for its output.
@@ -245,8 +268,7 @@ interface commands {
         keep(tuple<string, doc>),
         /// The events the window manager listens to; no other is sent.
         listen(list<string>),
-        bind(binding),
-        unbind(string),
+        declare(declarations),
         /// Whether a mode holds the pointer and touch, so a press goes to
         /// the window manager without a question.
         grab(bool),

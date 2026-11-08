@@ -34,4 +34,14 @@ pub(crate) struct Scripts {
     pub(crate) mirror: solium_wm_protocol::mirror::Mirror,
     /// The last batch's serial.
     pub(crate) serial: u64,
+    /// What the configuration answered its load with: the settings and
+    /// requests its top level made, which [`Scripts::startup`] hands over
+    /// and the readers of the load (`qml`, `session`, the effect rules)
+    /// read.
+    pub(crate) loaded: solium_wm_protocol::Answer,
+    /// Whether [`Scripts::startup`] has handed `loaded` over.
+    pub(crate) started: bool,
+    /// What the window manager last declared: its bindings, which the key
+    /// filter asks about on every key, and what `--check` reports.
+    pub(crate) declared: solium_wm_protocol::Declarations,
 }

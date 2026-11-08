@@ -31,125 +31,65 @@ impl Scripts {
             .map(|base| base.join("solium"))
     }
 
-    /// Every binding the configuration registered, in its canonical spelling.
-    ///
-    /// Sorted, because this is read by a person comparing one run to the next.
+    /// Every binding the window manager declared, in its canonical
+    /// spelling, sorted.
     pub(crate) fn bindings(&self) -> Vec<Binding> {
-        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
-            return Vec::new();
-        };
-        let Ok(bindings) = sol.get::<Table>("_bindings") else {
-            return Vec::new();
-        };
-        let sources = sol.get::<Table>("_binding_sources").ok();
-        let mut names: Vec<Binding> = bindings
-            .pairs::<String, Value>()
-            .filter_map(Result::ok)
-            .map(|(combo, _)| {
-                let asked = self.binding_options(&combo).unwrap_or_default();
-                Binding {
-                    note: sources
-                        .as_ref()
-                        .and_then(|sources| sources.get::<Option<String>>(combo.clone()).ok())
-                        .flatten(),
-                    combo,
-                    repeating: asked.repeating,
-                    locked: asked.locked,
-                    inhibited: asked.inhibited,
-                }
-            })
-            .collect();
-        names.sort_by(|left, right| left.combo.cmp(&right.combo));
-        names
+        self.declared.bindings.clone()
+    }
+
+    /// Whether a combination is bound, in any spelling.
+    pub(crate) fn has_binding(&self, combo: &str) -> bool {
+        self.binding(combo).is_some()
     }
 
     /// What the binding for `combo` asked for, or `None` when nothing binds
-    /// it. Side-effect free, as [`Self::has_binding`] is, for the same reason:
-    /// the key filter asks it.
+    /// it.
     pub(crate) fn binding_options(&self, combo: &str) -> Option<BindingOptions> {
-        if !self.has_binding(combo) {
-            return None;
-        }
-        let asked = self
-            .lua
-            .globals()
-            .get::<Table>("sol")
-            .and_then(|sol| sol.get::<Table>("_binding_options"))
-            .and_then(|options| options.get::<Option<Table>>(normalise_combo(combo)))
-            .ok()
-            .flatten();
-        let flag = |name: &str| {
-            asked
-                .as_ref()
-                .is_some_and(|asked| asked.get::<bool>(name).unwrap_or(false))
-        };
-        Some(BindingOptions {
-            repeating: flag("repeating"),
-            locked: flag("locked"),
-            inhibited: flag("inhibited"),
+        self.binding(combo).map(|binding| BindingOptions {
+            repeating: binding.repeating,
+            locked: binding.locked,
+            inhibited: binding.inhibited,
         })
     }
 
-    /// Bindings a script deliberately took away.
-    ///
-    /// A combination somebody said something about and which is now bound to
-    /// nothing -- which is exactly `sol.unbind`. Reported separately from the
-    /// list above because it is the one thing that list cannot show: a key
-    /// that is missing on purpose looks, in a list of what survived, identical
-    /// to one that was never there.
-    pub(crate) fn unbound(&self) -> Vec<Binding> {
-        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
-            return Vec::new();
-        };
-        let (Ok(bindings), Ok(sources)) = (
-            sol.get::<Table>("_bindings"),
-            sol.get::<Table>("_binding_sources"),
-        ) else {
-            return Vec::new();
-        };
-        let mut gone: Vec<Binding> = sources
-            .pairs::<String, String>()
-            .filter_map(Result::ok)
-            .filter(|(combo, _)| {
-                !matches!(bindings.get::<Value>(combo.clone()), Ok(Value::Function(_)))
-            })
-            .map(|(combo, note)| Binding {
-                combo,
-                note: Some(note),
-                // Gone, so it asks for nothing.
-                repeating: false,
-                locked: false,
-                inhibited: false,
-            })
-            .collect();
-        gone.sort_by(|left, right| left.combo.cmp(&right.combo));
-        gone
+    /// The declared binding for `combo`. The key filter asks on every key,
+    /// so the sorted list is searched rather than walked.
+    fn binding(&self, combo: &str) -> Option<&Binding> {
+        let combo = normalise_combo(combo);
+        let bindings = &self.declared.bindings;
+        bindings
+            .binary_search_by(|binding| binding.combo.as_str().cmp(&combo))
+            .ok()
+            .and_then(|at| bindings.get(at))
     }
 
-    /// Settings the configuration wrote that its defaults do not define.
-    ///
-    /// In the order `config.lua` found them, which is `pairs` order and so is
-    /// arbitrary -- sorted here, because the only reader is a person checking a
-    /// file. See `sol.unknown`.
+    /// Bindings the window manager deliberately took away, with what it
+    /// said about each. Reported apart from [`Self::bindings`] because a key
+    /// missing on purpose looks, in a list of what survived, identical to
+    /// one that was never there.
+    pub(crate) fn unbound(&self) -> Vec<Binding> {
+        self.declared.unbound.clone()
+    }
+
+    /// Settings the configuration wrote that its defaults do not define,
+    /// sorted by key, because the only reader is a person checking a file.
     pub(crate) fn unknown_settings(&self) -> Vec<UnknownSetting> {
-        let Ok(sol) = self.lua.globals().get::<Table>("sol") else {
-            return Vec::new();
-        };
-        let Ok(unknown) = sol.get::<Table>("_unknown_settings") else {
-            return Vec::new();
-        };
-        let mut found: Vec<UnknownSetting> = unknown
-            .sequence_values::<Table>()
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                Some(UnknownSetting {
-                    key: entry.get::<String>("key").ok()?,
-                    meant: entry.get::<Option<String>>("meant").ok().flatten(),
-                })
+        self.declared.unknown.clone()
+    }
+
+    /// The last settings section of this name the configuration handed over
+    /// as it loaded, as the document it was.
+    fn loaded_section(&self, name: &str) -> Option<Doc> {
+        self.loaded
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                solium_wm_protocol::Command::Configure((section, nodes)) if section == name => {
+                    crate::wm::convert::doc(nodes).ok()
+                }
+                _ => None,
             })
-            .collect();
-        found.sort_by(|left, right| left.key.cmp(&right.key));
-        found
     }
 
     /// The effect rules the configuration handed over as it loaded, the last
@@ -159,22 +99,8 @@ impl Scripts {
     pub(crate) fn effects_at_load(
         &self,
     ) -> Option<Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>> {
-        self.lua.app_data_ref::<Pending>().and_then(|pending| {
-            pending
-                .commands
-                .iter()
-                .rev()
-                .find_map(|command| match command {
-                    solium_wm_protocol::Command::Configure((section, nodes))
-                        if section == "effects" =>
-                    {
-                        crate::wm::convert::doc(nodes).ok().map(|options| {
-                            crate::script::settings::effects::parse(&options, true).0
-                        })
-                    }
-                    _ => None,
-                })
-        })
+        self.loaded_section("effects")
+            .map(|options| crate::script::settings::effects::parse(&options, true).0)
     }
 
     /// The engine's own keys the configuration handed over as it loaded,
@@ -184,38 +110,23 @@ impl Scripts {
     pub(crate) fn effect_settings_at_load(
         &self,
     ) -> Option<Result<crate::effect::settings::Settings, String>> {
-        self.lua.app_data_ref::<Pending>().and_then(|pending| {
-            pending
-                .commands
-                .iter()
-                .rev()
-                .find_map(|command| match command {
-                    solium_wm_protocol::Command::Configure((section, nodes))
-                        if section == "effects" =>
-                    {
-                        crate::wm::convert::doc(nodes).ok().map(|options| {
-                            crate::script::settings::effects::parse(&options, true).1
-                        })
-                    }
-                    _ => None,
-                })
-        })
+        self.loaded_section("effects")
+            .map(|options| crate::script::settings::effects::parse(&options, true).1)
     }
 
-    /// What the configuration said through `sol.qml`, if anything.
+    /// What the configuration said through `sol.qml` as it loaded, if
+    /// anything: read before any scene starts Qt.
     pub(crate) fn qml(&self) -> crate::qml::renderer::Configured {
-        self.lua
-            .app_data_ref::<crate::qml::renderer::Configured>()
-            .map(|configured| configured.clone())
+        self.loaded_section("qml")
+            .map(|options| crate::script::settings::qml::parse(&options))
             .unwrap_or_default()
     }
 
-    /// What the configuration said through `sol.session`: the default,
-    /// both on, when it said nothing.
+    /// What the configuration said through `sol.session` as it loaded: the
+    /// default, both on, when it said nothing.
     pub(crate) fn session(&self) -> crate::session::Settings {
-        self.lua
-            .app_data_ref::<crate::session::Settings>()
-            .map(|settings| *settings)
+        self.loaded_section("session")
+            .map(|options| crate::script::settings::session::parse(&options))
             .unwrap_or_default()
     }
 
@@ -291,29 +202,21 @@ impl Scripts {
         Self::load_as(config, Keep::new(), true)
     }
 
-    /// What a check found that a session would act on: a store's broken
-    /// file, left where it is.
     /// The settings sections the configuration handed over as it loaded
     /// that the compositor refuses, each with why: `--check` fails on them.
     /// `check::tests::a_refused_settings_section_fails_the_check`.
     pub(crate) fn refused_at_load(&self) -> Vec<String> {
-        self.lua
-            .app_data_ref::<Pending>()
-            .map(|pending| {
-                pending
-                    .commands
-                    .iter()
-                    .filter_map(crate::wm::convert::refusal)
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.loaded
+            .commands
+            .iter()
+            .filter_map(crate::wm::convert::refusal)
+            .collect()
     }
 
+    /// What a check found that a session would act on, such as a store's
+    /// broken file, left where it is.
     pub(crate) fn check_notes(&self) -> Vec<String> {
-        self.lua
-            .app_data_ref::<CheckOnly>()
-            .map(|check| check.0.clone())
-            .unwrap_or_default()
+        self.declared.notes.clone()
     }
 
     /// Load the configuration again, handing back what the last one kept.
@@ -492,18 +395,52 @@ impl Scripts {
             .exec()
             .map_err(failed("running the configuration"))?;
 
-        let bindings: Table = sol.get("_bindings").map_err(failed("reading bindings"))?;
-        // Counted outside the macro: inside it, `Value` resolves to tracing's
-        // own trait of that name rather than to Lua's type.
-        let bound = bindings.pairs::<Value, Value>().count();
-        tracing::info!(config = %config.display(), bindings = bound, "scripts loaded");
+        // The load's answer: what the top level asked for, and the
+        // declarations whole, whether or not anything was declared.
+        let pending = lua.remove_app_data::<Pending>().unwrap_or_default();
+        lua.set_app_data(Pending::default());
+        let mut loaded = solium_wm_protocol::Answer {
+            serial: 0,
+            handled: false,
+            commands: Vec::new(),
+            motion: None,
+            decision: None,
+        };
+        super::dispatch::answered(&mut loaded, pending);
+        lua.remove_app_data::<Undeclared>();
+        let declared = declarations(&lua);
+        tracing::info!(
+            config = %config.display(),
+            bindings = declared.bindings.len(),
+            "scripts loaded"
+        );
+        loaded
+            .commands
+            .push(solium_wm_protocol::Command::Declare(declared));
 
-        Ok(Self {
+        let mut scripts = Self {
             lua,
             told: crate::wm::diff::Told::new(),
             mirror: solium_wm_protocol::mirror::Mirror::new(),
             serial: 0,
-        })
+            loaded: solium_wm_protocol::Answer {
+                serial: 0,
+                handled: false,
+                commands: Vec::new(),
+                motion: None,
+                decision: None,
+            },
+            started: false,
+            declared: solium_wm_protocol::Declarations {
+                bindings: Vec::new(),
+                unbound: Vec::new(),
+                unknown: Vec::new(),
+                notes: Vec::new(),
+            },
+        };
+        scripts.declarations_in(&loaded);
+        scripts.loaded = loaded;
+        Ok(scripts)
     }
 }
 

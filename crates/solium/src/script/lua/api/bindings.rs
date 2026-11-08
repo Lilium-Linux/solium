@@ -49,6 +49,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     let sources: Table = sol.get("_binding_sources")?;
                     sources.set(combo, note)?;
                 }
+                undeclared(lua);
                 Ok(())
             },
         )?,
@@ -97,6 +98,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let sources: Table = sol.get("_binding_sources")?;
                 sources.set(combo, note)?;
             }
+            undeclared(lua);
             Ok(())
         })?,
     )?;

@@ -126,6 +126,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 entry.set("meant", meant.clone())?;
             }
             unknown.push(entry)?;
+            undeclared(lua);
             // Also in the log, because most of these are met in a running
             // session rather than in front of `--check`, and a reload that
             // quietly ignores half a file is the failure this is here to end.

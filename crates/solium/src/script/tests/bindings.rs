@@ -1072,3 +1072,66 @@ fn a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A binding a listener makes, or takes away, is declared in the answer to
+/// the event it ran for, so the compositor's key filter knows of it before
+/// the next key; an answer in which nothing was declared carries no
+/// declarations at all, since the key filter asks on every key and the
+/// declarations are sent whole.
+#[test]
+fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
+    let (directory, mut scripts) = loaded(
+        "solium-script-test-declared-by-a-listener",
+        r#"
+        sol.bind("super+a", function() end)
+        local laid = 0
+        sol.on("layout", function()
+            laid = laid + 1
+            if laid == 1 then sol.bind("super+x", function() end, { repeating = true }) end
+            if laid == 3 then sol.unbind("super+a", "gone on the third layout") end
+        end)
+        "#,
+    );
+    assert!(scripts.has_binding("super+a"), "a binding made at load");
+    assert!(!scripts.has_binding("super+x"));
+
+    scripts.relayout(empty_snapshot());
+    assert!(scripts.has_binding("Super+X"), "made by a listener");
+    assert_eq!(
+        scripts
+            .binding_options("super+x")
+            .map(|asked| asked.repeating),
+        Some(true)
+    );
+
+    let answer = scripts.handle(
+        solium_wm_protocol::Batch {
+            serial: 9,
+            changes: Vec::new(),
+            events: vec![solium_wm_protocol::Event::Relayout],
+        },
+        Box::new(crate::script::lua::dispatch::Answers(empty_snapshot())),
+    );
+    assert!(
+        !answer
+            .commands
+            .iter()
+            .any(|command| matches!(command, solium_wm_protocol::Command::Declare(_))),
+        "nothing changed, and the declarations were sent anyway"
+    );
+
+    scripts.relayout(empty_snapshot());
+    assert!(!scripts.has_binding("super+a"), "taken away by a listener");
+    assert_eq!(
+        scripts
+            .unbound()
+            .into_iter()
+            .map(|binding| (binding.combo, binding.note))
+            .collect::<Vec<_>>(),
+        vec![(
+            "super+a".to_owned(),
+            Some("gone on the third layout".to_owned())
+        )]
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}

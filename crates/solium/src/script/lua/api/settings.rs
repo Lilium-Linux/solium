@@ -370,33 +370,28 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
 
     // Which scene graph QML renders on, and how long the GPU probe may take.
     //
-    // Kept aside rather than queued, so `Scripts::qml` can read it as soon as
-    // the configuration has loaded, before anything it asked for is applied
-    // and before any scene starts Qt. An absent table or key means the
-    // configuration said nothing. See
+    // Read by the compositor from the commands the configuration loaded with,
+    // before anything it asked for is applied and before any scene starts Qt
+    // (`Scripts::qml`). An absent table or key means the configuration said
+    // nothing. See
     // `a_configured_qml_renderer_is_read_before_qt_starts`.
     sol.set(
         "qml",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let configured = settings::qml::parse(&lua::convert::section(options)?);
-            lua.set_app_data(configured);
-            Ok(())
+            configure(lua, "qml", lua::convert::wire_section(options)?)
         })?,
     )?;
 
     // Whether this session is announced to systemd and D-Bus activation,
     // whether that starts XDG autostart, and how long a signal to end waits
-    // for a clean stop: `config.session`, handed over by `init.lua`. Kept
-    // aside like `sol.qml`, for the backend to read once the configuration
-    // has loaded. An absent table or key keeps the default; a value of the
+    // for a clean stop: `config.session`, handed over by `init.lua`. Read like
+    // `sol.qml`, by the backend once the configuration has loaded. An absent table or key keeps the default; a value of the
     // wrong kind is named in the log and the default kept.
     // `a_configured_session_is_read_by_the_backend`.
     sol.set(
         "session",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            let settings = settings::session::parse(&lua::convert::section(options)?);
-            lua.set_app_data(settings);
-            Ok(())
+            configure(lua, "session", lua::convert::wire_section(options)?)
         })?,
     )?;
 
