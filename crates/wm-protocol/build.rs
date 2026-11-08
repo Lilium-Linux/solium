@@ -249,6 +249,21 @@ fn generate(resolve: &Resolve, id: TypeId, name: &str, out: &mut String) {
                 let _ = writeln!(out, "    {},", camel(&case.name));
             }
             out.push_str("}\n\n");
+            // Each case's name as the WIT spells it, for a peer that speaks
+            // in words: a script, a log.
+            let _ = writeln!(
+                out,
+                "impl {ty} {{\n    /// This case's name, as the WIT spells it.\n    pub const fn name(self) -> &'static str {{\n        match self {{"
+            );
+            for case in &enumeration.cases {
+                let _ = writeln!(
+                    out,
+                    "            Self::{} => {:?},",
+                    camel(&case.name),
+                    case.name
+                );
+            }
+            out.push_str("        }\n    }\n}\n\n");
             let _ = writeln!(
                 out,
                 "impl Wire for {ty} {{\n    fn encode(&self, out: &mut Vec<u8>) {{\n        write_leb(out, *self as u64);\n    }}\n    fn decode(input: &mut Input<'_>) -> Result<Self, DecodeError> {{\n        match input.leb(64)? {{"

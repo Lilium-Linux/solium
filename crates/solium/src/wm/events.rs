@@ -15,8 +15,13 @@ impl Scripts {
     /// Run whatever a key combination is bound to. Handled when a binding
     /// ran; an unbound key, or one whose binding failed, belongs to the
     /// focused client.
+    ///
+    /// At the lock screen, nothing the answer asks that reaches past the
+    /// lock is applied, whatever the window manager let through.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Key(combo.to_owned()))
+        let locked = snapshot.locked;
+        let (_, outcome) = self.send_as(snapshot, wire::Event::Key(combo.to_owned()), locked);
+        outcome
     }
 
     /// Tell scripts a window has appeared.
@@ -401,6 +406,17 @@ impl Scripts {
 
     /// [`Self::send`], with the answer's decision, as JSON text.
     fn send_for(&mut self, snapshot: Snapshot, event: wire::Event) -> (Option<String>, Outcome) {
+        self.send_as(snapshot, event, false)
+    }
+
+    /// [`Self::send_for`], for a binding fired at the lock screen when
+    /// `at_the_lock`.
+    fn send_as(
+        &mut self,
+        snapshot: Snapshot,
+        event: wire::Event,
+        at_the_lock: bool,
+    ) -> (Option<String>, Outcome) {
         self.serial += 1;
         let batch = wire::Batch {
             serial: self.serial,
@@ -408,13 +424,32 @@ impl Scripts {
             events: vec![event],
         };
         let answers = self.answers(Some(snapshot));
-        let answer = self.host.handle(batch, answers);
+        let mut answer = self.host.handle(batch, answers);
+        if at_the_lock {
+            refuse_past_the_lock(&mut answer);
+        }
         self.declarations_in(&answer);
         let decision = answer.decision.clone();
         let mut outcome = outcome_of(answer);
         outcome.commands.splice(0..0, self.stores.take_read());
         (decision, outcome)
     }
+}
+
+/// Take out of an answer to a binding fired at the lock screen what would
+/// reach past the lock (#224): the compositor holds to the rule whatever the
+/// window manager does.
+fn refuse_past_the_lock(answer: &mut wire::Answer) {
+    answer.commands.retain(|command| {
+        let reaches = crate::wm::convert::reaches_past_the_lock(command);
+        if reaches {
+            tracing::warn!(
+                ?command,
+                "a binding at the lock screen asked past the lock; refused"
+            );
+        }
+        !reaches
+    });
 }
 
 /// An answer as the compositor applies it: its commands converted in
@@ -495,5 +530,43 @@ impl Ask for Answers {
                 Some(wire::Reply::Store(self.stores.read(&name, max)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use solium_wm_protocol as wire;
+
+    /// A window manager that lets a binding at the lock act on a window is
+    /// refused by the compositor: the rule is not the window manager's to
+    /// keep.
+    #[test]
+    fn the_compositor_refuses_what_reaches_past_the_lock_whatever_the_window_manager_sends() {
+        let mut answer = wire::Answer {
+            serial: 1,
+            handled: true,
+            commands: vec![
+                wire::Command::Close(7),
+                wire::Command::Act((
+                    1,
+                    "audio.mute".to_owned(),
+                    "{}".to_owned(),
+                    wire::FocusCause::Binding,
+                )),
+                wire::Command::Quit,
+            ],
+            motion: None,
+            decision: None,
+        };
+        super::refuse_past_the_lock(&mut answer);
+        assert_eq!(
+            answer.commands,
+            [wire::Command::Act((
+                1,
+                "audio.mute".to_owned(),
+                "{}".to_owned(),
+                wire::FocusCause::Binding
+            ))]
+        );
     }
 }

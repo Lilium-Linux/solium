@@ -118,6 +118,9 @@ interface commands {
     variant touch-action {
         capture,
         move(u64),
+        /// The window resized from an edge or corner, by its name: one of
+        /// `top`, `bottom`, `left`, `right`, `top_left`, `top_right`,
+        /// `bottom_left` and `bottom_right`.
         resize(tuple<u64, string>),
     }
 

@@ -141,7 +141,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 "move" => TouchAction::Move(options.get("window")?),
                 "resize" => {
                     let edges: String = options.get("edges")?;
-                    if crate::wm::convert::resize_edge(&edges).is_none() {
+                    if !solium_wm_protocol::touch::RESIZE_EDGES.contains(&edges.as_str()) {
                         return Err(mlua::Error::runtime("sol.touch: invalid resize edges"));
                     }
                     TouchAction::Resize((options.get("window")?, edges))

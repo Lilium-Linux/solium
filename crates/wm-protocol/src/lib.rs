@@ -25,8 +25,10 @@
 
 pub mod combo;
 pub mod frame;
+pub mod lock;
 pub mod mirror;
 pub mod store;
+pub mod touch;
 mod wire;
 
 pub use wire::{DecodeError, Input, Wire};

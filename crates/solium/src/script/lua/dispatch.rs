@@ -165,7 +165,7 @@ fn run(
             call_listeners(lua, "touch", table)
         }
         E::Focused((id, cause, changed)) => {
-            let source = crate::wm::convert::focus_source(cause).name();
+            let source = cause.name();
             call_listeners(lua, "focus", (id, source, changed))
         }
         E::KeyboardChanged(changed) => {

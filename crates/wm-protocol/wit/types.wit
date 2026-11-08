@@ -100,6 +100,8 @@ interface types {
         target: string,
         window: option<u64>,
         control: bool,
+        /// The edge or corner of the window's frame under the finger, by
+        /// the names `touch-action`'s `resize` takes.
         edges: option<string>,
         time: u32,
         t: f64,
