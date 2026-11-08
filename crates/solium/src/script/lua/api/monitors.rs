@@ -69,7 +69,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let monitor = (which != "all").then_some(which);
             with_pending(lua, |pending| {
-                pending.push(Command::Power { monitor, on });
+                pending.push(solium_wm_protocol::Command::Power((monitor, on)));
             })
         })?,
     )?;
@@ -104,7 +104,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "output_management",
         lua.create_function(|lua, offered: bool| {
             with_pending(lua, |pending| {
-                pending.push(Command::OutputManagement(offered));
+                pending.push(solium_wm_protocol::Command::Configure((
+                    "output_management".to_owned(),
+                    vec![solium_wm_protocol::DocNode::Boolean(offered)],
+                )));
             })
         })?,
     )?;
@@ -116,7 +119,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "workspaces_offered",
         lua.create_function(|lua, offered: bool| {
             with_pending(lua, |pending| {
-                pending.push(Command::WorkspacesOffered(offered));
+                pending.push(solium_wm_protocol::Command::Configure((
+                    "workspaces_offered".to_owned(),
+                    vec![solium_wm_protocol::DocNode::Boolean(offered)],
+                )));
             })
         })?,
     )?;

@@ -9,7 +9,11 @@ use crate::script::*;
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "reload",
-        lua.create_function(|lua, ()| with_pending(lua, |pending| pending.push(Command::Reload)))?,
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Reload)
+            })
+        })?,
     )?;
 
     // Lock the session now, the way `config.lock` says: Solium's own lock, or
@@ -20,7 +24,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "lock_now",
         lua.create_function(|lua, ()| {
             with_pending(lua, |pending| {
-                pending.push(Command::LockNow);
+                pending.push(solium_wm_protocol::Command::LockNow);
             })
         })?,
     )?;
@@ -57,7 +61,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             let progress = progress.map(|progress| progress.clamp(0.0, 1.0));
             with_pending(lua, |pending| {
-                pending.push(Command::LockPeek(progress));
+                pending.push(solium_wm_protocol::Command::LockPeek(progress));
             })
         })?,
     )?;
@@ -67,14 +71,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // like one.
     sol.set(
         "spawn",
-        lua.create_function(|lua, mut args: mlua::Variadic<String>| {
+        lua.create_function(|lua, args: mlua::Variadic<String>| {
             if args.is_empty() {
                 return Err(mlua::Error::runtime("sol.spawn needs a program to run"));
             }
-            let program = args.remove(0);
-            let args = args.into_iter().collect();
+            let argv = args.into_iter().collect();
             with_pending(lua, |pending| {
-                pending.push(Command::Spawn { program, args });
+                pending.push(solium_wm_protocol::Command::Spawn(argv));
             })
         })?,
     )?;
@@ -300,7 +303,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // only way out is hardcoded is not a configurable one.
     sol.set(
         "quit",
-        lua.create_function(|lua, ()| with_pending(lua, |pending| pending.push(Command::Quit)))?,
+        lua.create_function(|lua, ()| {
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Quit)
+            })
+        })?,
     )?;
 
     Ok(())

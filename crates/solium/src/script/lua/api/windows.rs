@@ -179,7 +179,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 // the same thing.
                 _ => {
                     with_pending(lua, |pending| {
-                        pending.push(Command::SurfaceGone(name.clone()));
+                        pending.push(solium_wm_protocol::Command::SurfaceGone(name.clone()));
                     })?;
                     return Ok(Value::Nil);
                 }
@@ -454,7 +454,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(Command::ToggleFullscreen { id });
+                pending.push(solium_wm_protocol::Command::ToggleFullscreen(id));
             })
         })?,
     )?;
@@ -471,7 +471,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(Command::Minimize { id });
+                pending.push(solium_wm_protocol::Command::Minimize(id));
             })
         })?,
     )?;
@@ -483,7 +483,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(Command::Unminimize { id });
+                pending.push(solium_wm_protocol::Command::Unminimize(id));
             })
         })?,
     )?;
@@ -499,10 +499,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "show_minimized",
         lua.create_function(|lua, (id, shown): (u64, Option<bool>)| {
             with_pending(lua, |pending| {
-                pending.push(Command::ShowMinimized {
+                pending.push(solium_wm_protocol::Command::ShowMinimized((
                     id,
-                    shown: shown.unwrap_or(true),
-                });
+                    shown.unwrap_or(true),
+                )));
             })
         })?,
     )?;
@@ -533,7 +533,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(Command::KeepAbove { id, on });
+                pending.push(solium_wm_protocol::Command::KeepAbove((id, on)));
             })
         })?,
     )?;
@@ -545,7 +545,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(Command::ToggleMaximize { id });
+                pending.push(solium_wm_protocol::Command::ToggleMaximize(id));
             })
         })?,
     )?;
@@ -559,7 +559,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "drag_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.push(Command::DragHold { id, held });
+                pending.push(solium_wm_protocol::Command::DragHold((id, held)));
             })
         })?,
     )?;
@@ -586,7 +586,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 ));
             }
             with_pending(lua, |pending| {
-                pending.push(Command::DragGrip { id, along, by });
+                pending.push(solium_wm_protocol::Command::DragGrip((id, along, by)));
             })
         })?,
     )?;
@@ -601,7 +601,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "resize_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.push(Command::ResizeHold { id, held });
+                pending.push(solium_wm_protocol::Command::ResizeHold((id, held)));
             })
         })?,
     )?;
@@ -736,14 +736,18 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "unplace",
         lua.create_function(|lua, id: u64| {
-            with_pending(lua, |pending| pending.push(Command::Unplace { id }))
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Unplace(id))
+            })
         })?,
     )?;
 
     sol.set(
         "close",
         lua.create_function(|lua, id: u64| {
-            with_pending(lua, |pending| pending.push(Command::Close { id }))
+            with_pending(lua, |pending| {
+                pending.push(solium_wm_protocol::Command::Close(id))
+            })
         })?,
     )?;
 

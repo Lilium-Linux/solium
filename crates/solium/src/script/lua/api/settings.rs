@@ -196,7 +196,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "pane",
         lua.create_function(|lua, name: Option<String>| {
             with_pending(lua, |pending| {
-                pending.push(Command::Decoration { name });
+                pending.push(solium_wm_protocol::Command::Decoration(name));
             })
         })?,
     )?;

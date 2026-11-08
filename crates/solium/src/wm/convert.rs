@@ -113,13 +113,67 @@ pub(crate) fn commands_of(command: wire::Command) -> Vec<crate::script::Command>
                 }
             }
         }
-        other => {
-            tracing::warn!(
-                ?other,
-                "a command the compositor does not apply yet; left out"
-            );
-            Vec::new()
+        command => vec![match runtime(command) {
+            Ok(command) => command,
+            Err(why) => {
+                tracing::warn!(why, "a command the compositor cannot apply; left out");
+                return Vec::new();
+            }
+        }],
+    }
+}
+
+/// A command that acts on the desktop as the compositor's own, or why it
+/// cannot be.
+fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
+    use crate::script::Command;
+    use wire::Command as W;
+    Ok(match command {
+        W::Close(id) => Command::Close { id },
+        W::Unplace(id) => Command::Unplace { id },
+        W::ToggleFullscreen(id) => Command::ToggleFullscreen { id },
+        W::ToggleMaximize(id) => Command::ToggleMaximize { id },
+        W::Minimize(id) => Command::Minimize { id },
+        W::Unminimize(id) => Command::Unminimize { id },
+        W::ShowMinimized((id, shown)) => Command::ShowMinimized { id, shown },
+        W::KeepAbove((id, on)) => Command::KeepAbove { id, on },
+        W::DragHold((id, held)) => Command::DragHold { id, held },
+        W::ResizeHold((id, held)) => Command::ResizeHold { id, held },
+        W::DragGrip((id, along, by)) => Command::DragGrip { id, along, by },
+        W::Click((x, y)) => Command::Click { x, y },
+        W::Power((monitor, on)) => Command::Power { monitor, on },
+        W::Decoration(name) => Command::Decoration { name },
+        W::SurfaceGone(name) => Command::SurfaceGone(name),
+        W::Spawn(mut argv) => {
+            if argv.is_empty() {
+                return Err("spawn needs a program to run".to_owned());
+            }
+            let program = argv.remove(0);
+            Command::Spawn {
+                program,
+                args: argv,
+            }
         }
+        W::LockNow => Command::LockNow,
+        W::LockPeek(progress) => {
+            Command::LockPeek(progress.map(|progress| progress.clamp(0.0, 1.0)))
+        }
+        W::TakeShortcutsBack => Command::TakeShortcutsBack,
+        W::ReleasePointer => Command::ReleasePointer,
+        W::Reload => Command::Reload,
+        W::Quit => Command::Quit,
+        other => return Err(format!("{other:?} is not applied yet")),
+    })
+}
+
+/// A section that is one flag.
+fn flag(options: &crate::script::Doc) -> Result<bool, String> {
+    match options {
+        crate::script::Doc::Bool(on) => Ok(*on),
+        other => Err(format!(
+            "true or false, not {}",
+            crate::script::doc::describe(other)
+        )),
     }
 }
 
@@ -217,6 +271,8 @@ fn configure(
             settings::monitors::parse(options)?,
         ))],
         "workspaces" => vec![Command::Workspaces(settings::workspaces::parse(options)?)],
+        "output_management" => vec![Command::OutputManagement(flag(options)?)],
+        "workspaces_offered" => vec![Command::WorkspacesOffered(flag(options)?)],
         other => return Err(format!("`{other}` is not a settings section")),
     })
 }
