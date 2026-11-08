@@ -4,6 +4,7 @@
 
 pub(crate) mod client_sizes;
 pub(crate) mod cursor;
+pub(crate) mod effects;
 pub(crate) mod files;
 pub(crate) mod focus;
 pub(crate) mod frames;
@@ -13,6 +14,7 @@ pub(crate) mod input;
 pub(crate) mod keyboard;
 pub(crate) mod layer_shell;
 pub(crate) mod lock;
+pub(crate) mod monitors;
 pub(crate) mod pane;
 pub(crate) mod qml;
 pub(crate) mod read;

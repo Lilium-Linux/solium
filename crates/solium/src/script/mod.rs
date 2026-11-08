@@ -2392,23 +2392,9 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     sol.set(
         "effects",
         lua.create_function(|lua, options: Option<Table>| {
-            let rules = match options
-                .as_ref()
-                .map(|table| table.get::<mlua::Value>("rules"))
-                .transpose()?
-            {
-                None | Some(mlua::Value::Nil) => Ok(Vec::new()),
-                Some(value) => match crate::script::doc_of_plain(&value)? {
-                    Some(tree) => crate::effect::rules::parse(&tree),
-                    None => Ok(Vec::new()),
-                },
-            };
-            let settings = match options {
-                None => Ok(crate::effect::settings::Settings::default()),
-                Some(table) => crate::effect::settings::parse(&crate::effect::settings::tree_of(
-                    &lua::convert::doc_of(&Value::Table(table))?,
-                )),
-            };
+            let given = options.is_some();
+            let (rules, settings) =
+                settings::effects::parse(&lua::convert::section(options)?, given);
             with_pending(lua, |pending| {
                 pending.commands.push(Command::Effects { rules, settings });
             })
@@ -2837,7 +2823,7 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
     // says. The same shape as `sol.monitor()`, which answers about one.
     sol.set(
         "monitors",
-        lua.create_function(|lua, options: Option<Vec<mlua::Table>>| {
+        lua.create_function(|lua, options: Option<mlua::Table>| {
             let Some(rows) = options else {
                 let monitors = lua.create_table()?;
                 for (index, monitor) in snapshot(lua)?.monitors.iter().enumerate() {
@@ -2860,162 +2846,8 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
                 return Ok(Value::Table(monitors));
             };
 
-            let mut places = Vec::new();
-            for row in rows {
-                // A row with no name cannot be matched to a connector, and
-                // silently dropping it is how a configuration appears to be
-                // ignored. Say which row, because the list has no other
-                // landmarks.
-                let Ok(Value::String(name)) = row.get::<Value>("name") else {
-                    tracing::warn!(
-                        row = places.len() + 1,
-                        "a monitor with no name -- run `solium --probe` for the ones this \
-                         machine has"
-                    );
-                    continue;
-                };
-                let Ok(name) = name.to_str() else {
-                    continue;
-                };
-                let name = name.to_string();
-
-                // A position outright, when both halves were given. One half
-                // alone is treated as unset rather than as zero: `y = 200` on
-                // its own almost certainly means "and leave x alone", and
-                // reading the other as 0 would slide the monitor to the left
-                // edge of the desk for no stated reason.
-                let (x, y) = (row.get::<Option<i32>>("x")?, row.get::<Option<i32>>("y")?);
-                let at = match (x, y) {
-                    (Some(x), Some(y)) => Some(Point::<i32, Logical>::from((x, y))),
-                    (Some(x), None) => Some(Point::from((x, 0))),
-                    (None, Some(y)) => Some(Point::from((0, y))),
-                    (None, None) => None,
-                };
-
-                // Or beside another monitor, which is the form that does not
-                // go stale when a resolution changes.
-                let align = match row.get::<Value>("align") {
-                    Ok(Value::String(name)) => name
-                        .to_str()
-                        .ok()
-                        .and_then(|name| crate::monitor::align(&name))
-                        .unwrap_or_default(),
-                    _ => crate::monitor::Align::default(),
-                };
-                let mut beside = None;
-                for (key, side) in [
-                    ("right_of", crate::monitor::Side::Right),
-                    ("left_of", crate::monitor::Side::Left),
-                    ("above", crate::monitor::Side::Above),
-                    ("below", crate::monitor::Side::Below),
-                ] {
-                    if let Ok(Value::String(anchor)) = row.get::<Value>(key)
-                        && let Ok(anchor) = anchor.to_str()
-                    {
-                        beside = Some((side, anchor.to_string(), align));
-                        break;
-                    }
-                }
-
-                // A mode, written the way every display tool writes one:
-                // `"2560x1440@165"`. A table with `w`, `h` and `refresh` does
-                // the same thing, for anyone generating a configuration rather
-                // than typing it.
-                let mode = match row.get::<Value>("mode") {
-                    Ok(Value::String(text)) => {
-                        let text = text.to_str().ok().map(|text| text.to_string());
-                        match text.as_deref().and_then(crate::monitor::mode) {
-                            Some(mode) => mode,
-                            None => {
-                                tracing::warn!(
-                                    monitor = name,
-                                    mode = ?text,
-                                    "not a mode -- write it as 2560x1440@165, or as one of \
-                                     best, preferred, widest"
-                                );
-                                crate::monitor::Wanted::default()
-                            }
-                        }
-                    }
-                    Ok(Value::Table(mode)) => {
-                        match (mode.get::<Option<i32>>("w")?, mode.get::<Option<i32>>("h")?) {
-                            (Some(width), Some(height)) if width > 0 && height > 0 => {
-                                crate::monitor::Wanted::Exact {
-                                    width,
-                                    height,
-                                    refresh: mode.get::<Option<i32>>("refresh")?,
-                                }
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    monitor = name,
-                                    "a mode table needs both w and h -- ignoring it"
-                                );
-                                crate::monitor::Wanted::default()
-                            }
-                        }
-                    }
-                    _ => crate::monitor::Wanted::default(),
-                };
-
-                let transform = match row.get::<Value>("transform") {
-                    Ok(Value::String(value)) => {
-                        let value = value.to_str().ok().map(|value| value.to_string());
-                        match value.as_deref().and_then(crate::monitor::transform) {
-                            Some(transform) => Some(transform),
-                            None => {
-                                tracing::warn!(
-                                    monitor = name,
-                                    transform = ?value,
-                                    "not a transform -- one of normal, 90, 180, 270, \
-                                     flipped, flipped-90, flipped-180, flipped-270"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    // A number is what people write for a rotation, and
-                    // refusing it over a quotation mark would be pedantry.
-                    Ok(Value::Integer(degrees)) => crate::monitor::transform(&degrees.to_string()),
-                    _ => None,
-                };
-
-                let name_for_warning = name.clone();
-                places.push(crate::monitor::Placement {
-                    name,
-                    at,
-                    beside,
-                    mode,
-                    vrr: row.get::<Option<bool>>("vrr")?,
-                    transform,
-                    enabled: row.get::<Option<bool>>("enabled")?.unwrap_or(true),
-                    primary: row.get::<Option<bool>>("primary")?.unwrap_or(false),
-                    scale: match row.get::<Value>("scale") {
-                        Ok(Value::Number(value)) => match crate::monitor::scaling(&value) {
-                            Some(scale) => scale,
-                            None => {
-                                tracing::warn!(
-                                    monitor = name_for_warning,
-                                    scale = value,
-                                    "not a sensible scale -- between 0.5 and 8, or \"auto\""
-                                );
-                                crate::monitor::Scaling::Auto
-                            }
-                        },
-                        Ok(Value::Integer(value)) => {
-                            #[expect(
-                                clippy::cast_precision_loss,
-                                reason = "a scale is a small number"
-                            )]
-                            let value = value as f64;
-                            crate::monitor::scaling(&value).unwrap_or(crate::monitor::Scaling::Auto)
-                        }
-                        // "auto", and anything unreadable, which means the
-                        // same thing and has already been warned about.
-                        _ => crate::monitor::Scaling::Auto,
-                    },
-                });
-            }
+            let places = settings::monitors::parse(&lua::convert::doc_of(&Value::Table(rows))?)
+                .map_err(mlua::Error::runtime)?;
             with_pending(lua, |pending| {
                 pending
                     .commands
