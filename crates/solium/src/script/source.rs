@@ -7,9 +7,14 @@
 
 /// Every production file of `script/`, by its path under `src/script/`.
 pub(crate) const FILES: &[(&str, &str)] = &[
+    ("command.rs", include_str!("command.rs")),
+    ("keep.rs", include_str!("keep.rs")),
+    ("lua/convert.rs", include_str!("lua/convert.rs")),
+    ("lua/mod.rs", include_str!("lua/mod.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("reference.rs", include_str!("reference.rs")),
     ("source.rs", include_str!("source.rs")),
+    ("types.rs", include_str!("types.rs")),
 ];
 
 /// Each file cut at its first `#[cfg(test)]`, joined: the code a normal
