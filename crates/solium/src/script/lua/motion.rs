@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use mlua::{Table, Value};
 
-use crate::mat4::Mat4;
 use crate::script::lua::*;
 use crate::script::*;
 use solium_animation::Curve;
+use solium_animation::mat4::Mat4;
 
-pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
+pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Rect>> {
     let (x, y, w, h) = (
         options.get::<Option<f64>>("x")?,
         options.get::<Option<f64>>("y")?,
@@ -29,7 +29,7 @@ pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<Rect>> {
                 "a rect needs finite x and y and a size of zero or more; got x={x}, y={y}, w={w}, h={h}"
             )))
         }
-        (Some(x), Some(y), Some(w), Some(h)) => Ok(Some(Rect { x, y, w, h })),
+        (Some(x), Some(y), Some(w), Some(h)) => Ok(Some(solium_wm_protocol::Rect { x, y, w, h })),
         (None, None, None, None) => Ok(None),
         // A half-specified rect is a typo, and silently filling in the missing
         // half would put a window somewhere nobody asked for.
@@ -416,7 +416,7 @@ pub(crate) fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
             "a deform's `to` needs { window = id }, { surface = name } or a rect (x, y, w, h)",
         ));
     };
-    Ok(solium_wm_protocol::Aim::Rect(to_wire::rect(rect)))
+    Ok(solium_wm_protocol::Aim::Rect(rect))
 }
 
 /// Read a selection out of a `sol.group` table.
@@ -433,7 +433,7 @@ pub(crate) fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
 /// Every key is optional and an absent one is an empty list, so a selection of
 /// nothing is spellable and does nothing — which is what a mode building one
 /// desk per monitor per workspace produces for the cells that are empty.
-pub(crate) fn selection_from(options: &Table) -> mlua::Result<Selection> {
+pub(crate) fn selection_from(options: &Table) -> mlua::Result<solium_wm_protocol::Selection> {
     let names = |key: &str| -> mlua::Result<Vec<String>> {
         match options.get::<Option<Table>>(key)? {
             Some(list) => list.sequence_values::<String>().collect(),
@@ -444,7 +444,7 @@ pub(crate) fn selection_from(options: &Table) -> mlua::Result<Selection> {
         Some(list) => list.sequence_values::<u64>().collect::<mlua::Result<_>>()?,
         None => Vec::new(),
     };
-    Ok(Selection {
+    Ok(solium_wm_protocol::Selection {
         windows,
         surfaces: names("surfaces")?,
         monitors: names("monitors")?,
@@ -635,7 +635,11 @@ pub(crate) const CENTRE: (f64, f64) = (0.5, 0.5);
 /// A warp's options as [`warp_options`] reads them: where on a window, as a
 /// share of its width and height, the motion its picture flies along, and
 /// where real motion mid-flight carries on from.
-pub(crate) type WarpOptions = (Option<(f64, f64)>, Option<AnimationSpec>, Interrupt);
+pub(crate) type WarpOptions = (
+    Option<(f64, f64)>,
+    Option<solium_wm_protocol::Motion>,
+    solium_wm_protocol::Interrupt,
+);
 
 /// A warp's options (#220): `to`, where on a window, `"center"` or a share
 /// of its width and height `{ x, y }`; `motion`, how the drawn pointer
@@ -648,7 +652,7 @@ pub(crate) type WarpOptions = (Option<(f64, f64)>, Option<AnimationSpec>, Interr
 /// `tests::sol_warp_names_a_window_or_a_point_and_a_bad_one_is_an_error`.
 pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Result<WarpOptions> {
     let Some(options) = options else {
-        return Ok((None, None, Interrupt::default()));
+        return Ok((None, None, solium_wm_protocol::Interrupt::Pointer));
     };
     let at = match options.get::<Value>("to")? {
         Value::Nil => None,
@@ -667,7 +671,7 @@ pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Resul
         other => {
             return Err(mlua::Error::runtime(format!(
                 "{caller}: `to` is \"center\" or {{ x, y }}, not {}",
-                describe(&other)
+                describe_value(&other)
             )));
         }
     };
@@ -675,7 +679,9 @@ pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Resul
         Value::Nil => None,
         Value::Table(motion) => {
             let (duration, easing) = motion_from(Some(&motion))?;
-            Some(AnimationSpec::default().with(duration, easing))
+            Some(to_wire::motion(
+                AnimationSpec::default().with(duration, easing),
+            ))
         }
         other => {
             return Err(mlua::Error::runtime(format!(
@@ -685,30 +691,19 @@ pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Resul
         }
     };
     let interrupt = match options.get::<Value>("interrupt")? {
-        Value::Nil => Interrupt::default(),
-        Value::String(name) if name.to_string_lossy() == "pointer" => Interrupt::Pointer,
-        Value::String(name) if name.to_string_lossy() == "picture" => Interrupt::Picture,
+        Value::Nil => solium_wm_protocol::Interrupt::Pointer,
+        Value::String(name) if name.to_string_lossy() == "pointer" => {
+            solium_wm_protocol::Interrupt::Pointer
+        }
+        Value::String(name) if name.to_string_lossy() == "picture" => {
+            solium_wm_protocol::Interrupt::Picture
+        }
         other => {
             return Err(mlua::Error::runtime(format!(
                 "{caller}: `interrupt` is \"pointer\" or \"picture\", not {}",
-                describe(&other)
+                describe_value(&other)
             )));
         }
     };
     Ok((at, motion, interrupt))
-}
-
-/// The deform `sol.present(id, { deform = <lua> })` carries, for a state
-/// test to apply as the command would.
-#[cfg(test)]
-pub(crate) fn deform_for_test(lua: &str) -> DeformSpec {
-    let state = mlua::Lua::new();
-    let options: Table = state
-        .load(format!("return {{ deform = {lua} }}"))
-        .eval()
-        .expect("the test's deform");
-    let deform = deform_from(&options)
-        .expect("a deform")
-        .expect("a deform given");
-    crate::wm::convert::deform(deform).expect("the compositor reads it")
 }

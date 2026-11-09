@@ -219,7 +219,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "pane_values",
         lua.create_function(|lua, values: mlua::Table| {
-            let fields = crate::json::Json::object_from_lua(&values)?;
+            let fields = solium_json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
                 pending.push(solium_wm_protocol::Command::PaneValues(to_wire::object(
                     &fields,
@@ -236,7 +236,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "frame",
         lua.create_function(|lua, (id, values): (u64, mlua::Table)| {
-            let fields = crate::json::Json::object_from_lua(&values)?;
+            let fields = solium_json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
                 pending.push(solium_wm_protocol::Command::FrameValues((
                     id,

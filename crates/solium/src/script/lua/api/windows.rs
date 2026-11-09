@@ -365,18 +365,16 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let warp = match options.as_ref() {
                 Some(options) => match options.get::<Value>("warp")? {
                     Value::Nil | Value::Boolean(false) => None,
-                    Value::Boolean(true) => Some(Warp {
-                        to: WarpTo::Window { id, at: CENTRE },
+                    Value::Boolean(true) => Some(solium_wm_protocol::Warp {
+                        to: solium_wm_protocol::WarpTo::Window((id, CENTRE.0, CENTRE.1)),
                         motion: None,
-                        interrupt: Interrupt::default(),
+                        interrupt: solium_wm_protocol::Interrupt::Pointer,
                     }),
                     Value::Table(warp) => {
                         let (at, motion, interrupt) = warp_options(Some(&warp), "sol.focus")?;
-                        Some(Warp {
-                            to: WarpTo::Window {
-                                id,
-                                at: at.unwrap_or(CENTRE),
-                            },
+                        let (x, y) = at.unwrap_or(CENTRE);
+                        Some(solium_wm_protocol::Warp {
+                            to: solium_wm_protocol::WarpTo::Window((id, x, y)),
                             motion,
                             interrupt,
                         })
@@ -391,12 +389,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 None => None,
             };
             with_pending(lua, |pending| {
-                let cause = to_wire::focus_cause(pending.source);
-                pending.push(solium_wm_protocol::Command::Focus((
-                    id,
-                    cause,
-                    warp.map(to_wire::warp),
-                )));
+                let cause = pending.source;
+                pending.push(solium_wm_protocol::Command::Focus((id, cause, warp)));
             })
         })?,
     )?;
@@ -411,7 +405,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             Ok(lua
                 .app_data_ref::<Pending>()
-                .map_or(FocusSource::Script, |pending| pending.source)
+                .map_or(solium_wm_protocol::FocusCause::Script, |pending| {
+                    pending.source
+                })
                 .name())
         })?,
     )?;
@@ -607,11 +603,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 // direction or a move, whatever called it (#220).
                 // `tests::the_focus_event_says_what_moved_the_keyboard`.
                 let source = if verb == "move" {
-                    FocusSource::Move
+                    solium_wm_protocol::FocusCause::Move
                 } else {
-                    FocusSource::Direction
+                    solium_wm_protocol::FocusCause::Direction
                 };
-                let mut outer_source = FocusSource::Script;
+                let mut outer_source = solium_wm_protocol::FocusCause::Script;
                 with_pending(lua, |pending| {
                     outer = pending.moving;
                     pending.moving = moving.or(outer);
@@ -692,10 +688,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 pending.push(solium_wm_protocol::Command::Place(
                     solium_wm_protocol::Place {
                         id,
-                        rect: to_wire::rect(rect),
+                        rect,
                         motion: to_wire::motion(animation),
                         tile,
-                        inside: inside.map(to_wire::rect),
+                        inside,
                         cramped,
                         moved,
                     },
@@ -738,10 +734,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "act",
         lua.create_function(
             |lua, (action, data, done): (String, Value, Option<mlua::Function>)| {
-                let data = crate::json::Json::from_lua(&data)?.unwrap_or(crate::json::Json::Null);
+                let data = solium_json::Json::from_lua(&data)?.unwrap_or(solium_json::Json::Null);
                 let attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
-                    let cause = to_wire::focus_cause(pending.source);
+                    let cause = pending.source;
                     pending.push(solium_wm_protocol::Command::Act((
                         attempt,
                         action,

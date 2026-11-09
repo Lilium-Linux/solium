@@ -41,7 +41,8 @@ impl Host {
         };
         for event in batch.events {
             let source = source_of(&event);
-            let at_the_lock = source == FocusSource::Binding && self.mirror.locked;
+            let at_the_lock =
+                source == solium_wm_protocol::FocusCause::Binding && self.mirror.locked;
             self.lua.set_app_data(Pending {
                 source,
                 at_the_lock,
@@ -81,23 +82,25 @@ impl Host {
 
 /// What moved the keyboard, for a `sol.focus` an event's handler makes
 /// (#220).
-fn source_of(event: &wire::Event) -> FocusSource {
+fn source_of(event: &wire::Event) -> solium_wm_protocol::FocusCause {
     match event {
-        wire::Event::Key(_) => FocusSource::Binding,
-        wire::Event::Opened(_) => FocusSource::Open,
-        wire::Event::Click(_) => FocusSource::Click,
-        wire::Event::Touch(_) => FocusSource::Touch,
-        wire::Event::Activated(_) => FocusSource::Activate,
-        wire::Event::FrameAction(_) | wire::Event::SurfaceAction(_) => FocusSource::Surface,
-        wire::Event::Dragged(_) | wire::Event::Dropped(_) => FocusSource::Drop,
-        wire::Event::Scrolled(_) => FocusSource::Scroll,
-        _ => FocusSource::Script,
+        wire::Event::Key(_) => solium_wm_protocol::FocusCause::Binding,
+        wire::Event::Opened(_) => solium_wm_protocol::FocusCause::Open,
+        wire::Event::Click(_) => solium_wm_protocol::FocusCause::Click,
+        wire::Event::Touch(_) => solium_wm_protocol::FocusCause::Touch,
+        wire::Event::Activated(_) => solium_wm_protocol::FocusCause::Activate,
+        wire::Event::FrameAction(_) | wire::Event::SurfaceAction(_) => {
+            solium_wm_protocol::FocusCause::Surface
+        }
+        wire::Event::Dragged(_) | wire::Event::Dropped(_) => solium_wm_protocol::FocusCause::Drop,
+        wire::Event::Scrolled(_) => solium_wm_protocol::FocusCause::Scroll,
+        _ => solium_wm_protocol::FocusCause::Script,
     }
 }
 
 /// A JSON value from the compositor, as Lua reads it.
 fn json_value(lua: &Lua, text: &str) -> Value {
-    crate::json::Json::parse(text)
+    solium_json::Json::parse(text)
         .and_then(|json| json.to_lua(lua).ok())
         .unwrap_or(Value::Nil)
 }

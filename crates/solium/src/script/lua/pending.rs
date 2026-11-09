@@ -8,7 +8,7 @@ use crate::script::*;
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
 /// dispatch, so no compositor state is borrowed while Lua runs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Pending {
     /// What the handlers asked for, in the window manager protocol's terms.
     pub(crate) commands: Vec<solium_wm_protocol::Command>,
@@ -24,22 +24,37 @@ pub(crate) struct Pending {
     pub(crate) moving: Option<u64>,
     /// What the handler running now is answering: what a `sol.focus` it
     /// makes is told with, and what `sol.focus_source()` says. See
-    /// [`FocusSource`].
-    pub(crate) source: FocusSource,
+    /// [`solium_wm_protocol::FocusCause`].
+    pub(crate) source: solium_wm_protocol::FocusCause,
     /// Whether the handler running now is a binding fired at the lock screen,
     /// so that what it asks of a window is refused. See [`with_pending`].
     pub(crate) at_the_lock: bool,
 }
 
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            animation: AnimationSpec::default(),
+            animated: false,
+            grab: None,
+            status: None,
+            moving: None,
+            source: solium_wm_protocol::FocusCause::Script,
+            at_the_lock: false,
+        }
+    }
+}
+
 /// What the configuration being replaced asked to keep, waiting in the new Lua
 /// state for `sol.keep` to claim it.
 ///
-/// App data rather than a field on [`Scripts`], because `sol.keep` is called
+/// App data rather than a field on [`Host`], because `sol.keep` is called
 /// while the configuration is still being *read* — the whole point is that a
 /// script's top level has its state back before it does anything with it — and
-/// at that moment there is no `Scripts` yet, only a `Lua`.
+/// at that moment there is no `Host` yet, only a `Lua`.
 #[derive(Debug, Default)]
-pub(crate) struct Carried(pub(crate) Keep);
+pub(crate) struct Carried(pub(crate) super::Keep);
 
 /// A size as a script reads one, `{ w = ..., h = ... }`, or nil for none.
 pub(crate) fn size_table(
@@ -117,7 +132,7 @@ pub(crate) fn with_pending(lua: &Lua, f: impl FnOnce(&mut Pending)) -> mlua::Res
             if pending.at_the_lock
                 && pending.commands[before..]
                     .iter()
-                    .any(crate::wm::convert::reaches_past_the_lock)
+                    .any(solium_wm_protocol::lock::reaches_past_the_lock)
             {
                 pending.commands.truncate(before);
                 return Err(mlua::Error::runtime(

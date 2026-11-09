@@ -4,24 +4,9 @@
 use std::time::Duration;
 
 use crate::mat4::Mat4;
-use crate::present::Curve;
 use crate::script::{Press, Rect, TouchAction};
 
-/// How a batch of transforms should animate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AnimationSpec {
-    pub(crate) duration: Duration,
-    pub(crate) easing: Curve,
-}
-
-impl Default for AnimationSpec {
-    fn default() -> Self {
-        Self {
-            duration: Duration::from_millis(220),
-            easing: Curve::OutCubic,
-        }
-    }
-}
+pub(crate) use solium_animation::AnimationSpec;
 
 /// What a deformation is aimed at, in the words a script wrote.
 ///
@@ -555,28 +540,6 @@ pub(crate) enum FocusSource {
     Script,
 }
 
-impl FocusSource {
-    /// The word a script is told.
-    /// `tests::the_focus_event_says_what_moved_the_keyboard`.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Binding => "binding",
-            Self::Direction => "direction",
-            Self::Move => "move",
-            Self::Click => "click",
-            Self::Scroll => "scroll",
-            Self::Drop => "drop",
-            Self::Touch => "touch",
-            Self::Hover => "hover",
-            Self::Surface => "surface",
-            Self::Open => "open",
-            Self::Activate => "activate",
-            Self::Settle => "settle",
-            Self::Script => "script",
-        }
-    }
-}
-
 /// Where a warp takes the pointer, as a script said it (#220).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WarpTo {
@@ -727,22 +690,4 @@ pub(crate) struct Outcome {
     pub(crate) motion: Option<AnimationSpec>,
 }
 
-impl AnimationSpec {
-    /// This, with whatever a call actually named.
-    pub(crate) const fn with(self, duration: Option<Duration>, easing: Option<Curve>) -> Self {
-        Self {
-            duration: match duration {
-                Some(duration) => duration,
-                None => self.duration,
-            },
-            easing: match easing {
-                Some(easing) => easing,
-                None => self.easing,
-            },
-        }
-    }
-}
-
-/// The properties a present can time apart, each with a motion of its own
-/// (#293): what `sol.present`'s `motion` is keyed by.
-pub(crate) const PRESENT_MOTIONS: [&str; 5] = ["x", "y", "size", "opacity", "client_opacity"];
+pub(crate) use solium_wm_protocol::present::MOTIONS as PRESENT_MOTIONS;

@@ -4,18 +4,9 @@
 
 use solium_wm_protocol as wire;
 
-use crate::mat4::Mat4;
 use crate::script::*;
 use solium_animation::Curve;
-
-pub(crate) fn rect(rect: Rect) -> wire::Rect {
-    wire::Rect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
-    }
-}
+use solium_animation::mat4::Mat4;
 
 pub(crate) fn easing(curve: Curve) -> wire::Easing {
     match curve {
@@ -46,50 +37,9 @@ pub(crate) fn matrix(matrix: Mat4) -> wire::Matrix {
     matrix.0.to_vec()
 }
 
-pub(crate) fn selection(selection: Selection) -> wire::Selection {
-    wire::Selection {
-        windows: selection.windows,
-        surfaces: selection.surfaces,
-        monitors: selection.monitors,
-        on: selection.on,
-    }
-}
-
-pub(crate) fn warp(warp: Warp) -> wire::Warp {
-    wire::Warp {
-        to: match warp.to {
-            WarpTo::Point { x, y } => wire::WarpTo::Point((x, y)),
-            WarpTo::Window { id, at } => wire::WarpTo::Window((id, at.0, at.1)),
-        },
-        motion: warp.motion.map(motion),
-        interrupt: match warp.interrupt {
-            Interrupt::Pointer => wire::Interrupt::Pointer,
-            Interrupt::Picture => wire::Interrupt::Picture,
-        },
-    }
-}
-
-pub(crate) fn focus_cause(source: FocusSource) -> wire::FocusCause {
-    match source {
-        FocusSource::Binding => wire::FocusCause::Binding,
-        FocusSource::Direction => wire::FocusCause::Direction,
-        FocusSource::Move => wire::FocusCause::Move,
-        FocusSource::Click => wire::FocusCause::Click,
-        FocusSource::Scroll => wire::FocusCause::Scroll,
-        FocusSource::Drop => wire::FocusCause::Drop,
-        FocusSource::Touch => wire::FocusCause::Touch,
-        FocusSource::Hover => wire::FocusCause::Hover,
-        FocusSource::Surface => wire::FocusCause::Surface,
-        FocusSource::Open => wire::FocusCause::Open,
-        FocusSource::Activate => wire::FocusCause::Activate,
-        FocusSource::Settle => wire::FocusCause::Settle,
-        FocusSource::Script => wire::FocusCause::Script,
-    }
-}
-
 /// An object's fields as JSON text.
-pub(crate) fn object(fields: &std::collections::BTreeMap<String, crate::json::Json>) -> String {
-    crate::json::Json::Object(fields.clone()).render()
+pub(crate) fn object(fields: &std::collections::BTreeMap<String, solium_json::Json>) -> String {
+    solium_json::Json::Object(fields.clone()).render()
 }
 
 /// A duration as milliseconds, exact to the nanosecond.

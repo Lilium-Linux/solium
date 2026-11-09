@@ -29,17 +29,13 @@ use anyhow::{Result, anyhow};
 
 mod command;
 pub(crate) mod doc;
-mod keep;
 pub(crate) mod lua;
 pub(crate) mod settings;
 mod types;
 
 pub(crate) use command::*;
 pub(crate) use doc::{Doc, Table as DocTable};
-pub(crate) use keep::*;
 pub(crate) use types::*;
-
-use lua::convert::describe_value as describe;
 
 pub(crate) use crate::wm::Scripts;
 
@@ -68,7 +64,7 @@ pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
 #[cfg(test)]
 use crate::present::Curve;
 #[cfg(test)]
-pub(crate) use lua::deform_for_test;
+pub(crate) use crate::wm::convert::deform_for_test;
 #[cfg(test)]
 use lua::*;
 #[cfg(test)]

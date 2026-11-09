@@ -99,6 +99,15 @@ pub(crate) fn press_names(combo: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// What a binding asked for besides its handler: the table form of
+/// `sol.bind`'s third argument (#224), each off unless asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Asked {
+    pub(crate) repeating: bool,
+    pub(crate) locked: bool,
+    pub(crate) inhibited: bool,
+}
+
 /// `sol.bind`'s third argument: nothing, a note, or a table holding the note
 /// and what else the binding asks for (#224).
 ///
@@ -109,11 +118,11 @@ pub(crate) fn press_names(combo: &str) -> Option<Vec<String>> {
 /// that works. `binding_options::an_option_a_binding_does_not_have_is_refused_by_name`.
 pub(crate) fn binding_note_and_options(
     said: Option<Value>,
-) -> mlua::Result<(Option<String>, BindingOptions)> {
+) -> mlua::Result<(Option<String>, Asked)> {
     let table = match said {
-        None | Some(Value::Nil) => return Ok((None, BindingOptions::default())),
+        None | Some(Value::Nil) => return Ok((None, Asked::default())),
         Some(Value::String(note)) => {
-            return Ok((Some(note.to_str()?.to_owned()), BindingOptions::default()));
+            return Ok((Some(note.to_str()?.to_owned()), Asked::default()));
         }
         Some(Value::Table(table)) => table,
         Some(other) => {
@@ -124,7 +133,7 @@ pub(crate) fn binding_note_and_options(
         }
     };
     let mut note = None;
-    let mut asked = BindingOptions::default();
+    let mut asked = Asked::default();
     for pair in table.pairs::<Value, Value>() {
         let (key, value) = pair?;
         let key = match &key {

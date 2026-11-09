@@ -6,6 +6,7 @@ pub(crate) mod convert;
 mod deadline;
 pub(crate) mod dispatch;
 mod files;
+mod keep;
 mod layouts;
 mod load;
 mod motion;
@@ -15,8 +16,10 @@ pub(crate) mod to_wire;
 
 pub(crate) use api::*;
 pub(crate) use bindings::*;
+pub(crate) use convert::describe_value;
 pub(crate) use deadline::*;
 pub(crate) use files::*;
+pub(crate) use keep::*;
 pub(crate) use layouts::*;
 pub(crate) use load::{config_path, stores_of, user_config_dir};
 pub(crate) use motion::*;

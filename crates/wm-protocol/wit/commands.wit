@@ -62,7 +62,8 @@ interface commands {
         pivot: tuple<f32, f32>,
         motion: motion,
         /// A motion of its own for each of `x`, `y`, `size`, `opacity` and
-        /// `client-opacity`, those not named moving by `motion`.
+        /// `client_opacity` (`present::MOTIONS`), those not named moving by
+        /// `motion`.
         channels: list<tuple<string, motion>>,
     }
 

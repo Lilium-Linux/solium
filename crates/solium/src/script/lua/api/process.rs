@@ -55,7 +55,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 other => {
                     return Err(mlua::Error::runtime(format!(
                         "sol.lock_peek takes a number from 0 to 1, or false, not {}",
-                        describe(&other)
+                        describe_value(&other)
                     )));
                 }
             };
@@ -259,7 +259,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                             Some(solium_wm_protocol::Reply::Store(saved)) => saved,
                             _ => None,
                         };
-                    let loaded = saved.as_deref().and_then(crate::json::Json::parse);
+                    let loaded = saved.as_deref().and_then(solium_json::Json::parse);
                     if let Some(loaded) = &loaded {
                         // What is already saved, so it is not sent back
                         // unchanged.

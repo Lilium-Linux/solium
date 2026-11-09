@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::convert::describe_value;
 use crate::script::lua::*;
 
 /// Ids for `sol.run{}`'s runs and for timers, counting up across reloads,

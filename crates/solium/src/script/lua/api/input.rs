@@ -196,7 +196,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Err(mlua::Error::runtime(format!("sol.press: {id} {why}")));
             }
             with_pending(lua, |pending| {
-                let cause = to_wire::focus_cause(pending.source);
+                let cause = pending.source;
                 pending.push(solium_wm_protocol::Command::Press((id, press, cause)));
             })
         })?,

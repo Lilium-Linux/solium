@@ -3136,7 +3136,9 @@ fn the_focus_event_says_what_moved_the_keyboard() {
             .commands
             .iter()
             .filter_map(|command| match command {
-                Command::Focus { id, source, .. } => Some((*id, source.name())),
+                Command::Focus { id, source, .. } => {
+                    Some((*id, crate::wm::convert::focus_cause(*source).name()))
+                }
                 _ => None,
             })
             .collect()

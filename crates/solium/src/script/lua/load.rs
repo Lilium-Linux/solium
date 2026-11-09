@@ -8,7 +8,6 @@ use mlua::{Lua, Table, Value};
 use solium_wm_protocol::Answer;
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Where the configuration is: `SOLIUM_LUA_INIT` when it is set, else the
 /// user's own `init.lua`, else the one in `shipped`. The user's file wins,
@@ -118,7 +117,7 @@ impl Host {
     /// per key path; a store of more than 65536 values is not saved at all.
     /// Rust only, so it runs between dispatches: no Lua is called.
     /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
-    pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
+    pub(crate) fn stores(&self) -> Vec<(String, solium_json::Json)> {
         stores_of(&self.lua)
     }
 
@@ -307,7 +306,7 @@ impl Host {
 
 /// The stores as they would be saved: each `sol.store` table as the plain
 /// data it holds, by name.
-pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, crate::json::Json)> {
+pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, solium_json::Json)> {
     let mut out = Vec::new();
     if let Ok(stores) = lua
         .globals()

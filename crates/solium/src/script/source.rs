@@ -9,7 +9,6 @@
 pub(crate) const FILES: &[(&str, &str)] = &[
     ("command.rs", include_str!("command.rs")),
     ("doc.rs", include_str!("doc.rs")),
-    ("keep.rs", include_str!("keep.rs")),
     ("lua/convert.rs", include_str!("lua/convert.rs")),
     ("lua/api/bindings.rs", include_str!("lua/api/bindings.rs")),
     ("lua/api/input.rs", include_str!("lua/api/input.rs")),
@@ -25,6 +24,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("lua/bindings.rs", include_str!("lua/bindings.rs")),
     ("lua/deadline.rs", include_str!("lua/deadline.rs")),
     ("lua/files.rs", include_str!("lua/files.rs")),
+    ("lua/keep.rs", include_str!("lua/keep.rs")),
     ("lua/layouts.rs", include_str!("lua/layouts.rs")),
     ("lua/motion.rs", include_str!("lua/motion.rs")),
     ("lua/pending.rs", include_str!("lua/pending.rs")),

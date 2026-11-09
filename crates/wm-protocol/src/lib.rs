@@ -27,6 +27,7 @@ pub mod combo;
 pub mod frame;
 pub mod lock;
 pub mod mirror;
+pub mod present;
 pub mod store;
 pub mod touch;
 mod wire;

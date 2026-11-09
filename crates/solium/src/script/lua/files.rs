@@ -2,9 +2,8 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::json::Json;
-use crate::script::lua::convert::describe_value;
 use crate::script::lua::*;
+use solium_json::Json;
 
 /// Ids for reads, writes and watches (#473), counting up across reloads as
 /// `RUNS` and `TIMERS` do.
@@ -95,8 +94,8 @@ pub(crate) struct StoreWarnings(pub(crate) std::collections::HashSet<String>);
 /// filled key by key, so a default added since the file was saved is
 /// still there. A list is taken whole.
 /// `tests::a_store_takes_the_files_keys_and_keeps_the_defaults_it_lacks`.
-pub(crate) fn fill_store(lua: &Lua, table: &Table, found: &crate::json::Json) -> mlua::Result<()> {
-    use crate::json::Json;
+pub(crate) fn fill_store(lua: &Lua, table: &Table, found: &solium_json::Json) -> mlua::Result<()> {
+    use solium_json::Json;
     match found {
         Json::Object(fields) => {
             for (key, value) in fields {

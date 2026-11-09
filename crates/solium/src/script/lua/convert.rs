@@ -2,9 +2,8 @@
 
 use mlua::{IntoLua, Lua, Table, Value};
 
-use crate::script::Kept;
+use crate::script::lua::Kept;
 use crate::script::lua::*;
-use crate::script::*;
 
 /// A rectangle as a Lua table: `{ x, y, w, h }`.
 pub(crate) fn rect_table(rect: &solium_wm_protocol::Rect, lua: &Lua) -> mlua::Result<Table> {
@@ -122,7 +121,7 @@ impl Kept {
                 }
                 let mut pairs = Vec::new();
                 for (key, value) in table.pairs::<Value, Value>().flatten() {
-                    let named = format!("{where_it_is}.{}", describe(&key));
+                    let named = format!("{where_it_is}.{}", describe_value(&key));
                     let (Some(key), Some(value)) = (
                         Self::read(&key, depth + 1, &named),
                         Self::read(&value, depth + 1, &named),

@@ -36,7 +36,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let combo = normalise_combo(&combo);
                 bindings.set(combo.clone(), handler)?;
                 let options: Table = sol.get("_binding_options")?;
-                if asked == BindingOptions::default() {
+                if asked == Asked::default() {
                     options.set(combo.clone(), Value::Nil)?;
                 } else {
                     let table = lua.create_table()?;

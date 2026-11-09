@@ -7,7 +7,7 @@
 
 use solium_wm_protocol as wire;
 
-use crate::script::lua::{Ask, to_wire};
+use crate::script::lua::Ask;
 use crate::script::*;
 use crate::wm::Scripts;
 
@@ -81,7 +81,7 @@ impl Scripts {
     ) -> Outcome {
         self.send(
             snapshot,
-            wire::Event::Focused((id, to_wire::focus_cause(source), changed)),
+            wire::Event::Focused((id, crate::wm::convert::focus_cause(source), changed)),
         )
     }
 

@@ -642,6 +642,26 @@ fn warp(warp: wire::Warp) -> Result<crate::script::Warp, String> {
     })
 }
 
+/// What moved the keyboard, as the protocol says it.
+pub(crate) const fn focus_cause(source: crate::script::FocusSource) -> wire::FocusCause {
+    use crate::script::FocusSource as F;
+    match source {
+        F::Binding => wire::FocusCause::Binding,
+        F::Direction => wire::FocusCause::Direction,
+        F::Move => wire::FocusCause::Move,
+        F::Click => wire::FocusCause::Click,
+        F::Scroll => wire::FocusCause::Scroll,
+        F::Drop => wire::FocusCause::Drop,
+        F::Touch => wire::FocusCause::Touch,
+        F::Hover => wire::FocusCause::Hover,
+        F::Surface => wire::FocusCause::Surface,
+        F::Open => wire::FocusCause::Open,
+        F::Activate => wire::FocusCause::Activate,
+        F::Settle => wire::FocusCause::Settle,
+        F::Script => wire::FocusCause::Script,
+    }
+}
+
 fn focus_source(cause: wire::FocusCause) -> crate::script::FocusSource {
     use crate::script::FocusSource as F;
     match cause {
@@ -716,6 +736,21 @@ pub(crate) fn resize_edge(
         "bottom_right" => ResizeEdge::BottomRight,
         _ => return None,
     })
+}
+
+/// The deform `sol.present(id, { deform = <lua> })` carries, for a state
+/// test to apply as the command would.
+#[cfg(test)]
+pub(crate) fn deform_for_test(lua: &str) -> crate::script::DeformSpec {
+    let state = mlua::Lua::new();
+    let options: mlua::Table = state
+        .load(format!("return {{ deform = {lua} }}"))
+        .eval()
+        .expect("the test's deform");
+    let asked = crate::script::lua::deform_from(&options)
+        .expect("a deform")
+        .expect("a deform given");
+    deform(asked).expect("the compositor reads it")
 }
 
 #[cfg(test)]

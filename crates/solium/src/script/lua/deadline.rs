@@ -204,7 +204,7 @@ pub(crate) fn call_deciders(
     lua: &Lua,
     event: &str,
     args: impl mlua::IntoLuaMulti + Clone,
-) -> mlua::Result<Option<crate::json::Json>> {
+) -> mlua::Result<Option<solium_json::Json>> {
     let sol: Table = lua.globals().get("sol")?;
     let handlers: Table = sol.get("_handlers")?;
     let Value::Table(listeners) = handlers.get::<Value>(event)? else {
@@ -217,7 +217,7 @@ pub(crate) fn call_deciders(
         };
         start_clock(lua);
         match listener.call::<Value>(args.clone()) {
-            Ok(value @ Value::Table(_)) => return crate::json::Json::from_lua(&value),
+            Ok(value @ Value::Table(_)) => return solium_json::Json::from_lua(&value),
             Ok(_) => {}
             Err(err) if err.to_string().contains(STOPPED) => {
                 let _ = strike(lua, &strikes, &listener, event, &err)?;
