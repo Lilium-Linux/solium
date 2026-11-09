@@ -49642,7 +49642,7 @@ sol.bind("super+y", function() sol.unminimize(last) end)
         );
 
         // And it is a retry rather than one reprieve: another frame, and
-        // the request still does not go out.
+        // no second request goes out.
         state.clock.advance(Duration::from_millis(100));
         let later = state.clock.now();
         assert!(
@@ -49657,8 +49657,9 @@ sol.bind("super+y", function() sol.unminimize(last) end)
             &mut queue,
             &mut client,
         );
-        assert!(
-            client.closes.is_empty(),
+        assert_eq!(
+            client.closes.len(),
+            1,
             "the reprieve lasts as long as the give-back is owed, rather \
              than for one frame"
         );
