@@ -3,7 +3,6 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::*;
 use solium_layout::{Rect as Slot, Settings};
 
 /// The work area a layout call was given.

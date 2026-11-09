@@ -3,7 +3,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -59,10 +58,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 entry.set("focused", window.focused)?;
                 entry.set("monitor", window.monitor.clone())?;
                 entry.set("modal", window.modal)?;
-                entry.set(
-                    "parent",
-                    lua::convert::parentage_value(&window.parent, lua)?,
-                )?;
+                entry.set("parent", convert::parentage_value(&window.parent, lua)?)?;
                 entry.set("leaving", window.leaving)?;
                 entry.set("minimized", window.minimized)?;
                 entry.set("above", window.above)?;
@@ -104,7 +100,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "apps",
         lua.create_function(|lua, ()| match mirror(lua).services.get("apps") {
-            Some(view) => lua::convert::doc_to_lua(view, lua),
+            Some(view) => convert::doc_to_lua(view, lua),
             None => Ok(Value::Table(lua.create_table()?)),
         })?,
     )?;

@@ -3,7 +3,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -19,14 +18,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
                 return match mirror(lua).services.get("notifications") {
-                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    Some(view) => convert::doc_to_lua(view, lua),
                     None => Ok(Value::Nil),
                 };
             };
             super::settings::configure(
                 lua,
                 "notifications",
-                lua::convert::wire_section(Some(options))?,
+                convert::wire_section(Some(options))?,
             )?;
             Ok(Value::Nil)
         })?,
@@ -44,11 +43,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
                 return match mirror(lua).services.get("tray") {
-                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    Some(view) => convert::doc_to_lua(view, lua),
                     None => Ok(Value::Nil),
                 };
             };
-            super::settings::configure(lua, "tray", lua::convert::wire_section(Some(options))?)?;
+            super::settings::configure(lua, "tray", convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -64,11 +63,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, options: Option<mlua::Table>| -> mlua::Result<Value> {
             let Some(options) = options else {
                 return match mirror(lua).services.get("media") {
-                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    Some(view) => convert::doc_to_lua(view, lua),
                     None => Ok(Value::Nil),
                 };
             };
-            super::settings::configure(lua, "media", lua::convert::wire_section(Some(options))?)?;
+            super::settings::configure(lua, "media", convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;
@@ -87,11 +86,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let Some(options) = options else {
                 super::settings::configure(lua, "audio", vec![solium_wm_protocol::DocNode::Nil])?;
                 return match mirror(lua).services.get("audio") {
-                    Some(view) => lua::convert::doc_to_lua(view, lua),
+                    Some(view) => convert::doc_to_lua(view, lua),
                     None => Ok(Value::Nil),
                 };
             };
-            super::settings::configure(lua, "audio", lua::convert::wire_section(Some(options))?)?;
+            super::settings::configure(lua, "audio", convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;

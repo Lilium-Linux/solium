@@ -6,7 +6,6 @@ use std::time::Duration;
 use mlua::{Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 use solium_animation::Curve;
 use solium_animation::mat4::Mat4;
 
@@ -384,7 +383,7 @@ pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<solium_wm_prot
         params.push((key, value));
     }
     params.sort_by(|a, b| a.0.cmp(&b.0));
-    let params = lua::convert::wire_doc_of_fields(&params)?;
+    let params = convert::wire_doc_of_fields(&params)?;
     Ok(Some(solium_wm_protocol::Deform {
         effect,
         params,

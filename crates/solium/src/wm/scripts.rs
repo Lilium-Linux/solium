@@ -174,7 +174,7 @@ impl Scripts {
 
     /// Every binding the window manager declared, in its canonical
     /// spelling, sorted.
-    pub(crate) fn bindings(&self) -> Vec<Binding> {
+    pub(crate) fn bindings(&self) -> Vec<wire::Binding> {
         self.declared.bindings.clone()
     }
 
@@ -195,7 +195,7 @@ impl Scripts {
 
     /// The declared binding for `combo`. The key filter asks on every key,
     /// so the sorted list is searched rather than walked.
-    fn binding(&self, combo: &str) -> Option<&Binding> {
+    fn binding(&self, combo: &str) -> Option<&wire::Binding> {
         let combo = normalise_combo(combo);
         let bindings = &self.declared.bindings;
         bindings
@@ -208,13 +208,13 @@ impl Scripts {
     /// said about each. Reported apart from [`Self::bindings`] because a key
     /// missing on purpose looks, in a list of what survived, identical to
     /// one that was never there.
-    pub(crate) fn unbound(&self) -> Vec<Binding> {
+    pub(crate) fn unbound(&self) -> Vec<wire::Binding> {
         self.declared.unbound.clone()
     }
 
     /// Settings the configuration wrote that its defaults do not define,
     /// sorted by key, because the only reader is a person checking a file.
-    pub(crate) fn unknown_settings(&self) -> Vec<UnknownSetting> {
+    pub(crate) fn unknown_settings(&self) -> Vec<wire::UnknownSetting> {
         self.declared.unknown.clone()
     }
 

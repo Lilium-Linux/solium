@@ -3,7 +3,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -16,7 +15,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let Some(rows) = options else {
                 let monitors = lua.create_table()?;
                 for (index, monitor) in mirror(lua).monitors.iter().enumerate() {
-                    let entry = lua::convert::rect_table(&monitor.area, lua)?;
+                    let entry = convert::rect_table(&monitor.area, lua)?;
                     entry.set("name", monitor.name.clone())?;
                     entry.set("scale", monitor.scale)?;
                     entry.set("focused", monitor.focused)?;
@@ -29,7 +28,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     // The whole monitor as well as the usable part: a
                     // wallpaper and a fullscreen window want the one a bar has
                     // not taken a bite out of.
-                    entry.set("whole", lua::convert::rect_table(&monitor.whole, lua)?)?;
+                    entry.set("whole", convert::rect_table(&monitor.whole, lua)?)?;
                     monitors.set(index + 1, entry)?;
                 }
                 return Ok(Value::Table(monitors));
@@ -38,7 +37,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             super::settings::configure(
                 lua,
                 "monitors",
-                lua::convert::wire_doc_of(&Value::Table(rows))?,
+                convert::wire_doc_of(&Value::Table(rows))?,
             )?;
             Ok(Value::Nil)
         })?,
@@ -101,7 +100,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         w: 0.0,
                         h: 0.0,
                     });
-            lua::convert::rect_table(&area, lua)
+            convert::rect_table(&area, lua)
         })?,
     )?;
 
@@ -145,7 +144,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             super::settings::configure(
                 lua,
                 "workspaces",
-                lua::convert::wire_doc_of(&Value::Table(declared))?,
+                convert::wire_doc_of(&Value::Table(declared))?,
             )
         })?,
     )?;

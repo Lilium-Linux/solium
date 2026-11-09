@@ -3,7 +3,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Hand a settings section over as a document, for the compositor to read
 /// as its configuration reference documents it.
@@ -30,7 +29,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "effects",
         lua.create_function(|lua, options: Option<Table>| {
-            configure(lua, "effects", lua::convert::wire_section(options)?)
+            configure(lua, "effects", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -40,7 +39,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "startup",
         lua.create_function(|lua, options: Option<Table>| {
-            configure(lua, "startup", lua::convert::wire_section(options)?)
+            configure(lua, "startup", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -56,7 +55,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "idle",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "idle", lua::convert::wire_section(options)?)
+            configure(lua, "idle", convert::wire_section(options)?)
         })?,
     )?;
     // Automatic reload (#223): `config.reload`, handed over by `init.lua`.
@@ -72,7 +71,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "auto_reload",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "auto_reload", lua::convert::wire_section(options)?)
+            configure(lua, "auto_reload", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -101,7 +100,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "input",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "input", lua::convert::wire_section(options)?)
+            configure(lua, "input", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -117,7 +116,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "lock",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "lock", lua::convert::wire_section(options)?)
+            configure(lua, "lock", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -131,7 +130,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "layer_shell",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "layer_shell", lua::convert::wire_section(options)?)
+            configure(lua, "layer_shell", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -145,7 +144,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "frames",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "frames", lua::convert::wire_section(options)?)
+            configure(lua, "frames", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -158,7 +157,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "toplevels",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "toplevels", lua::convert::wire_section(options)?)
+            configure(lua, "toplevels", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -172,7 +171,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "x11",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "x11", lua::convert::wire_section(options)?)
+            configure(lua, "x11", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -188,7 +187,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "focus_mode",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "focus_mode", lua::convert::wire_section(options)?)
+            configure(lua, "focus_mode", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -208,7 +207,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "pane_build",
         lua.create_function(|lua, millis: Value| {
-            configure(lua, "pane_build", lua::convert::wire_doc_of(&millis)?)
+            configure(lua, "pane_build", convert::wire_doc_of(&millis)?)
         })?,
     )?;
 
@@ -289,7 +288,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             configure(
                 lua,
                 "loading",
-                lua::convert::wire_doc_of(&Value::Table(options))?,
+                convert::wire_doc_of(&Value::Table(options))?,
             )
         })?,
     )?;
@@ -306,7 +305,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "client_sizes",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "client_sizes", lua::convert::wire_section(options)?)
+            configure(lua, "client_sizes", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -323,7 +322,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "resize",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "resize", lua::convert::wire_section(options)?)
+            configure(lua, "resize", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -335,7 +334,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "fullscreen",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "fullscreen", lua::convert::wire_section(options)?)
+            configure(lua, "fullscreen", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -368,7 +367,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "cursor_theme",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "cursor_theme", lua::convert::wire_section(options)?)
+            configure(lua, "cursor_theme", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -382,7 +381,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "qml",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "qml", lua::convert::wire_section(options)?)
+            configure(lua, "qml", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -395,7 +394,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "session",
         lua.create_function(|lua, options: Option<mlua::Table>| {
-            configure(lua, "session", lua::convert::wire_section(options)?)
+            configure(lua, "session", convert::wire_section(options)?)
         })?,
     )?;
 
@@ -430,7 +429,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             lua.set_app_data(settings);
             // How often the stores are saved is the compositor's to keep:
             // it asks for them on its own clock.
-            configure(lua, "files", lua::convert::wire_section(options)?)
+            configure(lua, "files", convert::wire_section(options)?)
         })?,
     )?;
 

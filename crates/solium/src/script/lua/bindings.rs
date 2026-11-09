@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::*;
+use crate::script::lua::*;
 
 /// The buttons `sol.press` names, with their evdev codes: `side` is
 /// `BTN_SIDE`, a mouse's "back", and `extra` is `BTN_EXTRA`, its "forward".

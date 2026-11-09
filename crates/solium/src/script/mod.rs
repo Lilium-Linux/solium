@@ -25,8 +25,6 @@
 //! stops a script calling back into the compositor mid-dispatch and deadlocking
 //! on the seat.
 
-use anyhow::{Result, anyhow};
-
 mod command;
 pub(crate) mod doc;
 pub(crate) mod lua;
@@ -38,23 +36,6 @@ pub(crate) use doc::{Doc, Table as DocTable};
 pub(crate) use types::*;
 
 pub(crate) use crate::wm::Scripts;
-
-/// Whether a program can be found on `PATH`.
-///
-/// A plain lookup rather than a spawn: asking costs nothing, and finding out by
-/// running it means finding out *after* something has already failed. A desktop
-/// cannot assume any particular terminal or editor is installed, and a script
-/// that picks the first one that *is* beats one that silently does nothing on a
-/// machine set up differently from the author's.
-pub(crate) fn which(program: &str) -> bool {
-    if program.contains('/') {
-        return std::path::Path::new(program).is_file();
-    }
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-}
 
 pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
 

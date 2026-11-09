@@ -4,7 +4,7 @@
 use mlua::{Lua, Value};
 use solium_wm_protocol::mirror::Mirror;
 
-use crate::script::*;
+use crate::script::lua::*;
 
 /// The queue a script writes into. Lives in Lua's app data for the length of a
 /// dispatch, so no compositor state is borrowed while Lua runs.

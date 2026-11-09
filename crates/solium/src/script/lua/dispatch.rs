@@ -6,7 +6,6 @@ use mlua::{Lua, Table, Value};
 use solium_wm_protocol as wire;
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// What a dispatch adds to an answer: its commands, then whether
 /// a mode holds input and the status line, as the commands of those names,

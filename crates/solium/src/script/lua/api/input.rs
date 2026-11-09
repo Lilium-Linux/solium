@@ -3,7 +3,6 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::lua::*;
-use crate::script::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -65,11 +64,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(Value::Table(table));
             };
 
-            super::settings::configure(
-                lua,
-                "keyboard",
-                lua::convert::wire_section(Some(options))?,
-            )?;
+            super::settings::configure(lua, "keyboard", convert::wire_section(Some(options))?)?;
             Ok(Value::Nil)
         })?,
     )?;

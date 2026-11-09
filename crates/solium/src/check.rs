@@ -1047,7 +1047,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         .map(|dir| dir.join(format!("{name}.portal")))
                         .find(|path| path.is_file())
                 },
-                crate::script::which("slurp"),
+                crate::launch::which("slurp"),
             );
         }
     }

@@ -3,8 +3,6 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::*;
-
 /// How long one handler may run before it is stopped (03 §3.3.3, Ruling 16).
 /// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 /// `tests::a_binding_that_never_returns_is_stopped`.
@@ -234,7 +232,7 @@ pub(crate) fn call_deciders(
 /// directly; the message is what matters here anyway, and a Lua error already
 /// carries its own traceback in it.
 pub(crate) fn failed(context: &'static str) -> impl FnOnce(mlua::Error) -> anyhow::Error {
-    move |err| anyhow!("{context}: {err}")
+    move |err| anyhow::anyhow!("{context}: {err}")
 }
 
 /// Call a run's or a timer's function under the handler deadline. One

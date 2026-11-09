@@ -4,9 +4,10 @@
 
 use solium_wm_protocol as wire;
 
-use crate::script::*;
 use solium_animation::Curve;
 use solium_animation::mat4::Mat4;
+
+use crate::script::lua::AnimationSpec;
 
 pub(crate) fn easing(curve: Curve) -> wire::Easing {
     match curve {

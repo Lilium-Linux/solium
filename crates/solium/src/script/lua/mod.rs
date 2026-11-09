@@ -26,6 +26,11 @@ pub(crate) use motion::*;
 pub(crate) use pending::*;
 pub(crate) use runs::*;
 
+pub(crate) use solium_animation::AnimationSpec;
+pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
+pub(crate) use solium_wm_protocol::present::MOTIONS as PRESENT_MOTIONS;
+pub(crate) use solium_wm_protocol::{Binding, UnknownSetting};
+
 /// The window manager the compositor ships: the Lua runtime and the
 /// configuration loaded into it, answering the compositor's batches in the
 /// protocol's terms.
@@ -47,4 +52,21 @@ pub(crate) struct Host {
 pub(crate) struct Setup {
     pub(crate) shipped: std::path::PathBuf,
     pub(crate) debug: bool,
+}
+
+/// Whether a program can be found on `PATH`.
+///
+/// A plain lookup rather than a spawn: asking costs nothing, and finding out by
+/// running it means finding out *after* something has already failed. A desktop
+/// cannot assume any particular terminal or editor is installed, and a script
+/// that picks the first one that *is* beats one that silently does nothing on a
+/// machine set up differently from the author's.
+pub(crate) fn which(program: &str) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }

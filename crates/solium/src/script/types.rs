@@ -367,12 +367,6 @@ pub(crate) enum Press {
     Keys(Vec<smithay::input::keyboard::Keysym>),
 }
 
-/// A key binding as the window manager declares it, and as `solium --check`
-/// reports it: the protocol's record. The note is `None` for the shipped
-/// bindings, which is why `--check` stays a plain list of combinations until
-/// a configuration has something to add.
-pub(crate) use solium_wm_protocol::Binding;
-
 /// What a binding asked for besides its handler: the table form of
 /// `sol.bind`'s third argument (#224). Both are off unless asked for, which is
 /// what every binding was before there was a table.
@@ -389,11 +383,6 @@ pub(crate) struct BindingOptions {
     /// `state::tests::real_client::lock_focus::shortcuts_inhibit`.
     pub(crate) inhibited: bool,
 }
-
-/// A setting a configuration wrote that nothing reads, and the nearest
-/// key that does exist when one is close enough to name: the protocol's
-/// record.
-pub(crate) use solium_wm_protocol::UnknownSetting;
 
 #[cfg(test)]
 impl WindowInfo {
