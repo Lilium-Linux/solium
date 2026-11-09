@@ -26,6 +26,10 @@ sol.startup(config.startup)
 -- Which effects go where. See config.lua's `effects`.
 sol.effects(config.effects)
 sol.loading(config.loading)
+-- How long an application asked to close has to answer before its window
+-- fades anyway (#231). An absent table keeps the default, for the reason
+-- `sol.resize` gives. See config.lua's `close`.
+sol.close_patience(config.close and config.close.patience)
 -- Reload automatically when a file this configuration loaded changes
 -- (#223). See `config.lua`.
 sol.auto_reload(config.reload)

@@ -1428,6 +1428,28 @@ local defaults = {
         fade = 180,
     },
 
+    -- Closing a window: the frame's button, `sol.close`, super+q.
+    close = {
+        -- How long an application has to answer before its window fades
+        -- anyway, in milliseconds. The application is asked first, and the
+        -- window stays as it is meanwhile:
+        --   * it goes -- the window fades from that moment, which for an
+        --     application that simply closes is the next frame or two;
+        --   * it asks inside its own window, as a terminal does with "are
+        --     you sure?" -- the window never fades at all, and stays where
+        --     it is with the question in it;
+        --   * it says nothing for this long -- the window fades as if it had
+        --     gone, and comes back a second later if it is still there.
+        -- 0 fades every window the moment you close it, and brings back the
+        -- ones that refuse, which is how every close behaved before #231.
+        -- X11 windows cannot say they have read the request, and always fade
+        -- at once.
+        -- `a_window_whose_application_asks_inside_it_is_never_faded`,
+        -- `a_window_whose_application_goes_fades_as_soon_as_it_has_gone` and
+        -- `a_window_whose_application_says_nothing_fades_when_the_patience_runs_out`.
+        patience = 100,
+    },
+
     -- Reload automatically when a file this configuration loaded changes
     -- (#223): the configuration directory itself, every Lua module
     -- `require` found in it, your pane styles, your loading scenes and your

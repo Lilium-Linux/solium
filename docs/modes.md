@@ -333,9 +333,9 @@ application with unsaved work puts up a dialog and stays. So:
 
 | event | sent | means |
 |---|---|---|
-| `closing(id)` | the moment a close is asked for -- the frame's button, `sol.close`, `super+q` -- as the window starts fading | reflow now, if you want to |
-| `close_landed(id)` | when the animation has played, the window has faded out, and the application has just been asked to go | reflow now, if you waited for the animation |
-| `refused(id)` | when the application declines -- it said nothing for a second, or answered with a dialog -- and the window is back on screen | put it back, if you took it out |
+| `closing(id)` | as a window you closed -- the frame's button, `sol.close`, `super+q` -- starts fading: once its application has not answered within `close.patience` | reflow now, if you want to |
+| `close_landed(id)` | when the animation has played and the window has faded out, its application asked to go and not gone yet | reflow now, if you waited for the animation |
+| `refused(id)` | when the application declines -- it answered with a dialog, drew its answer in the window, or said nothing for a second -- and the window is back on screen | put it back, if you took it out |
 | `close(id)` | when the window is gone | forget it |
 
 In that order. `close_landed` follows `closing` unless the application went,
@@ -343,6 +343,9 @@ or answered with a dialog, during the animation, and then exactly one of the
 other two follows, and **`refused` never follows `close`**: once a window has
 gone, nothing brings it back. A refused window is an ordinary window again,
 and closing it a second time starts over with a second `closing`. A window
+you closed whose application went within `close.patience` never started
+fading while it was here, so it gets `close` alone too, and one whose
+application answered inside the window gets nothing: no close played. A window
 whose application quit on its own -- `exit`, its own Quit, a crash -- was
 never asked, so it gets `close` and nothing before it; it still fades out
 where it stood, from what the application last showed -- in front of the

@@ -307,6 +307,12 @@ pub(crate) struct Solium {
     /// [`Self::settle_focus`].
     pub(crate) after_close: Vec<crate::successor::Successor>,
 
+    /// How long a Wayland application asked to close has to answer before its
+    /// window starts fading anyway: `config.close.patience`, handed over with
+    /// `sol.close_patience` (#231). Zero with no configuration, which fades at
+    /// once. See [`Self::close_pane`].
+    pub(crate) close_patience: std::time::Duration,
+
     /// The window that had the keyboard when it closed, and where it stood:
     /// what `after_close`'s words are asked about. Set where a closing window
     /// gives the keyboard up ([`Self::note_keyboard_left`]), taken by
@@ -1523,6 +1529,7 @@ impl Solium {
             published: crate::models::Published::default(),
             focus_history: Vec::new(),
             after_close: crate::successor::Successor::UNCONFIGURED.to_vec(),
+            close_patience: std::time::Duration::ZERO,
             keyboard_left: None,
             urgent: std::collections::HashSet::new(),
             workspaces: None,
@@ -2452,6 +2459,9 @@ impl Solium {
         // which damages nothing of its own either (#220).
         // `tests::real_client::follow::where_the_picture_lands_the_pointer_is_given_to_what_is_there`.
         animating |= self.settle_flight(now);
+        // A window whose application was asked to close and has not answered
+        // starts fading once `close.patience` has run out (#231).
+        animating |= self.settle_awaiting(now);
         // A window that has finished leaving is told to close; until then the
         // session counts as animating so the frames keep coming.
         animating |= self.settle_closing(now);
@@ -2461,6 +2471,9 @@ impl Solium {
         // until then the frames keep coming: nothing else asks for one while
         // it fades, since its client can no longer damage anything.
         animating |= self.settle_leaving(now);
+        // One asked to close whose client drew its answer instead comes back
+        // (#231), ahead of the deadline below.
+        animating |= self.settle_redrawn(now);
         // And one asked to close that is still here comes back.
         animating |= self.settle_refused(now);
         // What the frame's own tick changed in a scene, read one pass later

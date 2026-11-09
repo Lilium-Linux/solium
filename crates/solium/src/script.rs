@@ -808,6 +808,9 @@ pub(crate) enum Command {
     /// How long a pass may spend building the frames of a new pane style:
     /// `config.pane_build` (#226).
     PaneBuild(Duration),
+    /// How long a Wayland application asked to close has to answer before
+    /// its window fades anyway: `config.close.patience` (#231).
+    ClosePatience(Duration),
     /// Hand every pane's layers these values, merged into what they have.
     /// `decoration::tests::pane_values_merge_by_key_and_count_only_changes`.
     PaneValues(std::collections::BTreeMap<String, crate::json::Json>),
@@ -1124,6 +1127,7 @@ impl Command {
             }
             Self::Decoration { .. }
             | Self::PaneBuild(_)
+            | Self::ClosePatience(_)
             | Self::PaneValues(_)
             // What a frame shows, which is nothing over a lock.
             | Self::FrameValues { .. }
@@ -6224,6 +6228,35 @@ fn build_api(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // How long a Wayland application asked to close has to answer before its
+    // window fades anyway, in milliseconds (#231): `config.close.patience`,
+    // handed over by `init.lua`. Nil says nothing; anything but a number of 0
+    // or more is named in the log and changes nothing.
+    // `tests::sol_close_patience_hands_the_wait_over`.
+    sol.set(
+        "close_patience",
+        lua.create_function(|lua, millis: Value| {
+            let patience = match millis {
+                Value::Nil => return Ok(()),
+                Value::Integer(whole) => u64::try_from(whole).ok().map(Duration::from_millis),
+                Value::Number(part) if part.is_finite() && part >= 0.0 => {
+                    Some(Duration::from_secs_f64(part / 1000.0))
+                }
+                _ => None,
+            };
+            let Some(patience) = patience else {
+                tracing::warn!(
+                    ?millis,
+                    "close_patience is a number of milliseconds, 0 or more; keeping what it was"
+                );
+                return Ok(());
+            };
+            with_pending(lua, |pending| {
+                pending.commands.push(Command::ClosePatience(patience));
+            })
+        })?,
+    )?;
+
     // Values for every pane's layers, read there as one object, `values`: the
     // configuration's way to hand its own settings to the QML that draws by
     // them, whatever they are. Merged by key.
@@ -10011,6 +10044,50 @@ mod tests {
             }
             other => panic!("expected a present command, got {other:?}"),
         }
+    }
+
+    /// `sol.close_patience` hands `config.close.patience` over as a duration,
+    /// and a value that is no time at all changes nothing (#231).
+    #[test]
+    fn sol_close_patience_hands_the_wait_over() {
+        let directory = std::env::temp_dir().join("solium-script-test-close-patience");
+        let _ = std::fs::create_dir_all(&directory);
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"
+            sol.bind("Super+A", function() sol.close_patience(100) end)
+            sol.bind("Super+B", function() sol.close_patience(0) end)
+            sol.bind("Super+C", function() sol.close_patience(-1) end)
+            sol.bind("Super+D", function() sol.close_patience("soon") end)
+            sol.bind("Super+E", function() sol.close_patience(nil) end)
+            "#,
+        )
+        .expect("writing the test script");
+
+        let mut scripts = Scripts::load(&config).expect("loading the test script");
+        let mut patience = |combo: &str| {
+            let outcome = scripts.key(combo, empty_snapshot());
+            assert!(outcome.handled, "{combo} was not handled");
+            match outcome.commands.as_slice() {
+                [Command::ClosePatience(patience)] => Some(*patience),
+                [] => None,
+                other => panic!("expected at most a patience from {combo}, got {other:?}"),
+            }
+        };
+        assert_eq!(patience("super+a"), Some(Duration::from_millis(100)));
+        assert_eq!(
+            patience("super+b"),
+            Some(Duration::ZERO),
+            "none is a setting"
+        );
+        assert_eq!(
+            patience("super+c"),
+            None,
+            "a time before now is no patience"
+        );
+        assert_eq!(patience("super+d"), None, "nor is a word");
+        assert_eq!(patience("super+e"), None, "and nil says nothing");
     }
 
     /// `sol.pane_build` hands `config.pane_build` over as a duration, whole

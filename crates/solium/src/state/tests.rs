@@ -3446,6 +3446,9 @@ mod real_client {
         /// request going out, so the only honest place to count is the end
         /// that receives them.
         closes: Vec<wayland_client::backend::ObjectId>,
+        /// Whether this client leaves a ping unanswered: one that is busy,
+        /// or hung, and has not read what it was sent (#231).
+        deaf: bool,
         /// The seat and its keyboard, bound so that a test can ask where
         /// typing *went* rather than where focus was set.
         ///
@@ -4143,7 +4146,25 @@ mod real_client {
     wayland_client::delegate_noop!(Client: ignore wl_surface::WlSurface);
     wayland_client::delegate_noop!(Client: ignore wl_shm::WlShm);
     wayland_client::delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
-    wayland_client::delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+    /// The client answers a ping, as every toolkit does for its application,
+    /// unless a test has made it [`Client::deaf`]. The pong is what tells the
+    /// compositor the close it sent ahead of the ping has been read (#231).
+    impl Dispatch<xdg_wm_base::XdgWmBase, ()> for Client {
+        fn event(
+            state: &mut Self,
+            wm_base: &xdg_wm_base::XdgWmBase,
+            event: xdg_wm_base::Event,
+            (): &(),
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            if let xdg_wm_base::Event::Ping { serial } = event
+                && !state.deaf
+            {
+                wm_base.pong(serial);
+            }
+        }
+    }
     wayland_client::delegate_noop!(Client: ignore ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
 
     /// See [`Client::blur_capabilities`].
@@ -28834,10 +28855,12 @@ end
                 desk.state.close_pane(dying);
                 desk.pump();
 
+                // Asked as the fade began (#231), and it has answered
+                // nothing yet.
                 assert!(
-                    desk.client.closes.is_empty() && desk.state.panes.get(dying).is_some(),
-                    "{layout}: the premise -- the client has not even been asked, so \
-                     everything below happened before it could have gone"
+                    desk.client.closes.len() == 1 && desk.state.panes.get(dying).is_some(),
+                    "{layout}: the premise -- the client has only just been asked and \
+                     is still here, so everything below happened before it went"
                 );
                 assert_eq!(
                     desk.events(),
@@ -28980,6 +29003,334 @@ end
                      {landed:?}, placed at {slot:?}"
                 );
             }
+        }
+
+        /// The close's request has gone out and the client has read it:
+        /// its pong is back. Returns the instant it was asked at.
+        fn read(desk: &mut Desk) -> Duration {
+            let asked = desk.ask();
+            // `ask`'s round trip delivered the ping; this one brings the
+            // pong back.
+            desk.pump();
+            asked
+        }
+
+        /// A frame at `after` past now: the clock moves, and the whole of
+        /// `settle` runs, as on a frame.
+        fn frame(desk: &mut Desk, after: Duration) -> Duration {
+            desk.state.clock.advance(after);
+            let now = desk.state.clock.now();
+            desk.state.settle(now);
+            desk.pump();
+            now
+        }
+
+        /// **A client that answers a close by drawing in its own window
+        /// has refused, and gets the window back without the grace
+        /// (#231).**
+        ///
+        /// kitty with a program running asks "are you sure?" inside the
+        /// window being closed. No new window appears, so the dialog rule
+        /// never fired, and the window stayed invisible for the whole
+        /// second of `GRACE` with its question drawn where nobody could
+        /// read it.
+        #[test]
+        fn a_client_that_redraws_after_reading_a_close_gets_its_window_back_early() {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            let opened = desk.open_surface();
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let asked = read(&mut desk);
+            assert_eq!(desk.client.closes.len(), 1, "the premise: it was asked");
+            // The prompt, drawn in the window that was asked to close.
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+            let back = frame(&mut desk, Duration::from_millis(200));
+
+            assert!(
+                back - asked < Duration::from_millis(500),
+                "the premise: well inside the grace"
+            );
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,refused {id}"),
+                "a window whose client drew its answer was not given back"
+            );
+            assert!(
+                !desk.state.panes.get(opened.pane).is_some_and(Pane::leaving),
+                "the window is still on its way out"
+            );
+            let landed = drawn_now(&desk.state, opened.pane, back + Duration::from_millis(400));
+            assert!(
+                (landed.opacity - 1.0).abs() < f32::EPSILON,
+                "the window did not fade back in: {landed:?}"
+            );
+        }
+
+        /// A desk whose compositor waits `patience` for an answer to a
+        /// close, as the shipped configuration's does, with one window
+        /// open and the recorder listening.
+        fn patient(patience: u64) -> (Desk, Opened) {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            desk.state.close_patience = Duration::from_millis(patience);
+            let opened = desk.open_surface();
+            // Past its opening, so the only fade there could be is a close's.
+            frame(&mut desk, Duration::from_secs(1));
+            (desk, opened)
+        }
+
+        /// **A window whose application asks "are you sure?" inside it is
+        /// never faded at all (#231).**
+        ///
+        /// The application is asked first, and its window stays as it is
+        /// while it answers. kitty reads the request and draws its prompt
+        /// in the same window: that is its answer, and the close is over
+        /// without the window having moved, dimmed or left the layout.
+        /// Nothing is told to the layout, because nothing happened.
+        #[test]
+        fn a_window_whose_application_asks_inside_it_is_never_faded() {
+            let (mut desk, opened) = patient(100);
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let pressed = desk.state.clock.now();
+            desk.pump();
+            assert_eq!(desk.client.closes.len(), 1, "the client was not asked");
+            // Its pong, and then its prompt.
+            desk.pump();
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+
+            for step in 0..40 {
+                let now = frame(&mut desk, Duration::from_millis(50));
+                let drawn = drawn_now(&desk.state, opened.pane, now);
+                assert!(
+                    (drawn.opacity - 1.0).abs() < f32::EPSILON,
+                    "the window was drawn at opacity {} {:?} after the close, on frame {step}",
+                    drawn.opacity,
+                    now - pressed
+                );
+            }
+            assert_eq!(
+                desk.events(),
+                format!("open {id}"),
+                "the layout was told about a close that never played"
+            );
+            assert!(
+                !desk.state.panes.get(opened.pane).is_some_and(Pane::leaving),
+                "the window is leaving"
+            );
+            assert_eq!(desk.client.closes.len(), 1, "it was asked again on its own");
+
+            // And the close is over: the next one asks again.
+            desk.state.close_pane(opened.pane);
+            desk.pump();
+            assert_eq!(
+                desk.client.closes.len(),
+                2,
+                "a window that kept its place cannot be asked to close again"
+            );
+        }
+
+        /// **A window whose application goes fades the moment it goes.**
+        ///
+        /// Being asked first costs an application that simply closes
+        /// nothing: its window fades from the frame its client went on,
+        /// well inside the patience, and the layout hears `close`.
+        #[test]
+        fn a_window_whose_application_goes_fades_as_soon_as_it_has_gone() {
+            let (mut desk, opened) = patient(100);
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            desk.pump();
+            assert_eq!(
+                desk.events(),
+                format!("open {id}"),
+                "the premise: nothing has faded while the application is asked"
+            );
+            opened.toplevel.destroy();
+            desk.pump();
+            let went = desk.state.clock.now();
+
+            assert_eq!(
+                desk.events(),
+                format!("open {id},close {id}*"),
+                "the layout did not hear the window go"
+            );
+            let fading = drawn_now(&desk.state, opened.pane, went + Duration::from_millis(80));
+            assert!(
+                fading.opacity > 0.0 && fading.opacity < 1.0,
+                "the window is not fading from the moment its application went: {fading:?}"
+            );
+            // And the patience running out later asks nothing of a window
+            // that has gone.
+            frame(&mut desk, Duration::from_millis(150));
+            assert_eq!(desk.events(), format!("open {id},close {id}*"));
+        }
+
+        /// **A window whose application says nothing fades when the
+        /// patience runs out, and `close.patience` is how long that is.**
+        ///
+        /// An application slow to quit, or hung, does not hold its window
+        /// on screen: after the patience the window fades as it always
+        /// has, and the grace that follows decides whether it comes back.
+        #[test]
+        fn a_window_whose_application_says_nothing_fades_when_the_patience_runs_out() {
+            for patience in [100, 300] {
+                let (mut desk, opened) = patient(patience);
+                let id = opened.pane.get();
+
+                desk.state.close_pane(opened.pane);
+                desk.pump();
+                desk.pump();
+                frame(&mut desk, Duration::from_millis(patience - 20));
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "{patience}: the window faded before the patience ran out"
+                );
+                frame(&mut desk, Duration::from_millis(40));
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},closing {id}*"),
+                    "{patience}: the window did not start fading when the patience ran out"
+                );
+                assert_eq!(
+                    desk.client.closes.len(),
+                    1,
+                    "{patience}: the fade asked the client a second time"
+                );
+            }
+        }
+
+        /// **The request goes out as the fade starts, so a window whose
+        /// client refuses turns round before it has vanished (#231).**
+        ///
+        /// Asked only once the fade had landed, a client could not answer
+        /// before its window was invisible, however fast it was: the
+        /// prompt always arrived to a window already gone. Asked at once,
+        /// its answer is in while the window is still on screen, and the
+        /// fade reverses from where it is.
+        #[test]
+        fn a_refusal_drawn_during_the_fade_turns_the_window_round_before_it_vanishes() {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            let opened = desk.open_surface();
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let began = desk.state.clock.now();
+            // The request, then the pong.
+            desk.pump();
+            assert_eq!(
+                desk.client.closes.len(),
+                1,
+                "the client was not asked as the fade started"
+            );
+            desk.pump();
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+            let back = frame(&mut desk, Duration::from_millis(120));
+
+            assert!(
+                back - began < present::CLOSING,
+                "the premise: the fade has not landed"
+            );
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,refused {id}"),
+                "the window was not given back during its fade"
+            );
+            let turned = drawn_now(&desk.state, opened.pane, back);
+            assert!(
+                turned.opacity > 0.05,
+                "the window had vanished before it turned round: {turned:?}"
+            );
+            // And the landing it never reached asks nothing more of it.
+            frame(&mut desk, Duration::from_millis(400));
+            assert_eq!(
+                desk.client.closes.len(),
+                1,
+                "a window that was given back was asked to close again"
+            );
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,refused {id}"),
+                "the landing of a close that was refused told the layout something"
+            );
+        }
+
+        /// **A frame from a client that has not read the close is not an
+        /// answer to it.**
+        ///
+        /// A terminal printing output, or a player on its next frame,
+        /// commits buffers that were on their way before the request
+        /// reached it. Only the pong says the request has been read, so a
+        /// client that has not answered the ping keeps the grace.
+        #[test]
+        fn a_redraw_from_a_client_that_has_not_read_the_close_is_not_a_refusal() {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            let opened = desk.open_surface();
+            let id = opened.pane.get();
+            desk.client.deaf = true;
+
+            desk.state.close_pane(opened.pane);
+            read(&mut desk);
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+            frame(&mut desk, Duration::from_millis(200));
+
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*"),
+                "a frame that was already on its way cancelled the close"
+            );
+            assert!(
+                desk.state.panes.get(opened.pane).is_some_and(Pane::leaving),
+                "the window stopped leaving"
+            );
+        }
+
+        /// **A client that draws one more frame and then goes has closed,
+        /// and is never shown again.**
+        ///
+        /// A client that tears itself down over a few frames -- a player,
+        /// a browser -- reads the close, draws once more and is gone a
+        /// moment later. The window stays away for that moment rather
+        /// than fading back in to vanish again.
+        #[test]
+        fn a_client_that_redraws_and_then_goes_is_not_shown_again() {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            let opened = desk.open_surface();
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let asked = read(&mut desk);
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+            let shortly = frame(&mut desk, Duration::from_millis(30));
+            assert!(
+                drawn_now(&desk.state, opened.pane, shortly).opacity.abs() < f32::EPSILON,
+                "the window was shown again {:?} after one more frame",
+                shortly - asked
+            );
+            opened.toplevel.destroy();
+            desk.pump();
+            frame(&mut desk, Duration::from_millis(200));
+            desk.state.space.refresh();
+            desk.state.sync_panes();
+
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,close {id}*"),
+                "a window that closed was given back on the way"
+            );
         }
 
         /// **A client that goes at its grace deadline is not refused after
@@ -49361,16 +49712,16 @@ sol.bind("super+y", function() sol.unminimize(last) end)
 
         state.close_pane(pane);
         // Inside `CLOSING`, which is where a file chooser arrives and is
-        // the state `settle_refused` cannot see: the request has not gone
-        // out, so there is no `asked_at` for it to be due on.
+        // the state `settle_refused` cannot see: the fade has not landed,
+        // so there is no `asked_at` for it to be due on.
         state.clock.advance(Duration::from_millis(50));
         assert!(
             state
                 .panes
                 .get(pane)
                 .is_some_and(|pane| pane.closing_at().is_some() && pane.asked_at().is_none()),
-            "the premise: the animation is playing and the request has not \
-             gone out, which is the only window in which this fault exists"
+            "the premise: the animation is playing and has not landed, \
+             which is the only window in which this fault exists"
         );
 
         // The busy frame. Nothing un-jams this, which is why it is taken
@@ -49392,7 +49743,8 @@ sol.bind("super+y", function() sol.unminimize(last) end)
              it back, so nothing below is about a dialog for this window"
         );
 
-        // Past the deadline the request would go out on.
+        // Past the landing, where a close nobody has answered starts its
+        // grace.
         state
             .clock
             .advance(present::CLOSING + Duration::from_millis(10));
@@ -49407,10 +49759,12 @@ sol.bind("super+y", function() sol.unminimize(last) end)
             &mut client,
         );
 
-        assert!(
-            client.closes.is_empty(),
+        // Once, as the fade began (#231): the request the dialog answers.
+        assert_eq!(
+            client.closes.len(),
+            1,
             "a client that answered a close with a dialog was asked to \
-             close anyway, on the frame its give-back was declined: the \
+             close again, on the frame its give-back was declined: the \
              parent is shut out from under its own prompt"
         );
         assert!(
@@ -49426,7 +49780,7 @@ sol.bind("super+y", function() sol.unminimize(last) end)
         );
 
         // And it is a retry rather than one reprieve: another frame, and
-        // the request still does not go out.
+        // no second request goes out.
         state.clock.advance(Duration::from_millis(100));
         let later = state.clock.now();
         assert!(
@@ -49441,8 +49795,9 @@ sol.bind("super+y", function() sol.unminimize(last) end)
             &mut queue,
             &mut client,
         );
-        assert!(
-            client.closes.is_empty(),
+        assert_eq!(
+            client.closes.len(),
+            1,
             "the reprieve lasts as long as the give-back is owed, rather \
              than for one frame"
         );
