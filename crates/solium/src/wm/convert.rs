@@ -661,6 +661,36 @@ fn focus_source(cause: wire::FocusCause) -> crate::script::FocusSource {
     }
 }
 
+/// A combination's keysyms, in the order they go down: its modifiers, as
+/// [`crate::script::normalise_combo`] orders them and as the left-hand keys, then its key.
+/// `None` for a combination with no key, or a key no keysym is called.
+pub(crate) fn combo_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard::Keysym>> {
+    use smithay::input::keyboard::{Keysym, xkb};
+    let canonical = crate::script::normalise_combo(combo);
+    let (modifiers, key) = canonical
+        .rsplit_once('+')
+        .unwrap_or(("", canonical.as_str()));
+    if key.is_empty() {
+        return None;
+    }
+    let mut keysyms: Vec<Keysym> = modifiers
+        .split('+')
+        .filter_map(|modifier| match modifier {
+            "ctrl" => Some(Keysym::Control_L),
+            "alt" => Some(Keysym::Alt_L),
+            "shift" => Some(Keysym::Shift_L),
+            "super" => Some(Keysym::Super_L),
+            _ => None,
+        })
+        .collect();
+    let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
+    if keysym == Keysym::NoSymbol {
+        return None;
+    }
+    keysyms.push(keysym);
+    Some(keysyms)
+}
+
 /// A key by its xkb name, exactly as xkb writes it.
 fn keysym(name: &str) -> Result<smithay::input::keyboard::Keysym, String> {
     use smithay::input::keyboard::{Keysym, xkb};

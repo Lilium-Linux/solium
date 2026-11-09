@@ -197,11 +197,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             }
             with_pending(lua, |pending| {
                 let cause = to_wire::focus_cause(pending.source);
-                pending.push(solium_wm_protocol::Command::Press((
-                    id,
-                    to_wire::press(press),
-                    cause,
-                )));
+                pending.push(solium_wm_protocol::Command::Press((id, press, cause)));
             })
         })?,
     )?;

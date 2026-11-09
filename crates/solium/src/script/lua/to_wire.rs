@@ -87,17 +87,6 @@ pub(crate) fn focus_cause(source: FocusSource) -> wire::FocusCause {
     }
 }
 
-pub(crate) fn press(press: Press) -> wire::Press {
-    match press {
-        Press::Button(button) => wire::Press::Button(button),
-        Press::Keys(keys) => wire::Press::Keys(
-            keys.into_iter()
-                .map(smithay::input::keyboard::xkb::keysym_get_name)
-                .collect(),
-        ),
-    }
-}
-
 /// An object's fields as JSON text.
 pub(crate) fn object(fields: &std::collections::BTreeMap<String, crate::json::Json>) -> String {
     crate::json::Json::Object(fields.clone()).render()

@@ -20,7 +20,7 @@ pub(crate) const PRESS_BUTTONS: [(&str, u32); 5] = [
 /// name, in any case. Anything else is an error, so a spec that would press
 /// nothing never looks like one that pressed something.
 /// `directions::sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach`.
-pub(crate) fn press_from(spec: &Table) -> mlua::Result<Press> {
+pub(crate) fn press_from(spec: &Table) -> mlua::Result<solium_wm_protocol::Press> {
     let refused = |why: String| {
         mlua::Error::runtime(format!(
             "sol.press: {why}; the spec is {{ button = \"left\"|\"right\"|\"middle\"|\"side\"|\"extra\" }} \
@@ -52,13 +52,13 @@ pub(crate) fn press_from(spec: &Table) -> mlua::Result<Press> {
             PRESS_BUTTONS
                 .iter()
                 .find(|(each, _)| *each == name)
-                .map(|(_, code)| Press::Button(*code))
+                .map(|(_, code)| solium_wm_protocol::Press::Button(*code))
                 .ok_or_else(|| refused(format!("no button is called `{name}`")))
         }
         (None, Some(Value::String(combo))) => {
             let combo = combo.to_string_lossy();
-            press_keysyms(&combo)
-                .map(Press::Keys)
+            press_names(&combo)
+                .map(solium_wm_protocol::Press::Keys)
                 .ok_or_else(|| refused(format!("`{combo}` names no key")))
         }
         (Some(_), Some(_)) => Err(refused("a button and a key at once".to_owned())),
@@ -67,11 +67,12 @@ pub(crate) fn press_from(spec: &Table) -> mlua::Result<Press> {
     }
 }
 
-/// A combination's keysyms, in the order they go down: its modifiers, as
-/// [`normalise_combo`] orders them and as the left-hand keys, then its key.
-/// `None` for a combination with no key, or a key no keysym is called.
-pub(crate) fn press_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard::Keysym>> {
-    use smithay::input::keyboard::{Keysym, xkb};
+/// A combination's keys, by their xkb names, in the order they go down: its
+/// modifiers, as [`normalise_combo`] orders them and as the left-hand keys,
+/// then its key, as xkb spells it. `None` for a combination with no key, or a
+/// key no keysym is called.
+pub(crate) fn press_names(combo: &str) -> Option<Vec<String>> {
+    use xkbcommon::xkb;
     let canonical = normalise_combo(combo);
     let (modifiers, key) = canonical
         .rsplit_once('+')
@@ -79,22 +80,23 @@ pub(crate) fn press_keysyms(combo: &str) -> Option<Vec<smithay::input::keyboard:
     if key.is_empty() {
         return None;
     }
-    let mut keysyms: Vec<Keysym> = modifiers
+    let mut names: Vec<String> = modifiers
         .split('+')
         .filter_map(|modifier| match modifier {
-            "ctrl" => Some(Keysym::Control_L),
-            "alt" => Some(Keysym::Alt_L),
-            "shift" => Some(Keysym::Shift_L),
-            "super" => Some(Keysym::Super_L),
+            "ctrl" => Some("Control_L"),
+            "alt" => Some("Alt_L"),
+            "shift" => Some("Shift_L"),
+            "super" => Some("Super_L"),
             _ => None,
         })
+        .map(str::to_owned)
         .collect();
     let keysym = xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE);
-    if keysym == Keysym::NoSymbol {
+    if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
         return None;
     }
-    keysyms.push(keysym);
-    Some(keysyms)
+    names.push(xkb::keysym_get_name(keysym));
+    Some(names)
 }
 
 /// `sol.bind`'s third argument: nothing, a note, or a table holding the note

@@ -40,7 +40,6 @@ pub(crate) use keep::*;
 pub(crate) use types::*;
 
 use lua::convert::describe_value as describe;
-use lua::*;
 
 pub(crate) use crate::wm::Scripts;
 
@@ -70,6 +69,8 @@ pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
 use crate::present::Curve;
 #[cfg(test)]
 pub(crate) use lua::deform_for_test;
+#[cfg(test)]
+use lua::*;
 #[cfg(test)]
 use mlua::{Lua, Table, Value};
 #[cfg(test)]

@@ -2346,6 +2346,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "x11rb",
  "xcursor",
+ "xkbcommon",
  "zbus",
  "zune-jpeg",
 ]

@@ -6,7 +6,8 @@ use smithay::reexports::input::{AccelProfile, ScrollMethod, TapButtonMap};
 use super::read;
 use crate::input::devices::{DeviceKind, DeviceMatch, InputConfig, Settings};
 use crate::script::doc::{Doc, describe};
-use crate::script::{normalise_combo, press_keysyms};
+use crate::script::normalise_combo;
+use crate::wm::convert::combo_keysyms;
 
 /// Read the section: libinput's settings, and the shortcuts policy. A
 /// shortcuts policy that cannot be read refuses the whole section, so no
@@ -65,7 +66,7 @@ pub(crate) fn shortcuts(table: &Doc) -> Result<crate::shortcuts_inhibit::Setting
         // Validate the original components: normalization intentionally keeps
         // only the last non-modifier, which would turn `typo+q` into `q`.
         let modifiers = escape.rsplit_once('+').map(|(modifiers, _)| modifiers);
-        if press_keysyms(&escape).is_none()
+        if combo_keysyms(&escape).is_none()
             || modifiers.is_some_and(|modifiers| {
                 modifiers.split('+').any(|name| {
                     !matches!(

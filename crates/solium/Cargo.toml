@@ -62,6 +62,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
+# Key names for the Lua window manager's `sol.press`, checked and spelled as
+# xkb spells them. Already linked through smithay, whose `xkb` is this crate.
+xkbcommon = { version = "0.8", default-features = false }
 
 # XCursor themes: finding one on the icon search path, following what it
 # inherits, and parsing the files. Smithay ships no loader of its own, so this
