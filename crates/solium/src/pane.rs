@@ -506,11 +506,13 @@ pub(crate) struct Pane {
     /// back is a swap rather than a build (#226). Only `Decorations` writes
     /// it, and it leaves with the pane as `frame` does.
     spare: Option<Box<crate::decoration::Decoration>>,
-    /// When this pane's close request goes out, once it has finished leaving.
+    /// When this pane's leaving animation lands, and the wait for its client
+    /// starts.
     ///
     /// A *deadline*, not a start: `Solium::close_pane` animates the window
-    /// away first and asks the client afterwards, and this is the moment
-    /// "afterwards" arrives. `None` for a window nobody has asked to close.
+    /// away, and this is the moment that has played. An X11 client is asked
+    /// to close then; a Wayland one was asked as the fade began (#231).
+    /// `None` for a window nobody has asked to close.
     ///
     /// A field for the reason `frame` is one — `Solium::closing` was a
     /// `HashMap<PaneId, Duration>` beside the panes, and an entry whose pane
@@ -1183,12 +1185,12 @@ impl Pane {
         std::mem::replace(&mut self.frame, frame)
     }
 
-    /// When this pane's close request goes out. See the field.
+    /// When this pane's leaving animation lands. See the field.
     pub(crate) const fn closing_at(&self) -> Option<Duration> {
         self.closing_at
     }
 
-    /// This pane is on its way out; `due` is when to tell its client so.
+    /// This pane is on its way out; `due` is when its fade has played.
     pub(crate) const fn begin_closing(&mut self, due: Duration) {
         self.closing_at = Some(due);
     }

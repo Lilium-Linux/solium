@@ -45,14 +45,15 @@ impl Solium {
         pane.placed().unwrap_or_else(|| self.pane_outer(pane))
     }
 
-    /// Ask a window to close, once it has finished leaving.
+    /// Ask a window to close, and start it leaving.
     ///
     /// A close is a request the client may refuse, so the compositor cannot
     /// simply animate the window away and drop it. What it can do is animate
-    /// first and ask afterwards: the window shrinks and fades while it is
-    /// still alive, and the request goes out when that lands. A client that
-    /// refuses is left with a window that is drawn away -- so the transform is
-    /// cleared in that case too, and the window comes back.
+    /// without waiting for the answer: the window shrinks and fades while it
+    /// is still alive. A Wayland client is asked as that starts (#231) and an
+    /// X11 one when it lands. A client that refuses is left with a window
+    /// that is drawn away -- so the transform is cleared in that case too,
+    /// and the window comes back.
     ///
     /// This covers closes the compositor asks for -- a frame button, a
     /// binding, a script. A client that exits on its own plays the same fade,
@@ -121,6 +122,14 @@ impl Solium {
         if let Some(pane) = self.panes.get_mut(id) {
             pane.begin_closing(now + present::CLOSING);
         }
+        // **And a Wayland client is asked now, while its window fades**
+        // (#231). The fade does not wait for the answer, and the answer no
+        // longer waits for the fade: a client that goes leaves on this fade
+        // (`depart`), and one that refuses by drawing is heard while its
+        // window is still on screen, so the fade turns round where it is
+        // (`settle_redrawn`) instead of landing first.
+        // `a_refusal_drawn_during_the_fade_turns_the_window_round_before_it_vanishes`.
+        self.ask_wayland(id);
         // **In front for its fade** (#128's review, findings 2 and 6). The
         // layout is about to move a neighbour into this window's space, and the
         // window closed is not always the one on top: a strip's sweeps stack
@@ -152,7 +161,9 @@ impl Solium {
         self.trigger_closing(id);
     }
 
-    /// Send the close to every window whose leaving animation has landed.
+    /// Start the wait on every window whose leaving animation has landed,
+    /// and send the close to the ones not asked yet: an X11 window, and a
+    /// pane whose client arrived during its fade.
     ///
     /// Returns whether any window is still on its way out, so the backend
     /// keeps drawing until they are gone.
@@ -228,17 +239,11 @@ impl Solium {
             // an honest, slow close (`settle_refused`'s own note on `GRACE`)
             // without guessing -- the client had its whole `GRACE` and never
             // even started answering.
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.send_close();
-                // And a ping behind it, whose pong says the request has been
-                // read (#231). See `crate::pane::Reply`.
-                let pinged = toplevel
-                    .client()
-                    .send_ping(smithay::utils::SERIAL_COUNTER.next_serial())
-                    .is_ok();
-                if let Some(pane) = self.panes.get_mut(id) {
-                    pane.heard(Reply::Sent { pinged });
-                }
+            if window.toplevel().is_some() {
+                // Asked already, as its fade began: see `ask_wayland`. Only a
+                // pane that had no client then, and has one now, is asked
+                // here.
+                self.ask_wayland(id);
             } else if let Some(x11) = window.x11_surface() {
                 let refused_before = self.panes.get(id).is_some_and(Pane::x11_refused_once);
                 let pid = refused_before
@@ -316,9 +321,9 @@ impl Solium {
 
     /// Bring back a window that was asked to close and did not.
     ///
-    /// The window is animated away before the request goes out, because
-    /// waiting for the client would mean nothing happening for as long as the
-    /// client took. When the client honours it, that is right. When it does
+    /// The window is animated away without waiting for its client's answer,
+    /// because waiting would mean nothing happening for as long as the client
+    /// took. When the client honours it, that is right. When it does
     /// not -- a terminal asking whether you meant it, an editor with unsaved
     /// work -- the window is left drawn away and invisible, still holding its
     /// place in the layout, until something unrelated happens to move it. From
@@ -438,6 +443,33 @@ impl Solium {
             self.give_back(id, now);
         }
         self.panes.iter().any(|pane| pane.asked_at().is_some())
+    }
+
+    /// Send a Wayland client its close request, once per close, with a ping
+    /// behind it whose pong says the request has been read (#231). See
+    /// [`Reply`].
+    ///
+    /// Nothing for an X11 window, which `settle_closing` asks when the fade
+    /// has landed: the second request to one is a kill (#221), and that is
+    /// not decided while the first fade is still playing.
+    fn ask_wayland(&mut self, id: crate::pane::PaneId) {
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
+        if pane.reply() != Reply::None {
+            return;
+        }
+        let Some(toplevel) = pane.client().and_then(Window::toplevel) else {
+            return;
+        };
+        toplevel.send_close();
+        let pinged = toplevel
+            .client()
+            .send_ping(smithay::utils::SERIAL_COUNTER.next_serial())
+            .is_ok();
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.heard(Reply::Sent { pinged });
+        }
     }
 
     /// A client has answered a ping: every close request sent to it before
@@ -597,7 +629,7 @@ impl Solium {
     /// it.** On `settle_refused`'s path `asked_at` is left set, so the pane is
     /// still due next frame, `settle_refused` returns `true`, and the backend
     /// keeps drawing. On [`Self::refused_with_a_dialog`]'s path `asked_at` is
-    /// `None` — the request has not gone out yet — so that mechanism does not
+    /// `None` — the fade has not landed yet — so that mechanism does not
     /// reach it at all, and `Pane::answered` is what carries the retry:
     /// `settle_closing` finds the flag at the `CLOSING` deadline and calls this
     /// again instead of sending the request. Either way a busy slot costs a

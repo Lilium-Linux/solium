@@ -60,7 +60,6 @@ screen share ([#47](https://github.com/Lilium-Linux/solium/issues/47)) and have 
 | Limitation | Impact | Tracking |
 |---|---|---|
 | Window rules | There is no general declarative rule system for placing or sizing applications by identity. | [#56](https://github.com/Lilium-Linux/solium/issues/56) |
-| Close confirmation | An application asking for confirmation can disappear during close grace and return afterward. | [#231](https://github.com/Lilium-Linux/solium/issues/231) |
 | Focus policy | Focus-stealing prevention and related correctness follow-ups remain open. | [#136](https://github.com/Lilium-Linux/solium/issues/136), [#258](https://github.com/Lilium-Linux/solium/issues/258) |
 | Frame styles | Per-window style selection and individual frame input problems remain tracked. | [#234](https://github.com/Lilium-Linux/solium/issues/234), [#158](https://github.com/Lilium-Linux/solium/issues/158) |
 | User QML overrides | The shipped Solium module can win over user QML; do not assume a user Theme.qml will override it. | [#88](https://github.com/Lilium-Linux/solium/issues/88) |

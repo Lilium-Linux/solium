@@ -28855,10 +28855,12 @@ end
                 desk.state.close_pane(dying);
                 desk.pump();
 
+                // Asked as the fade began (#231), and it has answered
+                // nothing yet.
                 assert!(
-                    desk.client.closes.is_empty() && desk.state.panes.get(dying).is_some(),
-                    "{layout}: the premise -- the client has not even been asked, so \
-                     everything below happened before it could have gone"
+                    desk.client.closes.len() == 1 && desk.state.panes.get(dying).is_some(),
+                    "{layout}: the premise -- the client has only just been asked and \
+                     is still here, so everything below happened before it went"
                 );
                 assert_eq!(
                     desk.events(),
@@ -29064,6 +29066,63 @@ end
             assert!(
                 (landed.opacity - 1.0).abs() < f32::EPSILON,
                 "the window did not fade back in: {landed:?}"
+            );
+        }
+
+        /// **The request goes out as the fade starts, so a window whose
+        /// client refuses turns round before it has vanished (#231).**
+        ///
+        /// Asked only once the fade had landed, a client could not answer
+        /// before its window was invisible, however fast it was: the
+        /// prompt always arrived to a window already gone. Asked at once,
+        /// its answer is in while the window is still on screen, and the
+        /// fade reverses from where it is.
+        #[test]
+        fn a_refusal_drawn_during_the_fade_turns_the_window_round_before_it_vanishes() {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            let opened = desk.open_surface();
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let began = desk.state.clock.now();
+            // The request, then the pong.
+            desk.pump();
+            assert_eq!(
+                desk.client.closes.len(),
+                1,
+                "the client was not asked as the fade started"
+            );
+            desk.pump();
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+            let back = frame(&mut desk, Duration::from_millis(120));
+
+            assert!(
+                back - began < present::CLOSING,
+                "the premise: the fade has not landed"
+            );
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,refused {id}"),
+                "the window was not given back during its fade"
+            );
+            let turned = drawn_now(&desk.state, opened.pane, back);
+            assert!(
+                turned.opacity > 0.05,
+                "the window had vanished before it turned round: {turned:?}"
+            );
+            // And the landing it never reached asks nothing more of it.
+            frame(&mut desk, Duration::from_millis(400));
+            assert_eq!(
+                desk.client.closes.len(),
+                1,
+                "a window that was given back was asked to close again"
+            );
+            assert_eq!(
+                desk.events(),
+                format!("open {id},closing {id}*,refused {id}"),
+                "the landing of a close that was refused told the layout something"
             );
         }
 
@@ -49515,16 +49574,16 @@ sol.bind("super+y", function() sol.unminimize(last) end)
 
         state.close_pane(pane);
         // Inside `CLOSING`, which is where a file chooser arrives and is
-        // the state `settle_refused` cannot see: the request has not gone
-        // out, so there is no `asked_at` for it to be due on.
+        // the state `settle_refused` cannot see: the fade has not landed,
+        // so there is no `asked_at` for it to be due on.
         state.clock.advance(Duration::from_millis(50));
         assert!(
             state
                 .panes
                 .get(pane)
                 .is_some_and(|pane| pane.closing_at().is_some() && pane.asked_at().is_none()),
-            "the premise: the animation is playing and the request has not \
-             gone out, which is the only window in which this fault exists"
+            "the premise: the animation is playing and has not landed, \
+             which is the only window in which this fault exists"
         );
 
         // The busy frame. Nothing un-jams this, which is why it is taken
@@ -49546,7 +49605,8 @@ sol.bind("super+y", function() sol.unminimize(last) end)
              it back, so nothing below is about a dialog for this window"
         );
 
-        // Past the deadline the request would go out on.
+        // Past the landing, where a close nobody has answered starts its
+        // grace.
         state
             .clock
             .advance(present::CLOSING + Duration::from_millis(10));
@@ -49561,10 +49621,12 @@ sol.bind("super+y", function() sol.unminimize(last) end)
             &mut client,
         );
 
-        assert!(
-            client.closes.is_empty(),
+        // Once, as the fade began (#231): the request the dialog answers.
+        assert_eq!(
+            client.closes.len(),
+            1,
             "a client that answered a close with a dialog was asked to \
-             close anyway, on the frame its give-back was declined: the \
+             close again, on the frame its give-back was declined: the \
              parent is shut out from under its own prompt"
         );
         assert!(

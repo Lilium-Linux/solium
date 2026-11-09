@@ -231,8 +231,12 @@ application closes it fades the same way, from the last picture it drew
 (#126), and so does a loading window whose application never arrives, once
 `loading.patience` runs out.
 
-An application can refuse: by saying nothing for a second after it is asked,
-or by answering with a dialog. Then the window comes back. A layout that puts
+An application is asked to close as the fade starts, and can refuse: by
+answering with a dialog, by drawing its answer in the window itself, as a
+terminal asking "are you sure?" does, or by saying nothing for a second. Then
+the window comes back. One that draws its answer is given a tenth of a second
+to go after all, so its window turns round part way through the fade rather
+than vanishing first. A layout that puts
 it back moves it over the layout's own duration; if nothing places it, it fades
 back in where it vanished over 150 ms, on `outCubic`.
 
