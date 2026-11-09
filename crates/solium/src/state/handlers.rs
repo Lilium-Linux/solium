@@ -32,6 +32,8 @@ impl CompositorHandler for Solium {
         // Before the buffer is taken below: whether this commit gives a new
         // one to a surface a window that went is still drawn from.
         self.let_go_of_reused(surface);
+        // And whether it is a frame from a client that was asked to close.
+        self.note_redraw_after_close(surface);
         // Imports the client's attached buffer into renderer-visible state.
         // Without it every surface is silently empty: the window maps, the
         // client draws, and the compositor renders nothing.
@@ -241,6 +243,10 @@ impl ShmHandler for Solium {
 impl XdgShellHandler for Solium {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
+    }
+
+    fn client_pong(&mut self, client: smithay::wayland::shell::xdg::ShellClient) {
+        self.close_read(&client);
     }
 
     fn new_toplevel(&mut self, surface: smithay::wayland::shell::xdg::ToplevelSurface) {

@@ -2461,6 +2461,9 @@ impl Solium {
         // until then the frames keep coming: nothing else asks for one while
         // it fades, since its client can no longer damage anything.
         animating |= self.settle_leaving(now);
+        // One asked to close whose client drew its answer instead comes back
+        // (#231), ahead of the deadline below.
+        animating |= self.settle_redrawn(now);
         // And one asked to close that is still here comes back.
         animating |= self.settle_refused(now);
         // What the frame's own tick changed in a scene, read one pass later

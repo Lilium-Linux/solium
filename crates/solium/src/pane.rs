@@ -299,6 +299,34 @@ pub(crate) struct Tiles {
     left_tile: Option<Rectangle<i32, Logical>>,
 }
 
+/// What a Wayland client has said about a close request, without a word of
+/// protocol for it (#231).
+///
+/// `xdg_toplevel.close` has no answer. A client that will not close says so
+/// by drawing: a terminal asks "are you sure?" inside the window it was asked
+/// to close. A frame alone proves nothing, though, since one may have been on
+/// its way before the request arrived. So a ping follows the request down the
+/// same connection. Events are read in order, and the pong therefore says the
+/// request has been read; a new buffer after it was drawn by a client that
+/// knew it had been asked to go.
+///
+/// Only a Wayland toplevel's pane leaves [`Reply::None`]. X11 has no ping
+/// here, and keeps `Solium::settle_refused`'s deadline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Reply {
+    /// No close request is out.
+    #[default]
+    None,
+    /// The request is out and has not been read. `pinged` is false when the
+    /// client already had a ping pending, sent before this request, whose
+    /// pong says nothing about it: the next pong sends this pane's own.
+    Sent { pinged: bool },
+    /// The client has read the request.
+    Read,
+    /// And has drawn a new frame since, at this instant, without closing.
+    Drew(Duration),
+}
+
 /// A window, as the compositor thinks of one.
 #[derive(Debug)]
 pub(crate) struct Pane {
@@ -514,6 +542,9 @@ pub(crate) struct Pane {
     /// deadline in it: the retry is "every frame until the slot is free", which
     /// is what a busy slot costs everywhere else.
     answered: bool,
+    /// What this pane's client has said about the close it was sent. See
+    /// [`Reply`].
+    reply: Reply,
     /// Whether scripts have been told this window has gone.
     ///
     /// Set by `Solium::trigger_close`, and never cleared: nothing brings a
@@ -690,6 +721,7 @@ impl Pane {
             closing_at: None,
             asked_at: None,
             answered: false,
+            reply: Reply::None,
             gone: false,
             opened: now,
             adopted: false,
@@ -733,6 +765,7 @@ impl Pane {
             closing_at: None,
             asked_at: None,
             answered: false,
+            reply: Reply::None,
             gone: false,
             opened: now,
             adopted: false,
@@ -1209,6 +1242,17 @@ impl Pane {
     /// The give-back took. Nothing is owed.
     pub(crate) const fn settled_answer(&mut self) {
         self.answered = false;
+    }
+
+    /// What the client has said about the close it was sent. See [`Reply`].
+    pub(crate) const fn reply(&self) -> Reply {
+        self.reply
+    }
+
+    /// The client has said this much about the close, or the close is over
+    /// and there is nothing left to hear ([`Reply::None`]).
+    pub(crate) const fn heard(&mut self, reply: Reply) {
+        self.reply = reply;
     }
 
     /// Whether scripts have been told this window has gone. See the field.

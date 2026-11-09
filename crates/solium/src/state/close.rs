@@ -4,6 +4,7 @@
 //! and the scripts' events for all of it.
 
 use super::*;
+use crate::pane::Reply;
 
 impl Solium {
     /// The panes stacked under this one this instant, bottom to top: what a
@@ -229,6 +230,15 @@ impl Solium {
             // even started answering.
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_close();
+                // And a ping behind it, whose pong says the request has been
+                // read (#231). See `crate::pane::Reply`.
+                let pinged = toplevel
+                    .client()
+                    .send_ping(smithay::utils::SERIAL_COUNTER.next_serial())
+                    .is_ok();
+                if let Some(pane) = self.panes.get_mut(id) {
+                    pane.heard(Reply::Sent { pinged });
+                }
             } else if let Some(x11) = window.x11_surface() {
                 let refused_before = self.panes.get(id).is_some_and(Pane::x11_refused_once);
                 let pid = refused_before
@@ -430,6 +440,138 @@ impl Solium {
         self.panes.iter().any(|pane| pane.asked_at().is_some())
     }
 
+    /// A client has answered a ping: every close request sent to it before
+    /// that ping has been read (#231). See [`Reply`].
+    pub(crate) fn close_read(&mut self, client: &smithay::wayland::shell::xdg::ShellClient) {
+        let sent: Vec<(crate::pane::PaneId, bool)> = self
+            .panes
+            .iter()
+            .filter_map(|pane| match pane.reply() {
+                Reply::Sent { pinged } => Some((pane.id(), pinged)),
+                _ => None,
+            })
+            .collect();
+        for (id, pinged) in sent {
+            let Some(toplevel) = self
+                .panes
+                .get(id)
+                .and_then(Pane::client)
+                .and_then(Window::toplevel)
+                .filter(|toplevel| toplevel.client() == *client)
+            else {
+                continue;
+            };
+            let reply = if pinged {
+                Reply::Read
+            } else {
+                // The pong was for a ping sent before this pane's request.
+                // Its own goes out now that the client can take one.
+                Reply::Sent {
+                    pinged: toplevel
+                        .client()
+                        .send_ping(smithay::utils::SERIAL_COUNTER.next_serial())
+                        .is_ok(),
+                }
+            };
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.heard(reply);
+            }
+        }
+    }
+
+    /// Note a new buffer on the window of a client that has read a close
+    /// request and is still here: the first sign that it is not going to
+    /// close (#231). Called on every commit, ahead of the buffer being taken.
+    ///
+    /// Only the first such frame is noted. [`Self::settle_redrawn`] counts
+    /// from it, and a client drawing its prompt in several frames has still
+    /// said one thing.
+    pub(super) fn note_redraw_after_close(&mut self, surface: &WlSurface) {
+        let Some(id) = self
+            .panes
+            .iter()
+            .find(|pane| {
+                pane.reply() == Reply::Read
+                    && pane
+                        .client()
+                        .and_then(Window::toplevel)
+                        .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+            })
+            .map(Pane::id)
+        else {
+            return;
+        };
+        let attached = with_states(surface, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<smithay::wayland::compositor::SurfaceAttributes>()
+                    .current()
+                    .buffer,
+                Some(smithay::wayland::compositor::BufferAssignment::NewBuffer(_))
+            )
+        });
+        if !attached {
+            return;
+        }
+        let now = self.clock.now();
+        if let Some(pane) = self.panes.get_mut(id) {
+            pane.heard(Reply::Drew(now));
+        }
+        // `settle_redrawn` has a deadline to meet now, and only a frame
+        // meets it.
+        self.redraw = true;
+    }
+
+    /// Bring back every window whose client read the close, drew a new frame
+    /// and is still here a moment later (#231).
+    ///
+    /// The evidence [`Self::settle_refused`]'s `GRACE` asks for, arriving
+    /// early: a terminal that asks "are you sure?" inside its own window has
+    /// its prompt on screen within a frame or two, and used to have it drawn
+    /// invisible for the rest of the second.
+    ///
+    /// Returns whether any such window is still being waited on, so the
+    /// frames keep coming until it is decided.
+    pub(crate) fn settle_redrawn(&mut self, now: std::time::Duration) -> bool {
+        /// How long a client that drew after reading the close has to go
+        /// after all, before its window is given back.
+        ///
+        /// **One more frame is not a refusal yet.** A player or a browser
+        /// reads the request and tears itself down over the next few frames,
+        /// drawing as it goes; given back at its first frame, its window
+        /// would fade in and vanish again. A client that is closing has gone
+        /// inside this, and one that is asking is still here after it, which
+        /// costs a refused window a tenth of a second where it used to cost
+        /// the whole of `GRACE`. A constant beside `GRACE` and `RETURN`, as
+        /// they are.
+        const HELD: std::time::Duration = std::time::Duration::from_millis(100);
+
+        let due: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| {
+                // A client that went in the meantime answered the close after
+                // all, and its pane only lasts out the frame.
+                !pane.gone()
+                    && matches!(pane.reply(), Reply::Drew(at) if now.saturating_sub(at) >= HELD)
+            })
+            .map(Pane::id)
+            .collect();
+        for id in due {
+            tracing::debug!(
+                pane = id.get(),
+                "a window answered a close by drawing; bringing it back"
+            );
+            // Declined, it is retried on the next frame: the reply stays
+            // `Drew` until `give_back` takes.
+            self.give_back(id, now);
+        }
+        self.panes
+            .iter()
+            .any(|pane| !pane.gone() && matches!(pane.reply(), Reply::Drew(_)))
+    }
+
     /// Put a window that was asked to close back on screen, and stop waiting on
     /// it.
     ///
@@ -533,6 +675,9 @@ impl Solium {
             // would have `settle_closing` retry a give-back that already
             // happened on the next close this pane is ever given.
             pane.settled_answer();
+            // And whatever the client said about the request: the next close
+            // is a new question.
+            pane.heard(Reply::None);
         }
         self.redraw = true;
         // **The layout hears the refusal here, which is once per refusal.**
