@@ -6,7 +6,7 @@ use mlua::{Lua, Table, Value};
 use solium_layout::{Rect as Slot, Settings};
 
 /// The work area a layout call was given.
-pub(crate) fn area(options: &Table) -> mlua::Result<Slot> {
+pub fn area(options: &Table) -> mlua::Result<Slot> {
     Ok(Slot::new(
         options.get("x")?,
         options.get("y")?,
@@ -15,7 +15,7 @@ pub(crate) fn area(options: &Table) -> mlua::Result<Slot> {
     ))
 }
 
-pub(crate) fn tuning(options: &Table) -> mlua::Result<Settings> {
+pub fn tuning(options: &Table) -> mlua::Result<Settings> {
     let defaults = Settings::default();
     Ok(Settings {
         gap: options.get::<Option<f64>>("gap")?.unwrap_or(defaults.gap),
@@ -44,7 +44,7 @@ pub(crate) fn tuning(options: &Table) -> mlua::Result<Settings> {
 /// log; `tiling.lua` checks `config.tiling.minimum` itself before handing it
 /// over and says so there, once per value. See
 /// `a_minimum_that_is_not_a_size_is_named_once_and_ignored`.
-pub(crate) fn minimum_from(options: &Table) -> solium_layout::Minimum {
+pub fn minimum_from(options: &Table) -> solium_layout::Minimum {
     let Ok(Value::Table(minimum)) = options.get::<Value>("minimum") else {
         return solium_layout::Minimum::default();
     };
@@ -71,7 +71,7 @@ pub(crate) fn minimum_from(options: &Table) -> solium_layout::Minimum {
 /// is not a finite size of zero or more is no floor on that side, and an entry
 /// that is not a table under a window's id is no floor at all -- quietly, for
 /// `minimum_from`'s reason: this runs on every layout call.
-pub(crate) fn floors_from(options: &Table) -> solium_layout::Floors {
+pub fn floors_from(options: &Table) -> solium_layout::Floors {
     let Ok(Value::Table(floors)) = options.get::<Value>("floors") else {
         return solium_layout::Floors::new();
     };
@@ -120,7 +120,7 @@ pub(crate) fn floors_from(options: &Table) -> solium_layout::Floors {
 /// choosing between two axes and there is no third answer to fall back to.
 /// [`edge_named`] is stricter for the opposite reason: it has four answers and
 /// a wrong guess moves a seam the user did not touch.
-pub(crate) fn axis_named(name: &str) -> solium_layout::tree::Axis {
+pub fn axis_named(name: &str) -> solium_layout::tree::Axis {
     if name == "width" {
         solium_layout::tree::Axis::Vertical
     } else {
@@ -131,11 +131,11 @@ pub(crate) fn axis_named(name: &str) -> solium_layout::tree::Axis {
 /// Which side of a window a script means.
 ///
 /// The spellings are the ones the `resize` event emits — see
-/// [`crate::input::resize::sides`] — so the ordinary script is passing back a
+/// `solium::input::resize::sides` — so the ordinary script is passing back a
 /// value the compositor just handed it and cannot misspell. `None` for
 /// anything else, so a hand-written one is told rather than silently given a
 /// side it did not ask for.
-pub(crate) fn edge_named(name: &str) -> Option<solium_layout::tree::Edge> {
+pub fn edge_named(name: &str) -> Option<solium_layout::tree::Edge> {
     use solium_layout::tree::Edge;
     match name {
         "left" => Some(Edge::Left),
@@ -153,7 +153,7 @@ pub(crate) fn edge_named(name: &str) -> Option<solium_layout::tree::Edge> {
 /// a None -- which, with a `?` on it, would take the whole configuration down
 /// over a list that is perfectly well written. Same reasoning as `scene` and
 /// `cursor.size`, which are both read this way and say so.
-pub(crate) fn number(value: &Value) -> Option<f64> {
+pub fn number(value: &Value) -> Option<f64> {
     match value {
         #[expect(
             clippy::cast_precision_loss,
@@ -179,7 +179,7 @@ pub(crate) fn number(value: &Value) -> Option<f64> {
 /// on. Fatal is wrong here too -- this runs while the configuration is being
 /// read, and a hard error over one number would cost every other setting in the
 /// file, the layouts and the bindings included.
-pub(crate) fn scroller_from(options: &Table) -> mlua::Result<solium_layout::scroller::Scroller> {
+pub fn scroller_from(options: &Table) -> mlua::Result<solium_layout::scroller::Scroller> {
     let mut widths = Vec::new();
     if let Ok(Value::Table(list)) = options.get::<Value>("widths") {
         for (index, value) in list.sequence_values::<Value>().flatten().enumerate() {
@@ -267,7 +267,7 @@ pub(crate) fn scroller_from(options: &Table) -> mlua::Result<solium_layout::scro
 }
 
 /// The `sol.layout` table.
-pub(crate) fn layouts(lua: &Lua) -> mlua::Result<Table> {
+pub fn layouts(lua: &Lua) -> mlua::Result<Table> {
     fn to_lua(lua: &Lua, slots: &[Slot]) -> mlua::Result<Table> {
         let list = lua.create_table()?;
         for (index, slot) in slots.iter().enumerate() {
@@ -389,7 +389,7 @@ pub(crate) fn layouts(lua: &Lua) -> mlua::Result<Table> {
 
 /// A scrolling workspace, as scripts hold it.
 #[derive(Debug, Default)]
-pub(crate) struct Scrolling(pub(crate) solium_layout::scroller::Scroller);
+pub struct Scrolling(pub solium_layout::scroller::Scroller);
 
 impl mlua::UserData for Scrolling {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
@@ -543,7 +543,7 @@ impl mlua::UserData for Scrolling {
 
 /// A dwindle tree, as scripts hold it.
 #[derive(Debug, Default)]
-pub(crate) struct TilingTree(pub(crate) solium_layout::tree::Tiling);
+pub struct TilingTree(pub solium_layout::tree::Tiling);
 
 impl mlua::UserData for TilingTree {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
@@ -710,7 +710,7 @@ impl mlua::UserData for TilingTree {
 }
 
 /// Read a list of columns out of a Lua table.
-pub(crate) fn columns_from(columns: &Table) -> mlua::Result<Vec<solium_layout::Column>> {
+pub fn columns_from(columns: &Table) -> mlua::Result<Vec<solium_layout::Column>> {
     let mut out = Vec::new();
     for column in columns.sequence_values::<Table>() {
         let column = column?;

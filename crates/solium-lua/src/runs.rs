@@ -5,25 +5,25 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Ids for `sol.run{}`'s runs and for timers, counting up across reloads,
 /// so an old configuration's id never names a new configuration's run or
 /// timer. A timer's is also its place among timers due at the same moment.
-pub(crate) static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub(crate) static TIMERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TIMERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How long a child may run when nothing says, in milliseconds.
-pub(crate) const TIMEOUT_MS: u64 = 30_000;
+pub const TIMEOUT_MS: u64 = 30_000;
 /// How much of each stream is kept when nothing says, in bytes.
-pub(crate) const MAX_OUTPUT: usize = 1 << 20;
+pub const MAX_OUTPUT: usize = 1 << 20;
 
 /// What a `sol.run{}` takes when its options leave a key out: `config.run`,
 /// through `sol.run_defaults`, or its own.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RunDefaults {
-    pub(crate) timeout: Duration,
-    pub(crate) max_output: usize,
+pub struct RunDefaults {
+    pub timeout: Duration,
+    pub max_output: usize,
 }
 
 impl Default for RunDefaults {
@@ -39,7 +39,7 @@ impl RunDefaults {
     /// `sol.run_defaults`'s table, read. Each key left out keeps its
     /// default, and one of the wrong kind is named in the log and keeps its
     /// default too.
-    pub(crate) fn read(options: Option<&Table>) -> mlua::Result<Self> {
+    pub fn read(options: Option<&Table>) -> mlua::Result<Self> {
         let mut defaults = Self::default();
         let Some(options) = options else {
             return Ok(defaults);
@@ -79,12 +79,12 @@ impl RunDefaults {
 }
 
 /// The options `sol.run{}` reads, for its error about any other.
-pub(crate) const RUN_OPTIONS: [&str; 6] = ["cwd", "env", "timeout", "max_output", "lines", "done"];
+pub const RUN_OPTIONS: [&str; 6] = ["cwd", "env", "timeout", "max_output", "lines", "done"];
 
 /// `sol.run({ argv }, options)` (#472): queue the run, and keep its `lines`
 /// and `done` under its id until it is done.
 /// `tests::sol_run_with_a_table_hands_its_output_to_done`.
-pub(crate) fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Result<()> {
+pub fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Result<()> {
     let argv = argv
         .sequence_values::<String>()
         .collect::<mlua::Result<Vec<String>>>()?;
@@ -184,7 +184,7 @@ pub(crate) fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua
 /// `sol.after` and `sol.every` (#472): keep `run` under a new timer's id,
 /// queue the timer, and hand back its handle.
 /// `tests::timers_run_in_the_order_they_fall_due`.
-pub(crate) fn set_timer(
+pub fn set_timer(
     lua: &Lua,
     ms: f64,
     run: mlua::Function,
@@ -217,7 +217,7 @@ pub(crate) fn set_timer(
 
 /// What `sol.after` and `sol.every` hand back: the timer, to cancel.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TimerHandle(pub(crate) u64);
+pub struct TimerHandle(pub u64);
 
 impl mlua::UserData for TimerHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {

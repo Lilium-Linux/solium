@@ -20,10 +20,12 @@ solium-animation = { path = "../animation" }
 # arm of an enum in `present.rs`. See crates/effects.
 solium-effects = { path = "../effects" }
 
+solium-json = { path = "../json", features = ["lua"] }
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
-solium-json = { path = "../json", features = ["lua"] }
 solium-layout = { path = "../layout" }
+# The Lua window manager, linked while it runs in the compositor's process.
+solium-lua = { path = "../solium-lua" }
 solium-wm-protocol = { path = "../wm-protocol" }
 
 # The lock screen's password check (#281): the protocol the `solium-auth`
@@ -62,9 +64,6 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
-# Key names for the Lua window manager's `sol.press`, checked and spelled as
-# xkb spells them. Already linked through smithay, whose `xkb` is this crate.
-xkbcommon = { version = "0.8", default-features = false }
 
 # XCursor themes: finding one on the icon search path, following what it
 # inherits, and parsing the files. Smithay ships no loader of its own, so this

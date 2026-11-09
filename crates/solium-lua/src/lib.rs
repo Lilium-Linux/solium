@@ -1,10 +1,18 @@
-//! The Lua binding of the script API: everything in `script/` that knows Lua.
+//! Solium's Lua window manager: the `sol` API, the Lua runtime that runs a
+//! configuration, and what it answers the compositor with, in the window
+//! manager protocol's terms (`solium-wm-protocol`).
+//!
+//! Nothing here knows the compositor: [`Host`] is handed a batch of what
+//! changed and what happened, and answers. The compositor links it while it
+//! runs the window manager in its own process.
 
-pub(crate) mod api;
+#![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+
+mod api;
 mod bindings;
-pub(crate) mod convert;
+pub mod convert;
 mod deadline;
-pub(crate) mod dispatch;
+pub mod dispatch;
 mod files;
 mod keep;
 mod layouts;
@@ -12,36 +20,36 @@ mod load;
 mod motion;
 mod pending;
 mod runs;
-pub(crate) mod to_wire;
+pub mod to_wire;
 
-pub(crate) use api::*;
-pub(crate) use bindings::*;
-pub(crate) use convert::describe_value;
-pub(crate) use deadline::*;
-pub(crate) use files::*;
-pub(crate) use keep::*;
-pub(crate) use layouts::*;
-pub(crate) use load::{config_path, stores_of, user_config_dir};
-pub(crate) use motion::*;
-pub(crate) use pending::*;
-pub(crate) use runs::*;
+pub use api::*;
+pub use bindings::*;
+pub use convert::describe_value;
+pub use deadline::*;
+pub use files::*;
+pub use keep::*;
+pub use layouts::*;
+pub use load::{config_path, stores_of, user_config_dir};
+pub use motion::*;
+pub use pending::*;
+pub use runs::*;
 
-pub(crate) use solium_animation::AnimationSpec;
-pub(crate) use solium_wm_protocol::combo::normalise as normalise_combo;
-pub(crate) use solium_wm_protocol::present::MOTIONS as PRESENT_MOTIONS;
-pub(crate) use solium_wm_protocol::{Binding, UnknownSetting};
+pub use solium_animation::AnimationSpec;
+pub use solium_wm_protocol::combo::normalise as normalise_combo;
+pub use solium_wm_protocol::present::MOTIONS as PRESENT_MOTIONS;
+pub use solium_wm_protocol::{Binding, UnknownSetting};
 
 /// The window manager the compositor ships: the Lua runtime and the
 /// configuration loaded into it, answering the compositor's batches in the
 /// protocol's terms.
 #[derive(Debug)]
-pub(crate) struct Host {
-    pub(crate) lua: mlua::Lua,
+pub struct Host {
+    pub lua: mlua::Lua,
     /// What it was started with, which a reload starts with again.
-    pub(crate) setup: Setup,
+    pub setup: Setup,
     /// The desktop as the scripts know it: what `sol.windows()` and the
     /// other reads answer from.
-    pub(crate) mirror: solium_wm_protocol::mirror::Mirror,
+    pub mirror: solium_wm_protocol::mirror::Mirror,
 }
 
 /// What the Lua host is started with: where the shipped Lua is, which a
@@ -49,9 +57,9 @@ pub(crate) struct Host {
 /// user has none, and whether the session runs in debug mode, as `hello`
 /// says.
 #[derive(Clone, Debug)]
-pub(crate) struct Setup {
-    pub(crate) shipped: std::path::PathBuf,
-    pub(crate) debug: bool,
+pub struct Setup {
+    pub shipped: std::path::PathBuf,
+    pub debug: bool,
 }
 
 /// Whether a program can be found on `PATH`.
@@ -61,7 +69,7 @@ pub(crate) struct Setup {
 /// cannot assume any particular terminal or editor is installed, and a script
 /// that picks the first one that *is* beats one that silently does nothing on a
 /// machine set up differently from the author's.
-pub(crate) fn which(program: &str) -> bool {
+pub fn which(program: &str) -> bool {
     if program.contains('/') {
         return std::path::Path::new(program).is_file();
     }

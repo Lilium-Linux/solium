@@ -2,11 +2,11 @@
 
 use mlua::{IntoLua, Lua, Table, Value};
 
-use crate::script::lua::Kept;
-use crate::script::lua::*;
+use crate::Kept;
+use crate::*;
 
 /// A rectangle as a Lua table: `{ x, y, w, h }`.
-pub(crate) fn rect_table(rect: &solium_wm_protocol::Rect, lua: &Lua) -> mlua::Result<Table> {
+pub fn rect_table(rect: &solium_wm_protocol::Rect, lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("x", rect.x)?;
     table.set("y", rect.y)?;
@@ -24,7 +24,7 @@ pub(crate) fn rect_table(rect: &solium_wm_protocol::Rect, lua: &Lua) -> mlua::Re
 /// distinguish "named but lost" from "never named" can still ask
 /// `window.parent == false`. An `Option<u64>` flattened to nil-or-number
 /// would have thrown the distinction away at the boundary.
-pub(crate) fn parentage_value(
+pub fn parentage_value(
     parentage: &solium_wm_protocol::Parentage,
     lua: &Lua,
 ) -> mlua::Result<Value> {
@@ -39,7 +39,7 @@ pub(crate) fn parentage_value(
 /// A document from the compositor, a service's view, as the Lua table its
 /// getter answers: a list part, named and numbered keys, whole numbers as
 /// integers.
-pub(crate) fn doc_to_lua(nodes: &solium_wm_protocol::Doc, lua: &Lua) -> mlua::Result<Value> {
+pub fn doc_to_lua(nodes: &solium_wm_protocol::Doc, lua: &Lua) -> mlua::Result<Value> {
     node_to_lua(nodes, 0, 0, lua)
 }
 
@@ -81,9 +81,9 @@ fn node_to_lua(
 }
 
 /// What a warning shows of a Lua value that was not what a setting wanted.
-/// The same text [`crate::script::doc::describe`] gives the value's
+/// The same text `solium::script::doc::describe` gives the value's
 /// document: `doc::tests::describe_says_what_the_lua_describe_says`.
-pub(crate) fn describe_value(value: &Value) -> String {
+pub fn describe_value(value: &Value) -> String {
     match value {
         Value::Integer(number) => number.to_string(),
         Value::Number(number) => number.to_string(),
@@ -103,7 +103,7 @@ impl Kept {
     /// `where_it_is` is the path from the keep's name down to this value, so a
     /// warning names the key someone can go and look at rather than saying
     /// "something in your table".
-    pub(crate) fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
+    pub fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
         match value {
             Value::Boolean(flag) => Some(Self::Bool(*flag)),
             Value::Integer(number) => Some(Self::Int(*number)),
@@ -160,7 +160,7 @@ impl Kept {
     }
 
     /// Build it again, in the Lua state that replaced the one it came from.
-    pub(crate) fn into_value(self, lua: &Lua) -> mlua::Result<Value> {
+    pub fn into_value(self, lua: &Lua) -> mlua::Result<Value> {
         Ok(match self {
             Self::Bool(flag) => Value::Boolean(flag),
             Self::Int(number) => Value::Integer(number),
@@ -180,20 +180,19 @@ impl Kept {
 }
 
 /// A Lua value as the protocol's settings document: its nodes, the first
-/// the root, a table's children by index. The same reading as [`doc_of`]:
+/// the root, a table's children by index. The same reading the
+/// compositor's own Lua gets (`solium::effect::lua_doc::doc_of`):
 /// a list part keyed 1 to n, named and numbered keys, other keys not read,
 /// a function and the like named by its type, and a table nested past 32
 /// refused.
-pub(crate) fn wire_doc_of(value: &Value) -> mlua::Result<solium_wm_protocol::Doc> {
+pub fn wire_doc_of(value: &Value) -> mlua::Result<solium_wm_protocol::Doc> {
     let mut nodes = Vec::new();
     wire_node(value, 0, &mut nodes)?;
     Ok(nodes)
 }
 
 /// Named Lua values as one table's document: a deform's params.
-pub(crate) fn wire_doc_of_fields(
-    fields: &[(String, Value)],
-) -> mlua::Result<solium_wm_protocol::Doc> {
+pub fn wire_doc_of_fields(fields: &[(String, Value)]) -> mlua::Result<solium_wm_protocol::Doc> {
     use solium_wm_protocol::{DocNode, DocTable};
     let mut nodes = vec![DocNode::Nil];
     let mut named = Vec::new();
@@ -210,7 +209,7 @@ pub(crate) fn wire_doc_of_fields(
 
 /// A settings section as its Lua function takes it, as a document: a table,
 /// or nothing, which reads as an empty section.
-pub(crate) fn wire_section(options: Option<Table>) -> mlua::Result<solium_wm_protocol::Doc> {
+pub fn wire_section(options: Option<Table>) -> mlua::Result<solium_wm_protocol::Doc> {
     wire_doc_of(&options.map_or(Value::Nil, Value::Table)).map(|nodes| {
         if matches!(nodes.first(), Some(solium_wm_protocol::DocNode::Nil)) {
             vec![solium_wm_protocol::DocNode::Table(

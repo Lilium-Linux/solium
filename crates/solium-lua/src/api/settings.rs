@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Hand a settings section over as a document, for the compositor to read
 /// as its configuration reference documents it.
@@ -81,7 +81,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     //
     // Each device-type key -- `touchpad`, `mouse`, `keyboard`, `touchscreen`,
     // `tablet_tool`, `tablet_pad`, `switch` -- is a table of the options
-    // listed on `crate::input::devices::Settings`; left out, or not a table,
+    // listed on `solium::input::devices::Settings`; left out, or not a table,
     // every device of that type keeps libinput's own default. `devices` is a
     // list of overrides, each a match -- `name` (a case-insensitive
     // substring), `vendor` and `product` (as `libinput list-devices` or
@@ -92,7 +92,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // to every device already connected and to each one `DeviceAdded` hands
     // over later, and reapplied, from whatever the configuration now says,
     // on every reload -- the live side of this is `tty.rs` and
-    // `crate::input::devices::Registry`, since only a backend has real
+    // `solium::input::devices::Registry`, since only a backend has real
     // devices to apply it to.
     // `the_shipped_configuration_configures_a_touchpad_and_a_mouse`,
     // `a_devices_entry_in_user_lua_overrides_one_field_of_the_matched_device`,

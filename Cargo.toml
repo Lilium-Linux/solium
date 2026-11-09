@@ -6,6 +6,7 @@ members = [
     "crates/layout",
     "crates/solium",
     "crates/solium-auth",
+    "crates/solium-lua",
     "crates/wl-probe",
     "crates/wm-protocol",
     "crates/x11-probe",

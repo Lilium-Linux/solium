@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {

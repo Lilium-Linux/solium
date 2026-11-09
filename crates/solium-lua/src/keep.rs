@@ -22,7 +22,7 @@
 /// which is a string. And a `Vec` of pairs needs no `Hash` or `Eq` on the key,
 /// which a float key could not honestly have.
 #[derive(Clone, Debug)]
-pub(crate) enum Kept {
+pub enum Kept {
     Bool(bool),
     /// Kept apart from `Number` so a window id survives as the integer it is.
     /// Round-tripped through `f64` it would come back as `7.0`, which is a
@@ -41,13 +41,13 @@ pub(crate) enum Kept {
 /// Everything kept, under the names the scripts gave it: `sol.keep`'s
 /// tables, and `sol.store`'s as the plain data each saves (#473).
 #[derive(Debug, Default)]
-pub(crate) struct Keep {
+pub struct Keep {
     pub(super) keeps: std::collections::HashMap<String, Kept>,
-    pub(super) stores: std::collections::HashMap<String, crate::json::Json>,
+    pub(super) stores: std::collections::HashMap<String, solium_json::Json>,
 }
 
 impl Keep {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 }

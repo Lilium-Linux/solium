@@ -6,31 +6,31 @@ use mlua::{Lua, Table, Value};
 /// How long one handler may run before it is stopped (03 §3.3.3, Ruling 16).
 /// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 /// `tests::a_binding_that_never_returns_is_stopped`.
-pub(crate) const HANDLER_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+pub const HANDLER_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 /// How many times a listener may be stopped before it is taken out.
 /// `tests::a_listener_stopped_three_times_is_taken_out`.
-pub(crate) const STRIKES: u32 = 3;
+pub const STRIKES: u32 = 3;
 /// What the error a stopped handler is unwound with says.
 /// `tests::a_listener_stopped_three_times_is_taken_out`.
-pub(crate) const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
+pub const STOPPED: &str = "this handler ran for longer than 100 ms and was stopped";
 
 /// When the handler running now started, for the instruction hook; `None`
 /// between dispatches.
 /// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`,
 /// `tests::lua_run_between_dispatches_is_not_stopped`.
 #[derive(Debug, Default)]
-pub(crate) struct Deadline {
-    pub(crate) started: Option<std::time::Instant>,
+pub struct Deadline {
+    pub started: Option<std::time::Instant>,
     /// Where the handler running now was stopped, as `file:line`, once the
     /// instruction hook has stopped it.
     /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
-    pub(crate) stopped_at: Option<String>,
+    pub stopped_at: Option<String>,
 }
 
 /// Start a handler's clock now, with nowhere it was stopped yet.
 /// `tests::each_listener_has_the_whole_deadline`,
 /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
-pub(crate) fn start_clock(lua: &Lua) {
+pub fn start_clock(lua: &Lua) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = Some(std::time::Instant::now());
         deadline.stopped_at = None;
@@ -39,7 +39,7 @@ pub(crate) fn start_clock(lua: &Lua) {
 
 /// Set the handler clock back to when it started, or stop it with `None`.
 /// `tests::lua_run_between_dispatches_is_not_stopped`.
-pub(crate) fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
+pub fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
     if let Ok(Some(mut deadline)) = lua.try_app_data_mut::<Deadline>() {
         deadline.started = started;
     }
@@ -48,7 +48,7 @@ pub(crate) fn set_deadline(lua: &Lua, started: Option<std::time::Instant>) {
 /// Note `debug`'s function and line as where the handler running now was
 /// stopped. `tests::a_stopped_override_is_logged_where_it_was_stopped`,
 /// `tests::a_handler_stopped_at_its_focus_direction_is_logged_at_that_call`.
-pub(crate) fn stopped_here(lua: &Lua, debug: &mlua::debug::Debug) {
+pub fn stopped_here(lua: &Lua, debug: &mlua::debug::Debug) {
     let source = debug.source();
     let file = file_of(source.source.as_deref(), source.short_src.as_deref());
     let line = debug.current_line().unwrap_or_default();
@@ -59,7 +59,7 @@ pub(crate) fn stopped_here(lua: &Lua, debug: &mlua::debug::Debug) {
 
 /// Where the handler running now was stopped, once it has been.
 /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
-pub(crate) fn stopped_at(lua: &Lua) -> Option<String> {
+pub fn stopped_at(lua: &Lua) -> Option<String> {
     lua.try_app_data_ref::<Deadline>()
         .ok()
         .flatten()
@@ -70,7 +70,7 @@ pub(crate) fn stopped_at(lua: &Lua) -> Option<String> {
 /// messages give it.
 /// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 /// `tests::a_stopped_listener_from_a_loaded_chunk_is_logged_by_its_short_name`.
-pub(crate) fn file_of(source: Option<&str>, short_src: Option<&str>) -> String {
+pub fn file_of(source: Option<&str>, short_src: Option<&str>) -> String {
     source
         .and_then(|source| source.strip_prefix('@'))
         .or(short_src)
@@ -80,7 +80,7 @@ pub(crate) fn file_of(source: Option<&str>, short_src: Option<&str>) -> String {
 
 /// When the handler running now started, if one is running.
 /// `tests::a_binding_that_loops_on_focus_direction_is_stopped`.
-pub(crate) fn deadline_started(lua: &Lua) -> Option<std::time::Instant> {
+pub fn deadline_started(lua: &Lua) -> Option<std::time::Instant> {
     lua.try_app_data_ref::<Deadline>()
         .ok()
         .flatten()
@@ -89,7 +89,7 @@ pub(crate) fn deadline_started(lua: &Lua) -> Option<std::time::Instant> {
 
 /// Whether the handler running now is past its deadline.
 /// `tests::a_listener_that_never_returns_is_stopped_and_the_others_still_run`.
-pub(crate) fn late(lua: &Lua) -> bool {
+pub fn late(lua: &Lua) -> bool {
     deadline_started(lua).is_some_and(|started| started.elapsed() >= HANDLER_DEADLINE)
 }
 
@@ -101,7 +101,7 @@ pub(crate) fn late(lua: &Lua) -> bool {
 /// `tests::a_done_stopped_three_times_is_not_called_again`,
 /// `tests::a_stopped_listener_is_logged_with_its_file_and_line`,
 /// `tests::a_stopped_override_is_logged_where_it_was_stopped`.
-pub(crate) fn strike(
+pub fn strike(
     lua: &Lua,
     strikes: &Table,
     handler: &mlua::Function,
@@ -142,7 +142,7 @@ pub(crate) fn strike(
 /// both are logged with the file and line the listener was written at.
 /// `tests::a_listener_stopped_three_times_is_taken_out`,
 /// `tests::a_stopped_listener_is_logged_with_its_file_and_line`.
-pub(crate) fn call_listeners(
+pub fn call_listeners(
     lua: &Lua,
     event: &str,
     args: impl mlua::IntoLuaMulti + Clone,
@@ -198,7 +198,7 @@ pub(crate) fn call_listeners(
 /// The listeners of a decision hook, each in turn until one returns a
 /// table, which is the answer. A listener stopped at the deadline is
 /// struck as any other.
-pub(crate) fn call_deciders(
+pub fn call_deciders(
     lua: &Lua,
     event: &str,
     args: impl mlua::IntoLuaMulti + Clone,
@@ -231,14 +231,14 @@ pub(crate) fn call_deciders(
 /// `mlua::Error` is not `Send + Sync`, so it cannot be an `anyhow` source
 /// directly; the message is what matters here anyway, and a Lua error already
 /// carries its own traceback in it.
-pub(crate) fn failed(context: &'static str) -> impl FnOnce(mlua::Error) -> anyhow::Error {
+pub fn failed(context: &'static str) -> impl FnOnce(mlua::Error) -> anyhow::Error {
     move |err| anyhow::anyhow!("{context}: {err}")
 }
 
 /// Call a run's or a timer's function under the handler deadline. One
 /// stopped there is struck as a listener is, by function, and one struck
 /// three times is not called again until the next reload: true then.
-pub(crate) fn call_struck(
+pub fn call_struck(
     lua: &Lua,
     strikes: &Table,
     run: &mlua::Function,

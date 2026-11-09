@@ -1,5 +1,6 @@
-//! The production source of `script/`, for the tests that read it as text:
-//! the dispatch vocabulary, the reference, and where `mlua` may appear.
+//! The production source of `script/` and of the Lua window manager
+//! (`crates/solium-lua`, listed as `lua/`), for the tests that read it as
+//! text: the dispatch vocabulary, the reference, and where `mlua` may appear.
 //!
 //! One list, checked against the directory by
 //! `every_file_of_the_module_is_listed`, so a file added to the module cannot
@@ -9,30 +10,99 @@
 pub(crate) const FILES: &[(&str, &str)] = &[
     ("command.rs", include_str!("command.rs")),
     ("doc.rs", include_str!("doc.rs")),
-    ("lua/convert.rs", include_str!("lua/convert.rs")),
-    ("lua/api/bindings.rs", include_str!("lua/api/bindings.rs")),
-    ("lua/api/input.rs", include_str!("lua/api/input.rs")),
-    ("lua/api/keep.rs", include_str!("lua/api/keep.rs")),
-    ("lua/api/layout.rs", include_str!("lua/api/layout.rs")),
-    ("lua/api/mod.rs", include_str!("lua/api/mod.rs")),
-    ("lua/api/monitors.rs", include_str!("lua/api/monitors.rs")),
-    ("lua/api/present.rs", include_str!("lua/api/present.rs")),
-    ("lua/api/process.rs", include_str!("lua/api/process.rs")),
-    ("lua/api/services.rs", include_str!("lua/api/services.rs")),
-    ("lua/api/settings.rs", include_str!("lua/api/settings.rs")),
-    ("lua/api/windows.rs", include_str!("lua/api/windows.rs")),
-    ("lua/bindings.rs", include_str!("lua/bindings.rs")),
-    ("lua/deadline.rs", include_str!("lua/deadline.rs")),
-    ("lua/files.rs", include_str!("lua/files.rs")),
-    ("lua/keep.rs", include_str!("lua/keep.rs")),
-    ("lua/layouts.rs", include_str!("lua/layouts.rs")),
-    ("lua/motion.rs", include_str!("lua/motion.rs")),
-    ("lua/pending.rs", include_str!("lua/pending.rs")),
-    ("lua/runs.rs", include_str!("lua/runs.rs")),
-    ("lua/to_wire.rs", include_str!("lua/to_wire.rs")),
-    ("lua/dispatch.rs", include_str!("lua/dispatch.rs")),
-    ("lua/load.rs", include_str!("lua/load.rs")),
-    ("lua/mod.rs", include_str!("lua/mod.rs")),
+    (
+        "lua/convert.rs",
+        include_str!("../../../solium-lua/src/convert.rs"),
+    ),
+    (
+        "lua/api/bindings.rs",
+        include_str!("../../../solium-lua/src/api/bindings.rs"),
+    ),
+    (
+        "lua/api/input.rs",
+        include_str!("../../../solium-lua/src/api/input.rs"),
+    ),
+    (
+        "lua/api/keep.rs",
+        include_str!("../../../solium-lua/src/api/keep.rs"),
+    ),
+    (
+        "lua/api/layout.rs",
+        include_str!("../../../solium-lua/src/api/layout.rs"),
+    ),
+    (
+        "lua/api/mod.rs",
+        include_str!("../../../solium-lua/src/api/mod.rs"),
+    ),
+    (
+        "lua/api/monitors.rs",
+        include_str!("../../../solium-lua/src/api/monitors.rs"),
+    ),
+    (
+        "lua/api/present.rs",
+        include_str!("../../../solium-lua/src/api/present.rs"),
+    ),
+    (
+        "lua/api/process.rs",
+        include_str!("../../../solium-lua/src/api/process.rs"),
+    ),
+    (
+        "lua/api/services.rs",
+        include_str!("../../../solium-lua/src/api/services.rs"),
+    ),
+    (
+        "lua/api/settings.rs",
+        include_str!("../../../solium-lua/src/api/settings.rs"),
+    ),
+    (
+        "lua/api/windows.rs",
+        include_str!("../../../solium-lua/src/api/windows.rs"),
+    ),
+    (
+        "lua/bindings.rs",
+        include_str!("../../../solium-lua/src/bindings.rs"),
+    ),
+    (
+        "lua/deadline.rs",
+        include_str!("../../../solium-lua/src/deadline.rs"),
+    ),
+    (
+        "lua/files.rs",
+        include_str!("../../../solium-lua/src/files.rs"),
+    ),
+    (
+        "lua/keep.rs",
+        include_str!("../../../solium-lua/src/keep.rs"),
+    ),
+    (
+        "lua/layouts.rs",
+        include_str!("../../../solium-lua/src/layouts.rs"),
+    ),
+    (
+        "lua/motion.rs",
+        include_str!("../../../solium-lua/src/motion.rs"),
+    ),
+    (
+        "lua/pending.rs",
+        include_str!("../../../solium-lua/src/pending.rs"),
+    ),
+    (
+        "lua/runs.rs",
+        include_str!("../../../solium-lua/src/runs.rs"),
+    ),
+    (
+        "lua/to_wire.rs",
+        include_str!("../../../solium-lua/src/to_wire.rs"),
+    ),
+    (
+        "lua/dispatch.rs",
+        include_str!("../../../solium-lua/src/dispatch.rs"),
+    ),
+    (
+        "lua/load.rs",
+        include_str!("../../../solium-lua/src/load.rs"),
+    ),
+    ("lua/lib.rs", include_str!("../../../solium-lua/src/lib.rs")),
     ("mod.rs", include_str!("mod.rs")),
     ("reference.rs", include_str!("reference.rs")),
     ("settings/focus.rs", include_str!("settings/focus.rs")),
@@ -95,29 +165,35 @@ pub(crate) fn production() -> &'static str {
 mod tests {
     use super::FILES;
 
-    /// Every `.rs` under `src/script/`, outside `tests/`, is in [`FILES`].
+    /// Every `.rs` under `src/script/`, outside `tests/`, and under
+    /// `crates/solium-lua/src/`, as `lua/`, is in [`FILES`].
     #[test]
     fn every_file_of_the_module_is_listed() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/script");
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut found = Vec::new();
-        let mut stack = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("src/script reads") {
-                let path = entry.expect("an entry").path();
-                if path.is_dir() {
-                    if path.file_name().is_some_and(|name| name != "tests") {
-                        stack.push(path);
+        for (root, prefix) in [
+            (manifest.join("src/script"), ""),
+            (manifest.join("../solium-lua/src"), "lua/"),
+        ] {
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).expect("the directory reads") {
+                    let path = entry.expect("an entry").path();
+                    if path.is_dir() {
+                        if path.file_name().is_some_and(|name| name != "tests") {
+                            stack.push(path);
+                        }
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
+                        let relative = path.strip_prefix(&root).expect("under the root");
+                        found.push(format!("{prefix}{}", relative.to_string_lossy()));
                     }
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    let relative = path.strip_prefix(&root).expect("under the root");
-                    found.push(relative.to_string_lossy().into_owned());
                 }
             }
         }
         found.sort();
         let mut listed: Vec<String> = FILES.iter().map(|(path, _)| (*path).to_owned()).collect();
         listed.sort();
-        assert_eq!(found, listed, "src/script/ and source::FILES disagree");
+        assert_eq!(found, listed, "the sources and source::FILES disagree");
     }
 
     /// `mlua` only in the Lua layer, and in the scans that look for it: the
@@ -137,6 +213,9 @@ mod tests {
             })
             .map(|(path, _)| *path)
             .collect();
-        assert!(outside.is_empty(), "mlua outside script/lua/: {outside:?}");
+        assert!(
+            outside.is_empty(),
+            "mlua outside the Lua window manager: {outside:?}"
+        );
     }
 }

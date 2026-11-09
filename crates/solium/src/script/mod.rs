@@ -27,7 +27,7 @@
 
 mod command;
 pub(crate) mod doc;
-pub(crate) mod lua;
+pub(crate) use solium_lua as lua;
 pub(crate) mod settings;
 mod types;
 

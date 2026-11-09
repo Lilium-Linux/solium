@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -115,7 +115,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
 
     // `sol.after(ms, fn)` and `sol.every(ms, fn)` (#472): `fn` on the
     // compositor's clock, once or every `ms`, until the handle's `cancel`.
-    // See `crate::timers`.
+    // See `solium::timers`.
     sol.set(
         "after",
         lua.create_function(|lua, (ms, run): (f64, mlua::Function)| {
@@ -128,7 +128,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     )?;
 
     // `sol.read(path, fn(data, err))` (#473): the whole file, read on a
-    // thread of its own up to `files.max_read`, to `fn`. See `crate::files`.
+    // thread of its own up to `files.max_read`, to `fn`. See `solium::files`.
     sol.set(
         "read",
         lua.create_function(|lua, (path, done): (String, mlua::Function)| {
@@ -156,7 +156,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     )?;
 
     // `sol.write(path, data, fn(err))` (#473): atomic, on a thread of its
-    // own, in order with the other writes to `path`. See `crate::files`.
+    // own, in order with the other writes to `path`. See `solium::files`.
     sol.set(
         "write",
         lua.create_function(
@@ -185,7 +185,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
 
     // `sol.watch(path, fn(event))` (#473): the file followed through its
     // directory, which must exist, until the handle's `cancel` or a reload.
-    // See `crate::files`.
+    // See `solium::files`.
     sol.set(
         "watch",
         lua.create_function(|lua, (path, run): (String, mlua::Function)| {

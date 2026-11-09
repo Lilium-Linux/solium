@@ -2,11 +2,11 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// The buttons `sol.press` names, with their evdev codes: `side` is
 /// `BTN_SIDE`, a mouse's "back", and `extra` is `BTN_EXTRA`, its "forward".
-pub(crate) const PRESS_BUTTONS: [(&str, u32); 5] = [
+pub const PRESS_BUTTONS: [(&str, u32); 5] = [
     ("left", 0x110),
     ("right", 0x111),
     ("middle", 0x112),
@@ -20,7 +20,7 @@ pub(crate) const PRESS_BUTTONS: [(&str, u32); 5] = [
 /// name, in any case. Anything else is an error, so a spec that would press
 /// nothing never looks like one that pressed something.
 /// `directions::sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach`.
-pub(crate) fn press_from(spec: &Table) -> mlua::Result<solium_wm_protocol::Press> {
+pub fn press_from(spec: &Table) -> mlua::Result<solium_wm_protocol::Press> {
     let refused = |why: String| {
         mlua::Error::runtime(format!(
             "sol.press: {why}; the spec is {{ button = \"left\"|\"right\"|\"middle\"|\"side\"|\"extra\" }} \
@@ -71,7 +71,7 @@ pub(crate) fn press_from(spec: &Table) -> mlua::Result<solium_wm_protocol::Press
 /// modifiers, as [`normalise_combo`] orders them and as the left-hand keys,
 /// then its key, as xkb spells it. `None` for a combination with no key, or a
 /// key no keysym is called.
-pub(crate) fn press_names(combo: &str) -> Option<Vec<String>> {
+pub fn press_names(combo: &str) -> Option<Vec<String>> {
     use xkbcommon::xkb;
     let canonical = normalise_combo(combo);
     let (modifiers, key) = canonical
@@ -102,10 +102,10 @@ pub(crate) fn press_names(combo: &str) -> Option<Vec<String>> {
 /// What a binding asked for besides its handler: the table form of
 /// `sol.bind`'s third argument (#224), each off unless asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Asked {
-    pub(crate) repeating: bool,
-    pub(crate) locked: bool,
-    pub(crate) inhibited: bool,
+pub struct Asked {
+    pub repeating: bool,
+    pub locked: bool,
+    pub inhibited: bool,
 }
 
 /// `sol.bind`'s third argument: nothing, a note, or a table holding the note
@@ -116,9 +116,7 @@ pub(crate) struct Asked {
 /// exactly like one that is broken. `repeat` is Lua's own keyword, so the
 /// one way to write it is `["repeat"]`, and its refusal names the spelling
 /// that works. `binding_options::an_option_a_binding_does_not_have_is_refused_by_name`.
-pub(crate) fn binding_note_and_options(
-    said: Option<Value>,
-) -> mlua::Result<(Option<String>, Asked)> {
+pub fn binding_note_and_options(said: Option<Value>) -> mlua::Result<(Option<String>, Asked)> {
     let table = match said {
         None | Some(Value::Nil) => return Ok((None, Asked::default())),
         Some(Value::String(note)) => {
@@ -185,15 +183,15 @@ pub(crate) fn binding_note_and_options(
 /// last sent: a binding made or taken away, a setting nothing reads, a note
 /// for `--check`. The declarations are sent whole, and only then.
 #[derive(Debug, Default)]
-pub(crate) struct Undeclared;
+pub struct Undeclared;
 
 /// Mark the declarations as changed, so the next answer carries them.
-pub(crate) fn undeclared(lua: &Lua) {
+pub fn undeclared(lua: &Lua) {
     lua.set_app_data(Undeclared);
 }
 
 /// The declarations, when they changed since they were last sent.
-pub(crate) fn declare_if_changed(lua: &Lua) -> Option<solium_wm_protocol::Command> {
+pub fn declare_if_changed(lua: &Lua) -> Option<solium_wm_protocol::Command> {
     lua.remove_app_data::<Undeclared>()
         .map(|_| solium_wm_protocol::Command::Declare(declarations(lua)))
 }
@@ -201,7 +199,7 @@ pub(crate) fn declare_if_changed(lua: &Lua) -> Option<solium_wm_protocol::Comman
 /// What this window manager declares, read from where `sol.bind`,
 /// `sol.unbind` and `sol.unknown` keep it. Each list is sorted: a person
 /// compares one run's `--check` to the next.
-pub(crate) fn declarations(lua: &Lua) -> solium_wm_protocol::Declarations {
+pub fn declarations(lua: &Lua) -> solium_wm_protocol::Declarations {
     let sol = lua.globals().get::<Table>("sol").ok();
     let field = |name: &str| sol.as_ref().and_then(|sol| sol.get::<Table>(name).ok());
     let bindings = field("_bindings");

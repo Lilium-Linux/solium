@@ -2,7 +2,7 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Add this area's functions to `sol`.
 pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
@@ -323,7 +323,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // script from reimplementing the transform to find out.
     //
     // **And asked exactly as the compositor asks it**, through
-    // `crate::state::owns` -- the predicate `Solium::window_under` walks with:
+    // `solium::state::owns` -- the predicate `Solium::window_under` walks with:
     // on a screen that draws the window, and inside what it paints there.
     // Until #134's fourth review this asked only whether the drawn rectangle
     // held the point. With two monitors side by side the left one's hidden
@@ -754,7 +754,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
 }
 
 /// A surface's layer by its name, `None` for a name that is not one.
-pub(crate) fn layer_named(name: &str) -> Option<solium_wm_protocol::Layer> {
+pub fn layer_named(name: &str) -> Option<solium_wm_protocol::Layer> {
     use solium_wm_protocol::Layer;
     match name {
         "background" => Some(Layer::Background),

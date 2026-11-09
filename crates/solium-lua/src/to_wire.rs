@@ -7,9 +7,9 @@ use solium_wm_protocol as wire;
 use solium_animation::Curve;
 use solium_animation::mat4::Mat4;
 
-use crate::script::lua::AnimationSpec;
+use crate::AnimationSpec;
 
-pub(crate) fn easing(curve: Curve) -> wire::Easing {
+pub fn easing(curve: Curve) -> wire::Easing {
     match curve {
         Curve::Linear => wire::Easing::Linear,
         Curve::OutCubic => wire::Easing::OutCubic,
@@ -27,24 +27,24 @@ pub(crate) fn easing(curve: Curve) -> wire::Easing {
     }
 }
 
-pub(crate) fn motion(animation: AnimationSpec) -> wire::Motion {
+pub fn motion(animation: AnimationSpec) -> wire::Motion {
     wire::Motion {
         duration_ms: millis(animation.duration),
         easing: easing(animation.easing),
     }
 }
 
-pub(crate) fn matrix(matrix: Mat4) -> wire::Matrix {
+pub fn matrix(matrix: Mat4) -> wire::Matrix {
     matrix.0.to_vec()
 }
 
 /// An object's fields as JSON text.
-pub(crate) fn object(fields: &std::collections::BTreeMap<String, solium_json::Json>) -> String {
+pub fn object(fields: &std::collections::BTreeMap<String, solium_json::Json>) -> String {
     solium_json::Json::Object(fields.clone()).render()
 }
 
 /// A duration as milliseconds, exact to the nanosecond.
-pub(crate) fn millis(duration: std::time::Duration) -> f64 {
+pub fn millis(duration: std::time::Duration) -> f64 {
     #[expect(
         clippy::cast_precision_loss,
         reason = "nanoseconds of a timer or a timeout, far below 2^53"

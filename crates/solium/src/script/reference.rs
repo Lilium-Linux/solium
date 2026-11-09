@@ -426,7 +426,9 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = Vec::new();
-    for part in ["src", "lua", "qml"] {
+    // The Lua window manager the compositor ships reads the environment the
+    // session runs in too.
+    for part in ["src", "lua", "qml", "../solium-lua/src"] {
         walk(&root.join(part), &mut out);
     }
     let build = root.join("build.rs");

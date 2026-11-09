@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use mlua::{Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 use solium_animation::Curve;
 use solium_animation::mat4::Mat4;
 
-pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Rect>> {
+pub fn rect_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Rect>> {
     let (x, y, w, h) = (
         options.get::<Option<f64>>("x")?,
         options.get::<Option<f64>>("y")?,
@@ -43,7 +43,7 @@ pub(crate) fn rect_from(options: &Table) -> mlua::Result<Option<solium_wm_protoc
 /// The names come from the animation engine rather than a list kept here, so a
 /// curve added there is immediately available to scripts — including springs,
 /// which is why this is a lookup and not a match.
-pub(crate) fn parse_easing(name: &str) -> Option<Curve> {
+pub fn parse_easing(name: &str) -> Option<Curve> {
     Curve::from_name(name).or_else(|| {
         tracing::warn!(easing = name, "unknown easing, keeping the default");
         None
@@ -61,7 +61,7 @@ pub(crate) fn parse_easing(name: &str) -> Option<Curve> {
 /// calls `cubic-bezier`, and what every easing generator on the internet
 /// hands out. Named curves stay for the handful worth naming; this is so a
 /// feel nobody anticipated does not need a compositor release.
-pub(crate) fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
+pub fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
     // Read as a value and matched, not asked for as a String and then as a
     // Table: asking a table for a String does not answer "no", it *fails*, and
     // the failure takes down the whole call it was made from. Which is how
@@ -144,7 +144,7 @@ pub(crate) fn easing_from(options: &Table) -> mlua::Result<Option<Curve>> {
 ///
 /// Returns `None` when nothing was asked for, so a window with no transform
 /// stays on the renderer's cheap path.
-pub(crate) fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
+pub fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
     let degrees = |name: &str| -> mlua::Result<Option<f32>> { options.get::<Option<f32>>(name) };
     let (rx, ry, rz) = (
         degrees("rotate_x")?,
@@ -167,7 +167,7 @@ pub(crate) fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
 }
 
 /// How deep a script asked for a window to be drawn. See
-/// [`crate::present::Frame::z`].
+/// `solium::present::Frame::z`.
 ///
 /// Nothing said — no table at all, or a table that does not mention it — is
 /// `0.0`, which ties with every other window and so leaves the order the stack
@@ -188,7 +188,7 @@ pub(crate) fn transform_from(options: &Table) -> mlua::Result<Option<Mat4>> {
 /// and never reaches any arithmetic — `z` is read in exactly one place, as the
 /// sort key — so `z = math.huge` means "above everything", `-math.huge` means
 /// "behind everything", and both cost nothing to honour.
-pub(crate) fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
+pub fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
     /// Ties with every other window, so the stack's own order survives.
     const LEVEL: f32 = 0.0;
 
@@ -208,7 +208,7 @@ pub(crate) fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
 }
 
 /// What a script asked a window's matrix to turn about, as a fraction of the
-/// rect it is drawn at. See [`crate::present::Frame::pivot`].
+/// rect it is drawn at. See `solium::present::Frame::pivot`.
 ///
 /// **Each axis defaults on its own.** `pivot_x = 0` means the left edge and
 /// says nothing about the vertical; defaulting the pair together would take a
@@ -228,7 +228,7 @@ pub(crate) fn depth_from(options: Option<&Table>) -> mlua::Result<f32> {
 /// `out_w <= 1e-6`, and every comparison against a NaN is false. A window
 /// would vanish, with a damage rectangle to match, because a script divided by
 /// zero. That axis falls back to the centre and says so.
-pub(crate) fn pivot_from(options: Option<&Table>) -> mlua::Result<(f32, f32)> {
+pub fn pivot_from(options: Option<&Table>) -> mlua::Result<(f32, f32)> {
     /// The middle of the window, which is what `warp.rs` computed before there
     /// was a pivot to name.
     const CENTRE: f32 = 0.5;
@@ -255,7 +255,7 @@ pub(crate) fn pivot_from(options: Option<&Table>) -> mlua::Result<(f32, f32)> {
 }
 
 /// The keys of a `deform` that are not the effect's params.
-pub(crate) const DEFORM_KEYS: [&str; 7] = [
+pub const DEFORM_KEYS: [&str; 7] = [
     "effect",
     "to",
     "axis",
@@ -327,7 +327,7 @@ fn is_param(value: &Value) -> bool {
     }
 }
 
-pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Deform>> {
+pub fn deform_from(options: &Table) -> mlua::Result<Option<solium_wm_protocol::Deform>> {
     let Some(deform) = options.get::<Option<Table>>("deform")? else {
         return Ok(None);
     };
@@ -403,7 +403,7 @@ pub(crate) fn deform_from(options: &Table) -> mlua::Result<Option<solium_wm_prot
 /// moves. A rect aims at somewhere that does not move, such as the bottom edge
 /// of a monitor, and is honest about being a snapshot because there is nothing
 /// there to track.
-pub(crate) fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
+pub fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
     if let Some(id) = to.get::<Option<u64>>("window")? {
         return Ok(solium_wm_protocol::Aim::Window(id));
     }
@@ -432,7 +432,7 @@ pub(crate) fn aim_from(to: &Table) -> mlua::Result<solium_wm_protocol::Aim> {
 /// Every key is optional and an absent one is an empty list, so a selection of
 /// nothing is spellable and does nothing — which is what a mode building one
 /// desk per monitor per workspace produces for the cells that are empty.
-pub(crate) fn selection_from(options: &Table) -> mlua::Result<solium_wm_protocol::Selection> {
+pub fn selection_from(options: &Table) -> mlua::Result<solium_wm_protocol::Selection> {
     let names = |key: &str| -> mlua::Result<Vec<String>> {
         match options.get::<Option<Table>>(key)? {
             Some(list) => list.sequence_values::<String>().collect(),
@@ -487,7 +487,7 @@ pub(crate) fn selection_from(options: &Table) -> mlua::Result<solium_wm_protocol
 /// `sol.present` is how a script gives one. An unknown key in this table is
 /// ignored like any other, so a script that writes one gets no window in the
 /// wrong place — it gets nothing, which is the mild half of this note.
-pub(crate) fn shift_from(options: &Table) -> mlua::Result<solium_wm_protocol::Shift> {
+pub fn shift_from(options: &Table) -> mlua::Result<solium_wm_protocol::Shift> {
     Ok(solium_wm_protocol::Shift {
         dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
         dy: options.get::<Option<f64>>("y")?.unwrap_or(0.0),
@@ -508,9 +508,7 @@ pub(crate) fn shift_from(options: &Table) -> mlua::Result<solium_wm_protocol::Sh
 /// selections at different speeds in one dispatch cannot say so with an ambient
 /// setting. Absent, it is the ambient setting, so the two calls feel the same as
 /// every other pair in this file.
-pub(crate) fn motion_from(
-    options: Option<&Table>,
-) -> mlua::Result<(Option<Duration>, Option<Curve>)> {
+pub fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, Option<Curve>)> {
     let Some(options) = options else {
         return Ok((None, None));
     };
@@ -524,7 +522,7 @@ pub(crate) fn motion_from(
 
 /// A present's `motion` with what it leaves out filled from the batch's own
 /// timing (#293).
-pub(crate) fn resolved(
+pub fn resolved(
     motion: Option<PresentMotion>,
     animation: AnimationSpec,
 ) -> Vec<(String, solium_wm_protocol::Motion)> {
@@ -552,9 +550,9 @@ pub(crate) fn resolved(
 /// with the batch's own; no `motion` at all is `None`. Anything else under
 /// `motion` is an error naming it.
 /// `tests::a_present_motion_names_its_properties_and_a_bad_one_is_refused`.
-pub(crate) type PresentMotion = Vec<(&'static str, (Option<Duration>, Option<Curve>))>;
+pub type PresentMotion = Vec<(&'static str, (Option<Duration>, Option<Curve>))>;
 
-pub(crate) fn present_motion_from(options: &Table) -> mlua::Result<Option<PresentMotion>> {
+pub fn present_motion_from(options: &Table) -> mlua::Result<Option<PresentMotion>> {
     let motion = match options.get::<Value>("motion")? {
         Value::Nil => return Ok(None),
         Value::Table(motion) => motion,
@@ -605,7 +603,7 @@ pub(crate) fn present_motion_from(options: &Table) -> mlua::Result<Option<Presen
 /// stayed opaque, or vanished, because a script passed a string or a 2 is a
 /// mistake nobody would find from the screen.
 /// `tests::a_client_opacity_is_a_number_from_0_to_1_and_anything_else_is_refused`.
-pub(crate) fn client_opacity_from(options: &Table, call: &str) -> mlua::Result<Option<f32>> {
+pub fn client_opacity_from(options: &Table, call: &str) -> mlua::Result<Option<f32>> {
     let value = options.get::<Value>("client_opacity")?;
     if value.is_nil() {
         return Ok(None);
@@ -629,12 +627,12 @@ pub(crate) fn client_opacity_from(options: &Table, call: &str) -> mlua::Result<O
 }
 
 /// Where on a window the pointer goes when no `to` says: its centre.
-pub(crate) const CENTRE: (f64, f64) = (0.5, 0.5);
+pub const CENTRE: (f64, f64) = (0.5, 0.5);
 
 /// A warp's options as [`warp_options`] reads them: where on a window, as a
 /// share of its width and height, the motion its picture flies along, and
 /// where real motion mid-flight carries on from.
-pub(crate) type WarpOptions = (
+pub type WarpOptions = (
     Option<(f64, f64)>,
     Option<solium_wm_protocol::Motion>,
     solium_wm_protocol::Interrupt,
@@ -649,7 +647,7 @@ pub(crate) type WarpOptions = (
 /// is `"pointer"`. A duration left out of a motion is the default 220 ms,
 /// and an easing the default `"outCubic"`, as `sol.animate`'s are.
 /// `tests::sol_warp_names_a_window_or_a_point_and_a_bad_one_is_an_error`.
-pub(crate) fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Result<WarpOptions> {
+pub fn warp_options(options: Option<&Table>, caller: &str) -> mlua::Result<WarpOptions> {
     let Some(options) = options else {
         return Ok((None, None, solium_wm_protocol::Interrupt::Pointer));
     };

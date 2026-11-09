@@ -318,7 +318,7 @@ fn every_layer_named_is_one_that_exists() {
     assert!(!asked.is_empty(), "no layers found; the scan is broken");
     for (file, line, name) in asked {
         assert!(
-            crate::script::lua::api::windows::layer_named(&name).is_some(),
+            crate::script::lua::layer_named(&name).is_some(),
             "{file}:{line} puts a surface on layer {name:?}, which is not one of \
              background, bottom, top, overlay"
         );

@@ -1,16 +1,16 @@
 //! The window manager's half of an event: [`Host::handle`] brings its
 //! mirror up to the batch, runs each event's listeners, and answers. The
-//! compositor's half is `crate::wm::events`.
+//! compositor's half is `solium::wm::events`.
 
 use mlua::{Lua, Table, Value};
 use solium_wm_protocol as wire;
 
-use crate::script::lua::*;
+use crate::*;
 
 /// What a dispatch adds to an answer: its commands, then whether
 /// a mode holds input and the status line, as the commands of those names,
 /// and the motion `sol.animate` set.
-pub(crate) fn answered(answer: &mut wire::Answer, pending: Pending) {
+pub fn answered(answer: &mut wire::Answer, pending: Pending) {
     answer.commands.extend(pending.commands);
     if let Some(grab) = pending.grab {
         answer.commands.push(wire::Command::Grab(grab));
@@ -27,7 +27,7 @@ impl Host {
     /// The window manager's half: bring the mirror up to the batch, run
     /// each event's listeners in order, and answer. Each event is its own
     /// dispatch, under the deadline, answering for what moved it.
-    pub(crate) fn handle(&mut self, batch: wire::Batch, ask: Box<dyn Ask>) -> wire::Answer {
+    pub fn handle(&mut self, batch: wire::Batch, ask: Box<dyn Ask>) -> wire::Answer {
         self.mirror.apply_all(batch.changes);
         self.lua.set_app_data(self.mirror.clone());
         self.lua.set_app_data(Asker(ask));

@@ -2337,6 +2337,7 @@ dependencies = [
  "solium-effects",
  "solium-json",
  "solium-layout",
+ "solium-lua",
  "solium-wm-protocol",
  "tracing",
  "tracing-subscriber",
@@ -2346,7 +2347,6 @@ dependencies = [
  "wayland-protocols-wlr",
  "x11rb",
  "xcursor",
- "xkbcommon",
  "zbus",
  "zune-jpeg",
 ]
@@ -2377,6 +2377,21 @@ dependencies = [
 [[package]]
 name = "solium-layout"
 version = "0.0.0"
+
+[[package]]
+name = "solium-lua"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "mlua",
+ "solium-animation",
+ "solium-effects",
+ "solium-json",
+ "solium-layout",
+ "solium-wm-protocol",
+ "tracing",
+ "xkbcommon",
+]
 
 [[package]]
 name = "solium-wm-protocol"

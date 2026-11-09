@@ -2,28 +2,28 @@
 
 use mlua::{Lua, Table, Value};
 
-use crate::script::lua::*;
+use crate::*;
 use solium_json::Json;
 
 /// Ids for reads, writes and watches (#473), counting up across reloads as
 /// `RUNS` and `TIMERS` do.
-pub(crate) static FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How much `sol.read` reads when `files.max_read` does not say: 4 MiB.
-pub(crate) const MAX_READ: usize = 4 << 20;
+pub const MAX_READ: usize = 4 << 20;
 /// The largest store file that is read when `files.store_max` does not
 /// say: 1 MiB. A store is settings and small state, read when it is first
 /// asked for, so a bigger one is taken for a broken one.
-pub(crate) const MAX_STORE: u64 = 1 << 20;
+pub const MAX_STORE: u64 = 1 << 20;
 
 /// What `config.files` says of this window manager's own reads, through
 /// `sol.files` (#473). How often the stores are saved is the compositor's.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FileSettings {
+pub struct FileSettings {
     /// The most a `sol.read` reads, in bytes.
-    pub(crate) max_read: usize,
+    pub max_read: usize,
     /// The largest store file that is read, in bytes.
-    pub(crate) store_max: u64,
+    pub store_max: u64,
 }
 
 impl Default for FileSettings {
@@ -38,7 +38,7 @@ impl Default for FileSettings {
 impl FileSettings {
     /// `sol.files`'s table, read. Each key left out keeps its default, and
     /// one of the wrong kind is named in the log and keeps its default too.
-    pub(crate) fn read(options: Option<&Table>) -> mlua::Result<Self> {
+    pub fn read(options: Option<&Table>) -> mlua::Result<Self> {
         let mut settings = Self::default();
         let Some(options) = options else {
             return Ok(settings);
@@ -80,21 +80,21 @@ impl FileSettings {
 }
 
 /// A number of bytes as a setting writes it: a whole number, 0 or more.
-pub(crate) fn whole_bytes(value: &Value) -> Option<f64> {
+pub fn whole_bytes(value: &Value) -> Option<f64> {
     number(value).filter(|bytes| *bytes >= 0.0 && bytes.fract() == 0.0)
 }
 
 /// The key paths of stores already named in the log for holding what
 /// cannot be saved, so each is named once (#473).
 #[derive(Debug, Default)]
-pub(crate) struct StoreWarnings(pub(crate) std::collections::HashSet<String>);
+pub struct StoreWarnings(pub std::collections::HashSet<String>);
 
 /// Put what a store's file or a reload held into its table (#473): a key
 /// there wins over the default, and a table of defaults with no list part is
 /// filled key by key, so a default added since the file was saved is
 /// still there. A list is taken whole.
 /// `tests::a_store_takes_the_files_keys_and_keeps_the_defaults_it_lacks`.
-pub(crate) fn fill_store(lua: &Lua, table: &Table, found: &solium_json::Json) -> mlua::Result<()> {
+pub fn fill_store(lua: &Lua, table: &Table, found: &solium_json::Json) -> mlua::Result<()> {
     use solium_json::Json;
     match found {
         Json::Object(fields) => {
@@ -122,7 +122,7 @@ pub(crate) fn fill_store(lua: &Lua, table: &Table, found: &solium_json::Json) ->
 
 /// What `sol.watch` hands back: the watch, to cancel (#473).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WatchHandle(pub(crate) u64);
+pub struct WatchHandle(pub u64);
 
 impl mlua::UserData for WatchHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
@@ -148,13 +148,13 @@ impl mlua::UserData for WatchHandle {
 /// Each store's text as the compositor was last given it, loaded or saved,
 /// so a `save-stores` answers with only the stores that changed.
 #[derive(Debug, Default)]
-pub(crate) struct StoresSent(pub(crate) std::collections::HashMap<String, String>);
+pub struct StoresSent(pub std::collections::HashMap<String, String>);
 
 /// A path a configuration names, made absolute: `~/` is the home
 /// directory, and anything that is neither absolute nor under `~/` is
 /// refused, since the window manager's working directory is nobody's.
 /// `tests::a_path_is_absolute_or_under_home`.
-pub(crate) fn expand(path: &str) -> Result<std::path::PathBuf, String> {
+pub fn expand(path: &str) -> Result<std::path::PathBuf, String> {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
@@ -176,8 +176,8 @@ pub(crate) fn expand(path: &str) -> Result<std::path::PathBuf, String> {
 /// to `value`, from the store's name. `left` bounds the values read, since
 /// the walk is Rust, which the handler deadline cannot stop: past it the
 /// whole store is an error and is not saved.
-/// `crate::files::tests::only_plain_data_is_stored`.
-pub(crate) fn plain(
+/// `solium::files::tests::only_plain_data_is_stored`.
+pub fn plain(
     value: &mlua::Value,
     where_it_is: &str,
     depth: usize,

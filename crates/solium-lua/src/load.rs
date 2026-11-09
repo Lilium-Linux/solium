@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 use mlua::{Lua, Table, Value};
 use solium_wm_protocol::Answer;
 
-use crate::script::lua::*;
+use crate::*;
 
 /// Where the configuration is: `SOLIUM_LUA_INIT` when it is set, else the
 /// user's own `init.lua`, else the one in `shipped`. The user's file wins,
 /// and the shipped one is the fallback rather than a default that has to be
 /// copied before anything works.
-pub(crate) fn config_path(shipped: &Path) -> std::path::PathBuf {
+pub fn config_path(shipped: &Path) -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
         return std::path::PathBuf::from(path);
     }
@@ -27,7 +27,7 @@ pub(crate) fn config_path(shipped: &Path) -> std::path::PathBuf {
 }
 
 /// Where a user's own scripts live, whether or not they have any.
-pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
+pub fn user_config_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -40,7 +40,7 @@ impl Host {
     /// Load the configuration and everything it pulls in, cold, and answer
     /// with what its top level asked for and declared; what it asks of the
     /// compositor as it loads goes to `ask`.
-    pub(crate) fn load(config: &Path, setup: Setup, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
+    pub fn load(config: &Path, setup: Setup, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
         let (lua, loaded) = Self::load_as(config, &setup, Keep::new(), ask)?;
         Ok((
             Self {
@@ -69,7 +69,7 @@ impl Host {
     ///     and it holds plain data and the layouts `sol.layout` makes, nothing
     ///     else — see [`Kept`].
     ///  2. **The world as it now is, re-announced.** `restore`, then
-    ///     `monitors`, then `layout` — see [`crate::state::Solium::reload`].
+    ///     `monitors`, then `layout` — see `solium::state::Solium::reload`.
     ///     A script that can rebuild itself from `sol.windows()` and
     ///     `sol.monitors()` needs no keep at all.
     ///
@@ -77,7 +77,7 @@ impl Host {
     /// alternative is every script inventing its own answer, which is what
     /// `workspaces.lua` and `modes.lua` had each done — differently, and one
     /// of them wrongly. See the comment at the top of `lua/modes.lua`.
-    pub(crate) fn reload(&mut self, config: &Path, ask: Box<dyn Ask>) -> Result<Answer> {
+    pub fn reload(&mut self, config: &Path, ask: Box<dyn Ask>) -> Result<Answer> {
         let (lua, loaded) = Self::load_as(config, &self.setup, self.kept(), ask)?;
         self.lua = lua;
         Ok(loaded)
@@ -86,7 +86,7 @@ impl Host {
     /// Bytes Lua is holding. Its allocator does not hand memory back to the
     /// system, so this rising while everything else is flat says the growth is
     /// script-side rather than a compositor leak.
-    pub(crate) fn used_memory(&self) -> usize {
+    pub fn used_memory(&self) -> usize {
         self.lua.used_memory()
     }
 
@@ -117,7 +117,7 @@ impl Host {
     /// per key path; a store of more than 65536 values is not saved at all.
     /// Rust only, so it runs between dispatches: no Lua is called.
     /// `tests::a_store_survives_a_reload_as_the_data_it_saves`.
-    pub(crate) fn stores(&self) -> Vec<(String, solium_json::Json)> {
+    pub fn stores(&self) -> Vec<(String, solium_json::Json)> {
         stores_of(&self.lua)
     }
 
@@ -306,7 +306,7 @@ impl Host {
 
 /// The stores as they would be saved: each `sol.store` table as the plain
 /// data it holds, by name.
-pub(crate) fn stores_of(lua: &Lua) -> Vec<(String, solium_json::Json)> {
+pub fn stores_of(lua: &Lua) -> Vec<(String, solium_json::Json)> {
     let mut out = Vec::new();
     if let Ok(stores) = lua
         .globals()

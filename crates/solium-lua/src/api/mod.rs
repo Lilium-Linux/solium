@@ -11,10 +11,12 @@ mod present;
 mod process;
 mod services;
 mod settings;
-pub(crate) mod windows;
+mod windows;
+
+pub use windows::layer_named;
 
 /// Build the `sol` table.
-pub(crate) fn build_api(lua: &Lua) -> mlua::Result<Table> {
+pub fn build_api(lua: &Lua) -> mlua::Result<Table> {
     let sol = lua.create_table()?;
     sol.set("_bindings", lua.create_table()?)?;
     sol.set("_handlers", lua.create_table()?)?;
