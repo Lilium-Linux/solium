@@ -180,6 +180,15 @@ interface messages {
         decision: option<string>,
     }
 
+    /// What a window manager made of a reload: the answer its configuration
+    /// gave as it loaded again, carrying what it kept, as `hello-answer`'s
+    /// commands are; or why it would not load, in which case the
+    /// configuration that was running goes on running.
+    variant reloaded {
+        loaded(answer),
+        failed(string),
+    }
+
     /// A question only the compositor can answer, asked by a window
     /// manager in the middle of a batch, and answered before anything else.
     variant query {
@@ -213,7 +222,13 @@ interface messages {
         query(tuple<u64, query>),
         /// The answer to the query of that serial.
         reply(tuple<u64, reply>),
-        /// Either side is closing the connection, and says why.
+        /// The configuration at this path, loaded again (the user asked for a
+        /// reload, or it changed on disk). Answered with `reloaded`.
+        reload(string),
+        reloaded(reloaded),
+        /// Either side is closing the connection, and says why. A window
+        /// manager whose configuration would not load says why here, in
+        /// place of `hello-answer`.
         goodbye(string),
     }
 }

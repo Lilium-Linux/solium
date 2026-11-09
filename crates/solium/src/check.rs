@@ -73,6 +73,10 @@ impl<'a> Report<'a> {
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
 pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
     report.line(&format!("checking {}", path.display()));
+    match crate::wm::link::program() {
+        Ok(program) => report.line(&format!("  solium-lua  {}", program.display())),
+        Err(why) => report.line(&format!("  solium-lua  missing: {why}")),
+    }
     // Read only: a check changes none of the user's files (#473).
     match crate::script::Scripts::load_for_check(path) {
         Err(err) => {

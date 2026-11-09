@@ -1225,7 +1225,6 @@ struct Gesture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Memory {
     pub(crate) windows: usize,
-    pub(crate) lua_kb: usize,
     /// Every held memo's bytes (`effect::memo::Memos::held_bytes`).
     pub(crate) memos_kb: u64,
 }
@@ -2557,16 +2556,13 @@ impl Solium {
     }
 
     /// What `memory_report` counts that the compositor holds itself: the
-    /// windows, the Lua heap and the held memos (Ruling F30: outside the
-    /// pool's free-list budget, so counted here, as `memos_kb`).
+    /// windows and the held memos (Ruling F30: outside the pool's free-list
+    /// budget, so counted here, as `memos_kb`). The window manager's Lua is
+    /// a process of its own, with a resident size of its own.
     /// `tests::real_client::a_held_memo_is_in_the_memory_report`.
     pub(crate) fn memory(&self) -> Memory {
         Memory {
             windows: self.panes.len(),
-            lua_kb: self
-                .scripts
-                .as_ref()
-                .map_or(0, |scripts| scripts.used_memory() / 1024),
             memos_kb: self.memos.held_bytes() / 1024,
         }
     }
@@ -2575,8 +2571,8 @@ impl Solium {
     ///
     /// Enabled with `SOLIUM_MEMDIAG=1`. A leak hunt needs to know *which*
     /// number is growing: resident memory alone cannot tell a forgotten
-    /// decoration from a Lua heap that never shrinks from an allocator that
-    /// simply keeps what it has.
+    /// decoration from an allocator that simply keeps what it has. A Lua
+    /// heap that never shrinks is the window manager's, in its own process.
     ///
     /// **`decorations` is no longer among them, and not because it was
     /// redundant.** It counted `Decorations::frames`, and its whole value was
@@ -2619,7 +2615,6 @@ impl Solium {
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
             windows = memory.windows,
-            lua_kb = memory.lua_kb,
             memos_kb = memory.memos_kb,
             rss_kb,
             "MEMDIAG"

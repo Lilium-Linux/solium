@@ -8,16 +8,16 @@ use solium_wm_protocol as wire;
 
 use std::rc::Rc;
 
-use crate::script::lua::{Ask, Host, Setup};
+use crate::script::lua::Ask;
 use crate::script::*;
 use crate::wm::events::Answers;
+use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
 
-/// The window manager, as the compositor talks to it: in this process for
-/// now, the Lua host.
+/// The window manager, as the compositor talks to it: over its socket.
 #[derive(Debug)]
 pub(crate) struct Scripts {
-    pub(crate) host: Host,
+    pub(crate) link: Link,
     /// What the window manager was last told of the desktop, so each batch
     /// tells it only what changed.
     pub(crate) told: crate::wm::diff::Told,
@@ -54,20 +54,21 @@ impl Scripts {
 
     fn load_reading(config: &Path, stores: StoreReads) -> Result<Self> {
         let stores = Rc::new(stores);
-        let (host, loaded) = Host::load(
-            config,
-            Setup {
-                shipped: crate::assets::lua(),
-                debug: crate::dev::debug_mode(),
-            },
-            Box::new(Answers {
-                snapshot: None,
-                stores: Rc::clone(&stores),
-            }),
-        )?;
+        let answers = Answers {
+            snapshot: None,
+            stores: Rc::clone(&stores),
+        };
+        let (link, commands) = Link::start(config, &answers)?;
+        let loaded = wire::Answer {
+            serial: 0,
+            handled: false,
+            commands,
+            motion: None,
+            decision: None,
+        };
         let loaded_stores = stores.take_read();
         let mut scripts = Self {
-            host,
+            link,
             told: crate::wm::diff::Told::new(),
             serial: 0,
             loaded: wire::Answer {
@@ -102,12 +103,11 @@ impl Scripts {
     }
 
     /// Load the configuration again, the window manager carrying what it
-    /// kept ([`Host::reload`]); [`Self::startup`] then hands over what the
-    /// new one asked for. One that fails to load leaves everything as it
-    /// was.
+    /// kept; [`Self::startup`] then hands over what the new one asked for.
+    /// One that fails to load leaves everything as it was.
     pub(crate) fn reload(&mut self, config: &Path) -> Result<()> {
         let answers = self.answers(None);
-        let loaded = self.host.reload(config, answers)?;
+        let loaded = self.link.reload(config, &*answers)?;
         self.loaded_stores = self.stores.take_read();
         self.declared = wire::Declarations {
             bindings: Vec::new(),
@@ -131,15 +131,26 @@ impl Scripts {
         crate::script::lua::user_config_dir()
     }
 
-    /// Bytes the window manager's Lua is holding. See [`Host::used_memory`].
-    pub(crate) fn used_memory(&self) -> usize {
-        self.host.used_memory()
-    }
-
-    /// The window manager's stores, as it would save them.
+    /// The window manager's stores, as it would save them, each as its
+    /// JSON text.
     #[cfg(test)]
-    pub(crate) fn stores(&self) -> Vec<(String, crate::json::Json)> {
-        self.host.stores()
+    pub(crate) fn stores(&self) -> Vec<(String, String)> {
+        self.link
+            .run(
+                Box::new(|wm| {
+                    wm.host()
+                        .stores()
+                        .into_iter()
+                        .map(|(name, json)| format!("{name}\t{}", json.render()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+                &*self.answers(None),
+            )
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(name, json)| (name.to_owned(), json.to_owned()))
+            .collect()
     }
 
     /// What the configuration asked for as it loaded: its top level runs

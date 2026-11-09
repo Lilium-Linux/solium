@@ -566,11 +566,17 @@ impl Scripts {
     /// first `#[cfg(test)]` on purpose -- `every_event_listened_for_is_one_that_is_sent`
     /// reads this file's production half by cutting at the first one.
     pub(crate) fn evaluate(&self, chunk: &str) -> String {
-        self.host
-            .lua
-            .load(chunk)
-            .eval::<String>()
-            .unwrap_or_else(|err| format!("error: {err}"))
+        let chunk = chunk.to_owned();
+        self.link.run(
+            Box::new(move |wm| {
+                let lua = &wm.host().lua;
+                lua.set_app_data(crate::script::lua::Asker(wm.asks()));
+                lua.load(&chunk)
+                    .eval::<String>()
+                    .unwrap_or_else(|err| format!("error: {err}"))
+            }),
+            &*self.answers(None),
+        )
     }
 
     /// [`Self::evaluate`], with `snapshot` as what the compositor looks like:
@@ -580,14 +586,20 @@ impl Scripts {
     /// what the compositor asks in Rust --
     /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
     pub(crate) fn evaluate_in(&self, snapshot: Snapshot, chunk: &str) -> String {
-        let mut mirror = solium_wm_protocol::mirror::Mirror::new();
-        mirror.apply_all(crate::wm::diff::Told::new().changes(&snapshot));
-        self.host.lua.set_app_data(mirror);
-        self.host
-            .lua
-            .set_app_data(crate::script::lua::Asker(Box::new(
-                crate::wm::events::Answers::over(snapshot),
-            )));
-        self.evaluate(chunk)
+        let changes = crate::wm::diff::Told::new().changes(&snapshot);
+        let chunk = chunk.to_owned();
+        self.link.run(
+            Box::new(move |wm| {
+                let mut mirror = solium_wm_protocol::mirror::Mirror::new();
+                mirror.apply_all(changes);
+                let lua = &wm.host().lua;
+                lua.set_app_data(mirror);
+                lua.set_app_data(crate::script::lua::Asker(wm.asks()));
+                lua.load(&chunk)
+                    .eval::<String>()
+                    .unwrap_or_else(|err| format!("error: {err}"))
+            }),
+            &crate::wm::events::Answers::over(snapshot),
+        )
     }
 }

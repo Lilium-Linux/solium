@@ -20,5 +20,6 @@ solium-json = { path = "../json", features = ["lua"] }
 solium-layout = { path = "../layout" }
 solium-wm-protocol = { path = "../wm-protocol" }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Key names for `sol.press`, checked and spelled as xkb spells them.
 xkbcommon = { version = "0.8", default-features = false }

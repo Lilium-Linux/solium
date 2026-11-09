@@ -20,6 +20,7 @@ mod load;
 mod motion;
 mod pending;
 mod runs;
+mod serve;
 pub mod to_wire;
 
 pub use api::*;
@@ -33,6 +34,7 @@ pub use load::{config_path, stores_of, user_config_dir};
 pub use motion::*;
 pub use pending::*;
 pub use runs::*;
+pub use serve::{Wm, compatible, serve};
 
 pub use solium_animation::AnimationSpec;
 pub use solium_wm_protocol::combo::normalise as normalise_combo;

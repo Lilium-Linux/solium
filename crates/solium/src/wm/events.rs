@@ -192,7 +192,9 @@ impl Scripts {
             events: vec![wire::Event::NotifyForget(tokens.to_vec())],
         };
         let answers = self.answers(None);
-        let _ = self.host.handle(batch, answers);
+        if let Err(err) = self.link.answer(batch, &*answers) {
+            tracing::error!("{err:#}");
+        }
     }
 
     /// One of the configuration's own notifications was acted on.
@@ -424,7 +426,19 @@ impl Scripts {
             events: vec![event],
         };
         let answers = self.answers(Some(snapshot));
-        let mut answer = self.host.handle(batch, answers);
+        let serial = batch.serial;
+        let mut answer = self.link.answer(batch, &*answers).unwrap_or_else(|err| {
+            // A window manager that does not answer has asked for nothing:
+            // a key it did not take is the focused client's.
+            tracing::error!("{err:#}");
+            wire::Answer {
+                serial,
+                handled: false,
+                commands: Vec::new(),
+                motion: None,
+                decision: None,
+            }
+        });
         if at_the_lock {
             refuse_past_the_lock(&mut answer);
         }

@@ -1100,14 +1100,17 @@ fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
         Some(true)
     );
 
-    let answer = scripts.host.handle(
-        solium_wm_protocol::Batch {
-            serial: 9,
-            changes: Vec::new(),
-            events: vec![solium_wm_protocol::Event::Relayout],
-        },
-        Box::new(crate::wm::events::Answers::over(empty_snapshot())),
-    );
+    let answer = scripts
+        .link
+        .answer(
+            solium_wm_protocol::Batch {
+                serial: 9,
+                changes: Vec::new(),
+                events: vec![solium_wm_protocol::Event::Relayout],
+            },
+            &crate::wm::events::Answers::over(empty_snapshot()),
+        )
+        .expect("an answer");
     assert!(
         !answer
             .commands

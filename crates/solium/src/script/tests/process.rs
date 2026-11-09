@@ -490,7 +490,7 @@ fn a_store_survives_a_reload_as_the_data_it_saves() {
         scripts
             .stores()
             .iter()
-            .map(|(name, json)| format!("{name}={}", json.render()))
+            .map(|(name, json)| format!("{name}={json}"))
             .collect::<Vec<_>>(),
         [r#"other={"kept":"yes"}"#, r#"prefs={"volume":65}"#]
     );
