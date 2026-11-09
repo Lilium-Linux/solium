@@ -103,9 +103,42 @@ impl Solium {
         // with nothing to show for the first `GRACE` (`Pane::x11_refused_once`,
         // set by `settle_refused`'s own silent route and nowhere a dialog
         // answered). The first `super+q` is still only ever a request.
-        if pane.leaving() {
+        if pane.leaving() || pane.awaiting().is_some() {
             return;
         }
+        // **A Wayland application is asked first, and its window waits for
+        // the answer** (#231), for `config.close.patience`. One that goes
+        // fades from the frame it went on (`depart`), which for an
+        // application that simply closes is the next frame or two. One that
+        // draws its answer in the window -- a terminal asking "are you
+        // sure?" -- keeps the window exactly as it is
+        // (`note_redraw_after_close`). One that says nothing fades when the
+        // patience runs out (`settle_awaiting`), as every window did before.
+        // Fading first and asking afterwards showed the question in a window
+        // that had already gone.
+        //
+        // With no patience, and for an X11 window or one whose application
+        // never arrived, the fade starts now.
+        if !self.close_patience.is_zero() && pane.client().and_then(Window::toplevel).is_some() {
+            let until = self.clock.now() + self.close_patience;
+            self.ask_wayland(id);
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.await_answer(until);
+            }
+            // `settle_awaiting` has a deadline to meet, and only a frame
+            // meets it.
+            self.redraw = true;
+            return;
+        }
+        self.begin_fade(id);
+    }
+
+    /// Start a window leaving: its fade, its place at the front, and the
+    /// layout told the close has begun. [`Self::close_pane`] decides when.
+    fn begin_fade(&mut self, id: crate::pane::PaneId) {
+        let Some(pane) = self.panes.get(id) else {
+            return;
+        };
         // No `let else`. `pane_outer` answers for every pane there is -- see
         // its own documentation -- and the bail that used to be here was dead
         // code that read as a real case: a window the compositor cannot
@@ -122,9 +155,9 @@ impl Solium {
         if let Some(pane) = self.panes.get_mut(id) {
             pane.begin_closing(now + present::CLOSING);
         }
-        // **And a Wayland client is asked now, while its window fades**
-        // (#231). The fade does not wait for the answer, and the answer no
-        // longer waits for the fade: a client that goes leaves on this fade
+        // **And a Wayland client is asked no later than now** (#231): one
+        // `close_pane` did not wait for is asked as its fade starts rather
+        // than when it lands. A client that goes leaves on this fade
         // (`depart`), and one that refuses by drawing is heard while its
         // window is still on screen, so the fade turns round where it is
         // (`settle_redrawn`) instead of landing first.
@@ -547,12 +580,54 @@ impl Solium {
             return;
         }
         let now = self.clock.now();
-        if let Some(pane) = self.panes.get_mut(id) {
-            pane.heard(Reply::Drew(now));
+        let Some(pane) = self.panes.get_mut(id) else {
+            return;
+        };
+        if pane.awaiting().is_some() {
+            // Still waiting to fade: the application has answered in its own
+            // window, and the close is over with nothing having moved. No
+            // script is told, because nothing happened to tell of. If it
+            // goes after all, that is a window closing itself.
+            // `a_window_whose_application_asks_inside_it_is_never_faded`.
+            tracing::debug!(
+                pane = id.get(),
+                "a window answered a close by drawing; leaving it where it is"
+            );
+            pane.stop_awaiting();
+            pane.heard(Reply::None);
+            return;
         }
+        pane.heard(Reply::Drew(now));
         // `settle_redrawn` has a deadline to meet now, and only a frame
         // meets it.
         self.redraw = true;
+    }
+
+    /// Start the fade of every window whose application was asked to close
+    /// and has neither gone nor answered within `config.close.patience`
+    /// (#231). See [`Self::close_pane`].
+    ///
+    /// Returns whether any window is still waiting, so the frames keep
+    /// coming until its patience has run out.
+    pub(crate) fn settle_awaiting(&mut self, now: std::time::Duration) -> bool {
+        // A window whose client went while it waited is fading already, on
+        // `depart`'s fade, and is nobody's to start.
+        let waits = |pane: &Pane| !pane.gone() && !pane.ghost();
+        let due: Vec<crate::pane::PaneId> = self
+            .panes
+            .iter()
+            .filter(|pane| waits(pane) && pane.awaiting().is_some_and(|until| now >= until))
+            .map(Pane::id)
+            .collect();
+        for id in due {
+            if let Some(pane) = self.panes.get_mut(id) {
+                pane.stop_awaiting();
+            }
+            self.begin_fade(id);
+        }
+        self.panes
+            .iter()
+            .any(|pane| waits(pane) && pane.awaiting().is_some())
     }
 
     /// Bring back every window whose client read the close, drew a new frame

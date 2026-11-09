@@ -895,6 +895,7 @@ impl Solium {
                     self.apply_style_rules();
                 }
                 Command::PaneBuild(budget) => self.decorations.set_budget(budget),
+                Command::ClosePatience(patience) => self.close_patience = patience,
                 Command::PaneValues(fields) => {
                     if self.decorations.merge_values(fields) {
                         self.redraw = true;

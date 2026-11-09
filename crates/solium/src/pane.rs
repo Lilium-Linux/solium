@@ -310,6 +310,11 @@ pub(crate) struct Tiles {
 /// request has been read; a new buffer after it was drawn by a client that
 /// knew it had been asked to go.
 ///
+/// What the answer does depends on when it comes. While the window is still
+/// waiting to fade (`Pane::awaiting`), a frame drawn after the pong ends the
+/// close with nothing having moved. Once the fade has started, it brings the
+/// window back (`Solium::settle_redrawn`).
+///
 /// Only a Wayland toplevel's pane leaves [`Reply::None`]. X11 has no ping
 /// here, and keeps `Solium::settle_refused`'s deadline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -547,6 +552,11 @@ pub(crate) struct Pane {
     /// What this pane's client has said about the close it was sent. See
     /// [`Reply`].
     reply: Reply,
+    /// Until when this pane's client has to answer a close before the window
+    /// fades anyway: `Solium::close_pane` asks first and waits this long
+    /// (`config.close.patience`, #231). The window is an ordinary one
+    /// meanwhile, not [`Self::leaving`]. `None` when no answer is awaited.
+    awaiting: Option<Duration>,
     /// Whether scripts have been told this window has gone.
     ///
     /// Set by `Solium::trigger_close`, and never cleared: nothing brings a
@@ -724,6 +734,7 @@ impl Pane {
             asked_at: None,
             answered: false,
             reply: Reply::None,
+            awaiting: None,
             gone: false,
             opened: now,
             adopted: false,
@@ -768,6 +779,7 @@ impl Pane {
             asked_at: None,
             answered: false,
             reply: Reply::None,
+            awaiting: None,
             gone: false,
             opened: now,
             adopted: false,
@@ -1255,6 +1267,21 @@ impl Pane {
     /// and there is nothing left to hear ([`Reply::None`]).
     pub(crate) const fn heard(&mut self, reply: Reply) {
         self.reply = reply;
+    }
+
+    /// Until when this pane's client has to answer a close. See the field.
+    pub(crate) const fn awaiting(&self) -> Option<Duration> {
+        self.awaiting
+    }
+
+    /// The client has been asked to close and has until `until` to answer.
+    pub(crate) const fn await_answer(&mut self, until: Duration) {
+        self.awaiting = Some(until);
+    }
+
+    /// The answer is in, or the wait is over.
+    pub(crate) const fn stop_awaiting(&mut self) {
+        self.awaiting = None;
     }
 
     /// Whether scripts have been told this window has gone. See the field.

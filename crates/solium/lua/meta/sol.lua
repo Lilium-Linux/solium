@@ -1315,6 +1315,15 @@ function sol.release_pointer() end
 ---@return nil
 function sol.pane(name) end
 
+---How long a Wayland application asked to close has to answer before its
+---window starts fading anyway, in milliseconds: `config.close.patience`. An
+---application that goes fades at once, and one that draws its answer in the
+---window keeps the window as it is. 0 fades every window the moment it is
+---asked to close.
+---@param milliseconds number
+---@return nil
+function sol.close_patience(milliseconds) end
+
 ---How long a frame may spend building the windows' frames when the pane style
 ---changes, in milliseconds: `config.pane_build`. At least one scene is built a
 ---frame, however small this is, so a switch always finishes; more time is a

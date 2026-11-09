@@ -29069,6 +29069,144 @@ end
             );
         }
 
+        /// A desk whose compositor waits `patience` for an answer to a
+        /// close, as the shipped configuration's does, with one window
+        /// open and the recorder listening.
+        fn patient(patience: u64) -> (Desk, Opened) {
+            let mut desk = Desk::new();
+            desk.install(RECORDER);
+            desk.state.close_patience = Duration::from_millis(patience);
+            let opened = desk.open_surface();
+            // Past its opening, so the only fade there could be is a close's.
+            frame(&mut desk, Duration::from_secs(1));
+            (desk, opened)
+        }
+
+        /// **A window whose application asks "are you sure?" inside it is
+        /// never faded at all (#231).**
+        ///
+        /// The application is asked first, and its window stays as it is
+        /// while it answers. kitty reads the request and draws its prompt
+        /// in the same window: that is its answer, and the close is over
+        /// without the window having moved, dimmed or left the layout.
+        /// Nothing is told to the layout, because nothing happened.
+        #[test]
+        fn a_window_whose_application_asks_inside_it_is_never_faded() {
+            let (mut desk, opened) = patient(100);
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            let pressed = desk.state.clock.now();
+            desk.pump();
+            assert_eq!(desk.client.closes.len(), 1, "the client was not asked");
+            // Its pong, and then its prompt.
+            desk.pump();
+            commit_buffer(&desk.client, &desk.qh, &opened.surface, 400, 300);
+            desk.pump();
+
+            for step in 0..40 {
+                let now = frame(&mut desk, Duration::from_millis(50));
+                let drawn = drawn_now(&desk.state, opened.pane, now);
+                assert!(
+                    (drawn.opacity - 1.0).abs() < f32::EPSILON,
+                    "the window was drawn at opacity {} {:?} after the close, on frame {step}",
+                    drawn.opacity,
+                    now - pressed
+                );
+            }
+            assert_eq!(
+                desk.events(),
+                format!("open {id}"),
+                "the layout was told about a close that never played"
+            );
+            assert!(
+                !desk.state.panes.get(opened.pane).is_some_and(Pane::leaving),
+                "the window is leaving"
+            );
+            assert_eq!(desk.client.closes.len(), 1, "it was asked again on its own");
+
+            // And the close is over: the next one asks again.
+            desk.state.close_pane(opened.pane);
+            desk.pump();
+            assert_eq!(
+                desk.client.closes.len(),
+                2,
+                "a window that kept its place cannot be asked to close again"
+            );
+        }
+
+        /// **A window whose application goes fades the moment it goes.**
+        ///
+        /// Being asked first costs an application that simply closes
+        /// nothing: its window fades from the frame its client went on,
+        /// well inside the patience, and the layout hears `close`.
+        #[test]
+        fn a_window_whose_application_goes_fades_as_soon_as_it_has_gone() {
+            let (mut desk, opened) = patient(100);
+            let id = opened.pane.get();
+
+            desk.state.close_pane(opened.pane);
+            desk.pump();
+            assert_eq!(
+                desk.events(),
+                format!("open {id}"),
+                "the premise: nothing has faded while the application is asked"
+            );
+            opened.toplevel.destroy();
+            desk.pump();
+            let went = desk.state.clock.now();
+
+            assert_eq!(
+                desk.events(),
+                format!("open {id},close {id}*"),
+                "the layout did not hear the window go"
+            );
+            let fading = drawn_now(&desk.state, opened.pane, went + Duration::from_millis(80));
+            assert!(
+                fading.opacity > 0.0 && fading.opacity < 1.0,
+                "the window is not fading from the moment its application went: {fading:?}"
+            );
+            // And the patience running out later asks nothing of a window
+            // that has gone.
+            frame(&mut desk, Duration::from_millis(150));
+            assert_eq!(desk.events(), format!("open {id},close {id}*"));
+        }
+
+        /// **A window whose application says nothing fades when the
+        /// patience runs out, and `close.patience` is how long that is.**
+        ///
+        /// An application slow to quit, or hung, does not hold its window
+        /// on screen: after the patience the window fades as it always
+        /// has, and the grace that follows decides whether it comes back.
+        #[test]
+        fn a_window_whose_application_says_nothing_fades_when_the_patience_runs_out() {
+            for patience in [100, 300] {
+                let (mut desk, opened) = patient(patience);
+                let id = opened.pane.get();
+
+                desk.state.close_pane(opened.pane);
+                desk.pump();
+                desk.pump();
+                frame(&mut desk, Duration::from_millis(patience - 20));
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id}"),
+                    "{patience}: the window faded before the patience ran out"
+                );
+                frame(&mut desk, Duration::from_millis(40));
+                assert_eq!(
+                    desk.events(),
+                    format!("open {id},closing {id}*"),
+                    "{patience}: the window did not start fading when the patience ran out"
+                );
+                assert_eq!(
+                    desk.client.closes.len(),
+                    1,
+                    "{patience}: the fade asked the client a second time"
+                );
+            }
+        }
+
         /// **The request goes out as the fade starts, so a window whose
         /// client refuses turns round before it has vanished (#231).**
         ///
