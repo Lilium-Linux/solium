@@ -12,6 +12,7 @@
 #include <QtCore/QMetaProperty>
 #include <QtQml/QQmlContext>
 #include <QtQml/QQmlEngine>
+#include <QtQml/QQmlProperty>
 
 #include <algorithm>
 #include <cmath>
@@ -160,6 +161,10 @@ void SoliumSecretState::publish(const QJsonObject &field, const QJsonObject &key
     layout = next_layout;
     rows = next_rows;
 
+    const int next_held = keypad.value(QStringLiteral("held")).toInt(0);
+    const bool held_moved = next_held != held;
+    held = next_held;
+
     const bool next_pressed = keypad.value(QStringLiteral("pressed")).toBool(pressed);
     const bool pressed_moved = next_pressed != pressed;
     pressed = next_pressed;
@@ -179,6 +184,9 @@ void SoliumSecretState::publish(const QJsonObject &field, const QJsonObject &key
     }
     if (pressed_moved) {
         emit pressedChanged();
+    }
+    if (held_moved) {
+        emit heldChanged();
     }
     for (unsigned long long each = 0; each < fresh && each < 64; ++each) {
         emit keyPressed();
@@ -306,6 +314,7 @@ void SoliumSecretKeypad::componentComplete()
         connect(state, &SoliumSecretState::pressedChanged, this,
                 &SoliumSecretKeypad::pressedChanged);
         connect(state, &SoliumSecretState::keyPressed, this, &SoliumSecretKeypad::keyPressed);
+        connect(state, &SoliumSecretState::heldChanged, this, &SoliumSecretKeypad::tellHeld);
         emit layoutChanged();
     }
     rebuild();
@@ -379,6 +388,24 @@ void SoliumSecretKeypad::rebuild()
         }
     }
     place();
+    tellHeld();
+}
+
+/* Each delegate that has a `held` property: whether it is the key held, as
+ * far as `lock.keypad_held` lets the scene know. */
+void SoliumSecretKeypad::tellHeld()
+{
+    const int held = m_lock ? solium_secret_state()->held : 0;
+    for (int at = 0; at < m_keys.size(); ++at) {
+        QQuickItem *key = m_keys.at(at);
+        if (key == nullptr) {
+            continue;
+        }
+        QQmlProperty property(key, QStringLiteral("held"));
+        if (property.isValid() && property.isWritable()) {
+            property.write(held == at + 1);
+        }
+    }
 }
 
 void SoliumSecretKeypad::place()

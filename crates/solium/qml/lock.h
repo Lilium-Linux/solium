@@ -221,6 +221,9 @@ public:
     bool selected = false;
     bool accepting = false;
     bool pressed = false;
+    /* Which key is held, counted from 1, or 0: only while `lock.keypad_held`
+     * is on. */
+    int held = 0;
     /* How many keypad keys have been pressed, ever: each one more is one
      * `keyPressed()`. */
     unsigned long long presses = 0;
@@ -232,6 +235,7 @@ public:
 signals:
     void fieldChanged();
     void pressedChanged();
+    void heldChanged();
     void keyPressed();
     void keypadChanged();
 };
@@ -275,7 +279,8 @@ private:
  * out by Solium in the rows `lock.keypad` names. Each delegate is given
  * `label`, `letters`, `kind`, `row` and `column` once, when it is made; while
  * a key is held the pad is `pressed`, and each key pressed is one
- * `keyPressed()`, never saying which. */
+ * `keyPressed()`, never saying which. With `lock.keypad_held` on, a delegate
+ * that has a `held` property is told while it is the key held. */
 class SoliumSecretKeypad : public QQuickItem
 {
     Q_OBJECT
@@ -308,6 +313,7 @@ protected:
 
 private:
     void rebuild();
+    void tellHeld();
     /* Whether this pad is in a lock scene: decided once, when it is built. */
     bool m_lock = false;
     void place();

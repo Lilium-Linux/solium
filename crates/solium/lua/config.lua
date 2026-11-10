@@ -978,6 +978,13 @@ local defaults = {
         -- way the pointer takes to a key says which key. 0 hides it only over
         -- the pad itself.
         keypad_margin = 32,
+
+        -- Whether a passcode pad's key is told while a finger or the pointer
+        -- holds it: its delegate's `held` property, so the key can answer
+        -- its own press. Off, the scene is told only that some key was
+        -- pressed, never which, and so can never learn a PIN typed on the
+        -- pad; on, it can. A lock screen you trust asks for it.
+        keypad_held = false,
     },
 
     -- X11 windows that are refused a tile, decoration or bar entry outright

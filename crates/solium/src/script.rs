@@ -1818,6 +1818,14 @@ fn lock_auth_settings(options: &mlua::Table) -> crate::lock_auth::Settings {
             ),
         },
     }
+    match options.get::<Value>("keypad_held") {
+        Ok(Value::Nil) | Err(_) => {}
+        Ok(Value::Boolean(held)) => settings.keypad_held = held,
+        Ok(other) => tracing::warn!(
+            value = describe(&other),
+            "lock.keypad_held is true or false; keeping the default, false"
+        ),
+    }
     match options.get::<Value>("pin") {
         Ok(Value::Table(table)) => settings.pin = pin_settings(&table, &whole),
         Ok(Value::Nil) | Err(_) => {}
@@ -12166,6 +12174,7 @@ mod tests {
                     helper_timeout_ms = 5000,
                     retry = { seconds = 1, max_seconds = 8, attempts = 3 },
                     keypad = "keyboard",
+                    keypad_held = true,
                 })"#
             ),
             Settings {
@@ -12184,6 +12193,7 @@ mod tests {
                 },
                 retries: 3,
                 keypad: Keypad::Keyboard,
+                keypad_held: true,
                 pin: crate::pin::Settings::default(),
             }
         );
@@ -12215,6 +12225,7 @@ mod tests {
                 helper_timeout_ms = 5,
                 retry = { seconds = 0, max_seconds = "a minute", attempts = -1 },
                 keypad = 7,
+                keypad_held = "yes",
             })"#,
             "sol.lock({ lockout = { attempts = 0, seconds = 1.5 } })",
         ] {
