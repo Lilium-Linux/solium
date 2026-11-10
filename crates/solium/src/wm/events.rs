@@ -491,6 +491,12 @@ impl Scripts {
         at_the_lock: bool,
         change: bool,
     ) -> Option<(Option<String>, Outcome)> {
+        // An event the window manager does not listen to is not sent, and
+        // is answered as one nobody handled: what changed with it goes
+        // with the next batch that is.
+        if !self.hears(&event) {
+            return Some((None, Outcome::default()));
+        }
         self.serial += 1;
         let batch = wire::Batch {
             serial: self.serial,
@@ -534,8 +540,8 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
             wire::Command::Grab(grab) => outcome.grab = Some(grab),
             wire::Command::Status(status) => outcome.status = Some(status),
             // Kept by [`Scripts`], not applied: what the window manager
-            // declares, and what it keeps.
-            wire::Command::Declare(_) | wire::Command::Keep(_) => {}
+            // declares, what it listens to, and what it keeps.
+            wire::Command::Declare(_) | wire::Command::Listen(_) | wire::Command::Keep(_) => {}
             command => outcome
                 .commands
                 .extend(crate::wm::convert::commands_of(command)),

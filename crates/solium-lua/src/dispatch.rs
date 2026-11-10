@@ -70,6 +70,7 @@ impl Host {
             answer.handled |= handled;
             answered(&mut answer, pending);
             answer.commands.extend(declare_if_changed(&self.lua));
+            answer.commands.extend(crate::listen_if_changed(&self.lua));
             if decision.is_some() {
                 answer.decision = decision;
             }

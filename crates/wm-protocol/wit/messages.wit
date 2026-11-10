@@ -1,11 +1,13 @@
 /// What crosses the socket: one `message` per frame.
 ///
-/// The compositor sends a `batch` of what changed and what happened, at most
-/// one each time its event loop runs; the window manager answers it with an
-/// `answer` naming the same serial. A batch that asks a question (a key, a
-/// press, an open) is answered at once or the compositor goes on without the
-/// answer after `wm.ask-ms`; every other batch is never waited for. The
-/// window manager may also `submit` commands of its own whenever it likes.
+/// The compositor sends a `batch` of what changed and what happened; the
+/// window manager answers it with an `answer` naming the same serial, each
+/// batch once, in the order they came. The compositor waits for an answer
+/// for one frame (the setting `wm.ask-ms`), and then goes on without it: a
+/// bound key is not typed into the window under it, a new window is placed
+/// plainly, a notification is shown. The answer is applied when it comes.
+/// While an answer is owed, no later batch is waited for at all. The window
+/// manager may also `submit` commands of its own whenever it likes.
 interface messages {
     use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc, style};
     use commands.{command, focus-cause, motion};
@@ -89,8 +91,9 @@ interface messages {
         reason: option<string>,
     }
 
-    /// Something that happened, in the order it happened. Each is the event
-    /// a Lua configuration hears through `sol.on`, or a binding firing.
+    /// Something that happened, in the order it happened. A window manager
+    /// is sent the ones it named in its `listen` command, and a few that
+    /// need no listening, which that command lists.
     variant event {
         /// The configuration was loaded: the desktop's first moment.
         startup,

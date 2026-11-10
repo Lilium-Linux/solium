@@ -322,3 +322,146 @@ fn the_shipped_configuration_loads_by_itself() {
         "with its own way to reload"
     );
 }
+
+/// **An event the window manager does not listen to is not sent**: it is
+/// answered at once as one nobody handled, with nothing on the socket. One
+/// it does listen to is sent, and so are those that need no listening: a
+/// key it bound, its own timers.
+#[test]
+fn an_event_nobody_listens_to_is_not_sent() {
+    let (mut scripts, mut hand) = Hand::with(vec![wire::Command::Listen(vec![
+        "closed".to_owned(),
+        "no-such-event".to_owned(),
+    ])]);
+    scripts.settings.ask = SHORT;
+
+    let outcome = scripts.relayout(empty_snapshot());
+    assert!(
+        outcome.commands.is_empty() && !outcome.handled,
+        "{outcome:?}"
+    );
+    let outcome = scripts.opened(7, empty_snapshot());
+    assert!(
+        outcome.commands.is_empty() && !outcome.handled,
+        "{outcome:?}"
+    );
+    assert_eq!(scripts.serial, 0, "neither was a batch");
+
+    hand.answer(1, false, quit());
+    let outcome = scripts.closed(7, empty_snapshot());
+    assert!(asked_to_quit(&outcome), "{outcome:?}");
+    hand.answer(2, true, Vec::new());
+    let outcome = scripts.key("super+t", empty_snapshot());
+    assert!(outcome.handled, "{outcome:?}");
+    hand.answer(3, false, quit());
+    let outcome = scripts.timers_due(&[(4, true)], empty_snapshot());
+    assert!(asked_to_quit(&outcome), "{outcome:?}");
+
+    let sent: Vec<wire::Event> = (0..3)
+        .flat_map(|_| match hand.read() {
+            Message::Batch(batch) => batch.events,
+            other => panic!("not a batch: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            wire::Event::Closed(7),
+            wire::Event::Key("super+t".to_owned()),
+            wire::Event::Timers(vec![(4, true)]),
+        ]
+    );
+}
+
+/// **What a window manager listens to is what it last said, whole**: an
+/// answer that names other events ends the first list, and the event
+/// listened to before is no longer sent.
+#[test]
+fn a_new_list_of_events_takes_the_place_of_the_last() {
+    let (mut scripts, mut hand) =
+        Hand::with(vec![wire::Command::Listen(vec!["closed".to_owned()])]);
+    hand.answer(
+        1,
+        false,
+        vec![wire::Command::Listen(vec!["relayout".to_owned()])],
+    );
+    scripts.closed(7, empty_snapshot());
+    assert_eq!(hand.batch(), 1);
+
+    scripts.closed(8, empty_snapshot());
+    assert_eq!(scripts.serial, 1, "no longer listened to, so not sent");
+    hand.answer(2, false, quit());
+    assert!(asked_to_quit(&scripts.relayout(empty_snapshot())));
+    assert_eq!(hand.batch(), 2);
+}
+
+/// **Commands a window manager sends of its own accord are applied**: with
+/// no batch asking for them, in the order they came among the late
+/// answers, and what they declare is kept as an answer's is.
+#[test]
+fn commands_sent_unasked_are_applied_as_they_come() {
+    let (mut scripts, mut hand) = Hand::with(Vec::new());
+    scripts.hear_ready();
+    assert!(scripts.late.is_empty());
+
+    hand.write(&Message::Submit(quit()));
+    hand.write(&Message::Submit(vec![
+        wire::Command::Status("ticked".to_owned()),
+        wire::Command::Listen(vec!["closed".to_owned()]),
+    ]));
+    // Read as the event loop reads them, woken by the socket.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while scripts.late.len() < 2 {
+        assert!(Instant::now() < deadline, "they never came");
+        scripts.hear_ready();
+    }
+    let first = scripts.late.pop_front().expect("the first");
+    assert!(asked_to_quit(&first.outcome), "{first:?}");
+    let second = scripts.late.pop_front().expect("the second");
+    assert_eq!(second.outcome.status.as_deref(), Some("ticked"));
+    assert!(second.outcome.commands.is_empty(), "{second:?}");
+    assert!(!scripts.down());
+
+    // What the second one said it listens to holds from then on.
+    scripts.relayout(empty_snapshot());
+    assert_eq!(scripts.serial, 0, "`relayout` is no longer listened to");
+}
+
+/// **A configuration is sent what it has a listener for**: an event with
+/// no `sol.on` for it is no batch at all, and it is one from the answer in
+/// which a handler first listens to it.
+#[test]
+fn a_configuration_is_sent_only_what_it_listens_to() {
+    let (directory, mut scripts) = loaded(
+        "listens-as-it-goes",
+        r#"
+        sol.on("close", function(id)
+            sol.status("closed " .. id)
+            sol.on("layout", function() sol.status("laid out") end)
+        end)
+        "#,
+    );
+    let start = scripts.serial;
+    let outcome = scripts.relayout(empty_snapshot());
+    assert_eq!(outcome.status, None);
+    assert_eq!(scripts.serial, start, "nobody listens to it: not sent");
+    assert!(!scripts.hears(&wire::Event::Dragged(wire::PointerMove {
+        id: 1,
+        phase: "motion".to_owned(),
+        x: 0.0,
+        y: 0.0,
+    })));
+    assert!(
+        scripts.hears(&wire::Event::SaveStores),
+        "the runtime's own, whatever the configuration listens to"
+    );
+
+    let outcome = scripts.closed(3, empty_snapshot());
+    assert_eq!(outcome.status.as_deref(), Some("closed 3"));
+    assert_eq!(scripts.serial, start + 1);
+
+    let outcome = scripts.relayout(empty_snapshot());
+    assert_eq!(outcome.status.as_deref(), Some("laid out"));
+    assert_eq!(scripts.serial, start + 2);
+    let _ = std::fs::remove_dir_all(directory);
+}

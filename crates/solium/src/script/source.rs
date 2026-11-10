@@ -107,6 +107,10 @@ pub(crate) const FILES: &[(&str, &str)] = &[
         include_str!("../../../solium-lua/src/dispatch.rs"),
     ),
     (
+        "lua/listens.rs",
+        include_str!("../../../solium-lua/src/listens.rs"),
+    ),
+    (
         "lua/load.rs",
         include_str!("../../../solium-lua/src/load.rs"),
     ),

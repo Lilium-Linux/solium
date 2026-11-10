@@ -130,6 +130,10 @@ pub(crate) struct Scripts {
     /// What the window manager keeps, as it last said: held here for the
     /// one started in its place, should it stop.
     keeps: std::collections::BTreeMap<String, wire::Doc>,
+    /// The events the window manager listens to, as it last said: no other
+    /// is sent, but for those that need no listening
+    /// ([`wire::listen::ALWAYS`]).
+    listens: std::collections::BTreeSet<String>,
 }
 
 /// What a window manager kept, by name, as the compositor holds it.
@@ -238,8 +242,10 @@ impl Scripts {
             stores,
             loaded_stores,
             keeps: std::collections::BTreeMap::new(),
+            listens: std::collections::BTreeSet::new(),
         };
         scripts.declarations_in(&loaded);
+        scripts.listens_in(&loaded);
         scripts.settings_in(&loaded);
         scripts.loaded = loaded;
         scripts
@@ -348,6 +354,7 @@ impl Scripts {
                 Ok(Some(Message::Reloaded(reloaded))) if awaited == Awaited::Reloaded => {
                     return Some(Heard::Reloaded(reloaded));
                 }
+                Ok(Some(Message::Submit(commands))) => self.submitted(commands),
                 Ok(Some(Message::Goodbye(why))) => {
                     self.failed(&anyhow::anyhow!("left: {why}"));
                     return None;
@@ -425,6 +432,7 @@ impl Scripts {
             crate::wm::events::refuse_past_the_lock(&mut answer);
         }
         self.declarations_in(&answer);
+        self.listens_in(&answer);
         self.settings_in(&answer);
         for command in &answer.commands {
             if let wire::Command::Keep((name, doc)) = command {
@@ -545,6 +553,8 @@ impl Scripts {
             notes: Vec::new(),
         };
         self.declarations_in(&loaded);
+        self.listens.clear();
+        self.listens_in(&loaded);
         self.settings = Settings::default();
         self.settings_in(&loaded);
         self.loaded = loaded;
@@ -622,6 +632,66 @@ impl Scripts {
         {
             self.declared = declared.clone();
         }
+    }
+
+    /// Keep the events an answer says the window manager listens to: the
+    /// last `listen` in it, whole. A name that is no event's is said and
+    /// left out.
+    fn listens_in(&mut self, answer: &wire::Answer) {
+        let Some(names) = answer
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                wire::Command::Listen(names) => Some(names),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        self.listens.clear();
+        for name in names {
+            if wire::Event::CASES.contains(&name.as_str()) {
+                self.listens.insert(name.clone());
+            } else {
+                tracing::warn!(
+                    name,
+                    "the window manager listens to an event there is none of; left out"
+                );
+            }
+        }
+    }
+
+    /// Whether the window manager is sent `event`: it listens to it, or it
+    /// is one that needs no listening.
+    pub(crate) fn hears(&self, event: &wire::Event) -> bool {
+        event.always() || self.listens.contains(event.case())
+    }
+
+    /// Commands the window manager sent of its own accord, asked for by no
+    /// batch: applied as a late answer is, in the order they came among
+    /// those.
+    fn submitted(&mut self, commands: Vec<wire::Command>) {
+        let answer = wire::Answer {
+            serial: 0,
+            handled: false,
+            commands,
+            motion: None,
+            decision: None,
+        };
+        self.declarations_in(&answer);
+        self.listens_in(&answer);
+        self.settings_in(&answer);
+        for command in &answer.commands {
+            if let wire::Command::Keep((name, doc)) = command {
+                self.keeps.insert(name.clone(), doc.clone());
+            }
+        }
+        let outcome = crate::wm::events::outcome_of(answer);
+        self.late.push_back(Late {
+            outcome,
+            change: false,
+        });
     }
 
     /// Keep the waits an answer sets: the last `wm` section in it.

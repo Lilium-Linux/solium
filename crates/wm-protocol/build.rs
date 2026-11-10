@@ -204,6 +204,29 @@ fn generate(resolve: &Resolve, id: TypeId, name: &str, out: &mut String) {
                 }
             }
             out.push_str("}\n\n");
+            // Each case's name as the WIT spells it, and all of them: an
+            // event is listened to by its name.
+            let _ = writeln!(
+                out,
+                "impl {ty} {{\n    /// Every case's name, as the WIT spells it, in its order.\n    pub const CASES: &'static [&'static str] = &["
+            );
+            for case in &variant.cases {
+                let _ = writeln!(out, "        {:?},", case.name);
+            }
+            let _ = writeln!(
+                out,
+                "    ];\n\n    /// This case's name, as the WIT spells it.\n    pub const fn case(&self) -> &'static str {{\n        match self {{"
+            );
+            for case in &variant.cases {
+                let pattern = if case.ty.is_some() { "(_)" } else { "" };
+                let _ = writeln!(
+                    out,
+                    "            Self::{}{pattern} => {:?},",
+                    camel(&case.name),
+                    case.name
+                );
+            }
+            out.push_str("        }\n    }\n}\n\n");
             let _ = writeln!(
                 out,
                 "impl Wire for {ty} {{\n    fn encode(&self, out: &mut Vec<u8>) {{\n        match self {{"

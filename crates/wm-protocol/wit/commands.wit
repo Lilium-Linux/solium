@@ -270,7 +270,12 @@ interface commands {
         configure(tuple<string, doc>),
         /// State to hand back when the window manager is restarted.
         keep(tuple<string, doc>),
-        /// The events the window manager listens to; no other is sent.
+        /// The events the window manager listens to, each by its name in
+        /// `event`: all of them, each time the list changes. No other is
+        /// sent, but for those that answer what the window manager itself
+        /// asked for, which need no listening: `startup`, `key`, `runs`,
+        /// `timers`, `files`, `attempts-settled`, `notify-action` and
+        /// `notify-forget`. Until it has said, it listens to none.
         listen(list<string>),
         declare(declarations),
         /// Whether a mode holds the pointer and touch, so a press goes to

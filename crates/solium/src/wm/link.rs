@@ -95,7 +95,7 @@ impl Link {
             .map_err(named)?;
         match answered {
             Some(Message::HelloAnswer(answer)) => {
-                if !crate::script::lua::compatible(wire::VERSION, &answer.version) {
+                if !wire::compatible(wire::VERSION, &answer.version) {
                     bail!(
                         "the window manager speaks the protocol {}, the compositor {}",
                         answer.version,
@@ -496,8 +496,18 @@ pub(crate) mod tests {
     impl Hand {
         /// The compositor's side of a window manager that answered `hello`
         /// with `commands`, and its other end. It keeps the session's time:
-        /// an answer is waited for as long as `wm` says, and no longer.
-        pub(crate) fn with(commands: Vec<wire::Command>) -> (crate::wm::Scripts, Self) {
+        /// an answer is waited for as long as `wm` says, and no longer. It
+        /// listens to every event there is, unless `commands` say what it
+        /// listens to.
+        pub(crate) fn with(mut commands: Vec<wire::Command>) -> (crate::wm::Scripts, Self) {
+            if !commands
+                .iter()
+                .any(|command| matches!(command, wire::Command::Listen(_)))
+            {
+                commands.push(wire::Command::Listen(
+                    wire::listen::listenable().map(str::to_owned).collect(),
+                ));
+            }
             let (ours, theirs) = UnixStream::pair().expect("a socket pair");
             theirs
                 .set_read_timeout(Some(Duration::from_secs(10)))

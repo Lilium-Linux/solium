@@ -316,6 +316,8 @@ impl Host {
         loaded
             .commands
             .push(solium_wm_protocol::Command::Declare(declared));
+        // And the events it listens to, whole: no other is sent.
+        loaded.commands.push(crate::listen(&lua));
 
         Ok((lua, loaded))
     }

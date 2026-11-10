@@ -23,8 +23,10 @@
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
+pub mod client;
 pub mod combo;
 pub mod frame;
+pub mod listen;
 pub mod lock;
 pub mod mirror;
 pub mod present;
@@ -32,6 +34,7 @@ pub mod store;
 pub mod touch;
 mod wire;
 
+pub use client::compatible;
 pub use wire::{DecodeError, Input, Wire};
 
 #[allow(
