@@ -442,6 +442,7 @@
 ---@field prompt_on? string Solium's own lock: the monitor `Lock.promptOn` names, where the scene shows the password field: `"pointer"` (the default), `"primary"`, or a monitor's name, the primary one while it is not plugged in.
 ---@field enter_ms? integer Solium's own lock: how long its scenes take to come down over the desktop as the session locks, reading `Lock.state` as `"locking"`; input is the lock's from the first instant, and the desktop is drawn under the scenes only until this is up. The lock taken before sleep has none. 0 to 600; longer is taken as 600. Default 350.
 ---@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, counted from the first frame drawn after it, reading `Lock.state` as `"unlocking"` from the unlock; input is the desktop's from the unlock on. 0 to 900; longer is taken as 900. Default 450.
+---@field keypad_held? boolean Solium's own lock: whether a `SecretKeypad` key's delegate is told while it is held (its `held` property), so a key can answer its own press. The scene can then tell which keys make the PIN, which it otherwise never can. Default false.
 ---@field keypad_margin? integer Solium's own lock: how near a `SecretKeypad`, in logical pixels, the pointer's motion is kept from the lock scene, as it is over the pad itself. 0 or more. Default 32.
 
 ---@class sol.BackoffOptions

@@ -10,7 +10,11 @@
 //! What QML is told is how many characters there are, whether they are
 //! selected, whether the field takes typing, and that a keypad key was
 //! pressed, never which: `Lock`, `SecretField` and `SecretKeypad`
-//! (`qml/lock.h`).
+//! (`qml/lock.h`). The one exception is the configuration's own:
+//! `lock.keypad_held` tells each key's delegate while it is held, so a key
+//! can answer its own press, at the price that the scene can then tell
+//! which keys make the PIN. Off unless a configuration turns it on.
+//! `tests::a_held_key_is_told_only_when_the_configuration_asks`.
 //! `tests::typed_text_never_reaches_the_lock_scene`,
 //! `tests::a_keypad_key_types_into_the_secret_and_its_scene_never_hears_which`.
 //!
@@ -124,6 +128,8 @@ pub(crate) struct Settings {
     pub(crate) retries: u32,
     /// The rows `SecretKeypad` lays out: `lock.keypad`.
     pub(crate) keypad: Keypad,
+    /// Whether a held key's delegate is told it is held: `lock.keypad_held`.
+    pub(crate) keypad_held: bool,
     /// Whether, and when, a PIN is taken: `lock.pin`.
     pub(crate) pin: crate::pin::Settings,
 }
@@ -140,6 +146,7 @@ impl Default for Settings {
             },
             retries: 5,
             keypad: Keypad::Digits,
+            keypad_held: false,
             pin: crate::pin::Settings::default(),
         }
     }
@@ -589,6 +596,8 @@ pub(crate) struct LockAuth {
     answers: Answers,
     /// How many keypad presses and fingers are holding a key now.
     pad_held: u32,
+    /// The key last pressed while one is held, counted row by row from 0.
+    pad_key: Option<usize>,
     /// Keypad keys pressed, ever: the scene's `keyPressed()`.
     presses: u64,
     /// The layout that was live when the lock switched to the secret one, to
@@ -641,6 +650,7 @@ impl Default for LockAuth {
             serial: 0,
             answers: Answers::default(),
             pad_held: 0,
+            pad_key: None,
             presses: 0,
             restore_layout: None,
             user: User::current(),
@@ -741,6 +751,7 @@ impl LockAuth {
         self.entry_pin = false;
         self.until = None;
         self.pad_held = 0;
+        self.pad_key = None;
     }
 
     /// One edit from a key, a keypad key, or the scene's `Lock.clear()` and
@@ -1119,6 +1130,7 @@ impl LockAuth {
         let Some(key) = self.settings.keypad.key(index) else {
             return;
         };
+        self.pad_key = Some(index);
         self.presses = self.presses.wrapping_add(1);
         let edit = match key {
             PadKey::Char(c) => Edit::Type(c),
@@ -1130,6 +1142,18 @@ impl LockAuth {
 
     pub(crate) fn keypad_up(&mut self) {
         self.pad_held = self.pad_held.saturating_sub(1);
+        if self.pad_held == 0 {
+            self.pad_key = None;
+        }
+    }
+
+    /// Which key the scene is told is held, counted from 1, or 0: none, or
+    /// one held while `lock.keypad_held` is off.
+    fn held_key(&self) -> u64 {
+        match self.pad_key {
+            Some(index) if self.settings.keypad_held && self.pad_held > 0 => index as u64 + 1,
+            _ => 0,
+        }
     }
 
     /// What `Lock`, `SecretField` and `SecretKeypad` read, as one JSON
@@ -1190,6 +1214,7 @@ impl LockAuth {
                 object(vec![
                     ("layout", text(self.settings.keypad.name())),
                     ("pressed", Json::Bool(self.pad_held > 0)),
+                    ("held", number(self.held_key())),
                     ("presses", number(self.presses)),
                     ("rows", self.settings.keypad.json()),
                 ]),
@@ -3039,6 +3064,82 @@ mod tests {
             assert!(
                 locked.state.lock.is_none(),
                 "the passcode and OK did not unlock"
+            );
+        });
+    }
+
+    /// **A held key is told only when the configuration asks**
+    /// (`lock.keypad_held`): off, the default, no key's `held` is ever true,
+    /// a finger on 5 or not; on, 5's is true while the finger is down and
+    /// false once it lifts, and no other key's is. The key types either way.
+    #[test]
+    fn a_held_key_is_told_only_when_the_configuration_asks() {
+        crate::qml::qt_test::on_the_qt_thread(|| {
+            let mut locked = Locked::new(
+                "held",
+                Some(
+                    r#"import QtQuick
+                import Solium
+                Item {
+                    id: root
+                    readonly property int length: field.length
+                    // Which key says it is held, counted from 1, or 0.
+                    readonly property int held: {
+                        for (var i = 0; i < pad.children.length; i++)
+                            if (pad.children[i].held) return i + 1;
+                        return 0;
+                    }
+                    readonly property int helds: {
+                        var n = 0;
+                        for (var i = 0; i < pad.children.length; i++) if (pad.children[i].held) n++;
+                        return n;
+                    }
+                    SecretField { id: field }
+                    SecretKeypad {
+                        id: pad
+                        width: 300
+                        height: 400
+                        delegate: Rectangle {
+                            required property string label
+                            property string letters
+                            property string kind
+                            property int row
+                            property int column
+                            property bool held: false
+                        }
+                    }
+                }"#,
+                ),
+            );
+            let region = locked.region();
+            // 5, the middle of the second row.
+            crate::synth::touch_down(&mut locked.state, region, 0, (150.0, 150.0), 10);
+            crate::synth::touch_frame(&mut locked.state, region);
+            assert_eq!(locked.int("length"), 1, "the premise: the finger typed");
+            assert_eq!(
+                locked.int("held"),
+                0,
+                "a held key was told with lock.keypad_held off"
+            );
+            crate::synth::touch_up(&mut locked.state, region, 0, 11);
+            crate::synth::touch_frame(&mut locked.state, region);
+
+            locked.state.lock_auth.configure(Settings {
+                keypad_held: true,
+                ..Settings::default()
+            });
+            locked.state.lock_auth_changed();
+            crate::synth::touch_down(&mut locked.state, region, 0, (150.0, 150.0), 20);
+            crate::synth::touch_frame(&mut locked.state, region);
+            assert_eq!(locked.int("length"), 2);
+            assert_eq!(locked.int("held"), 5, "5 was not told it is held");
+            assert_eq!(locked.int("helds"), 1, "another key was told it is held");
+            crate::synth::touch_up(&mut locked.state, region, 0, 21);
+            crate::synth::touch_frame(&mut locked.state, region);
+            assert_eq!(
+                locked.int("held"),
+                0,
+                "5 was still held after the finger lifted"
             );
         });
     }
