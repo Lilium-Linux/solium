@@ -89,10 +89,15 @@ pub struct Wm {
 
 impl Wm {
     /// Read the compositor's `hello`, load the configuration at `config`
-    /// with the shipped Lua at `shipped`, and answer: `hello-answer` with
-    /// what it asked for as it loaded, or `goodbye` with why it would not
-    /// load, which is then the error.
-    pub fn start(stream: UnixStream, config: &Path, shipped: PathBuf) -> Result<Self> {
+    /// with the shipped Lua at `shipped` and the user's own at `user`, and
+    /// answer: `hello-answer` with what it asked for as it loaded, or
+    /// `goodbye` with why it would not load, which is then the error.
+    pub fn start(
+        stream: UnixStream,
+        config: &Path,
+        shipped: PathBuf,
+        user: Option<PathBuf>,
+    ) -> Result<Self> {
         let connection = Rc::new(Connection {
             stream,
             reader: RefCell::new(frame::Reader::default()),
@@ -114,6 +119,7 @@ impl Wm {
         }
         let setup = Setup {
             shipped,
+            user,
             debug: hello.debug,
         };
         match Host::load(config, setup, Box::new(Asks(Rc::clone(&connection)))) {
@@ -172,8 +178,13 @@ impl Wm {
 }
 
 /// Run the window manager on `stream` until the compositor says goodbye.
-pub fn serve(stream: UnixStream, config: &Path, shipped: PathBuf) -> Result<()> {
-    let mut wm = Wm::start(stream, config, shipped)?;
+pub fn serve(
+    stream: UnixStream,
+    config: &Path,
+    shipped: PathBuf,
+    user: Option<PathBuf>,
+) -> Result<()> {
+    let mut wm = Wm::start(stream, config, shipped, user)?;
     while wm.step()? {}
     Ok(())
 }

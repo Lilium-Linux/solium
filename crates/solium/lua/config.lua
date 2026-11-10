@@ -768,10 +768,24 @@ local defaults = {
         -- the answer when it comes, and waits for no other until the window
         -- manager has caught up. One frame at 260 Hz. Above 0.
         ask_ms = 4,
-        -- How long, in milliseconds, the window manager's last word is
-        -- waited for: the stores it saves before a reload, and as the
-        -- compositor ends. Above 0.
+        -- The hard deadline, in milliseconds. A window manager that says
+        -- nothing for `strikes` of them running, while an event waits for
+        -- its answer, has stopped: it is ended and started again, with every
+        -- window where it was, and a problem says so. Each listener of this
+        -- configuration is stopped at 100 ms by itself, so this is for one
+        -- that is stuck. Also how long its last word is waited for: the
+        -- stores it saves before a reload, and as the compositor ends.
+        -- Above 0.
         hard_ms = 1000,
+        -- How many hard deadlines running. A whole number, 1 or more.
+        strikes = 3,
+        -- How many times a window manager that stopped, or went, is started
+        -- again within `restart_window_s` seconds. One stop more, and the
+        -- shipped configuration runs in its place, reading nothing of yours,
+        -- until you reload; and if that stops as often, nothing does. A
+        -- whole number, 0 or more; the window above 0.
+        restarts = 3,
+        restart_window_s = 60,
         -- How long, in milliseconds, a configuration may take to load again
         -- on a reload. Above 0.
         load_ms = 10000,

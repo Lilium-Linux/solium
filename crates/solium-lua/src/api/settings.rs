@@ -433,11 +433,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // How long the compositor waits for this window manager: `config.wm`,
-    // which the shipped `init.lua` hands over. The compositor reads it, as
-    // every settings section: `ask_ms`, `hard_ms` and `load_ms`, each a
-    // number of milliseconds above 0, one left out or of the wrong kind
-    // keeping its default.
+    // How long the compositor waits for this window manager, and how often
+    // it starts it again: `config.wm`, which the shipped `init.lua` hands
+    // over. The compositor reads it, as every settings section, one key
+    // left out or of the wrong kind keeping its default.
     // `script::tests::waits::the_wait_for_an_answer_is_the_configurations`.
     sol.set(
         "wm",

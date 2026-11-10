@@ -1394,6 +1394,9 @@ pub(crate) fn run() -> Result<()> {
         // What its reads, writes and watches came to, and its stores saved
         // when they changed (#473): `files.rs`.
         crate::files::settle(&mut state);
+        // What the window manager answered after the compositor stopped
+        // waiting for it, and one that has stopped, started again: `wm`.
+        crate::wm::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.

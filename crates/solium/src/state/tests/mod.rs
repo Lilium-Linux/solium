@@ -475,7 +475,7 @@ fn a_late_answer_is_applied_when_it_comes_and_before_the_next() {
         smithay::reexports::calloop::EventLoop::try_new().expect("an event loop");
     state.wm_watch = Some(crate::wm::Watch::new(event_loop.handle(), |state| state));
     let (mut scripts, mut hand) = Hand::with(Vec::new());
-    scripts.waits.ask = std::time::Duration::from_millis(5);
+    scripts.settings.ask = std::time::Duration::from_millis(5);
     state.start_scripts(Some(scripts));
 
     state.trigger_relayout();
@@ -507,6 +507,60 @@ fn a_late_answer_is_applied_when_it_comes_and_before_the_next() {
             .as_ref()
             .is_some_and(|scripts| scripts.late.is_empty())
     );
+}
+
+/// **A window manager that goes is started again, and a problem says so**:
+/// on the configuration it was started on, told the desktop from the start
+/// as a reload tells it, with every binding working again.
+#[test]
+fn a_window_manager_that_goes_is_started_again_and_a_problem_says_so() {
+    let (_display, mut state, directory) = state_running(
+        "state-wm-restart",
+        r#"
+        local laid = 0
+        sol.on("layout", function() laid = laid + 1; sol.status(tostring(laid)) end)
+        sol.bind("super+t", function() sol.status("bound") end)
+        "#,
+    );
+    state.trigger_relayout();
+    state.trigger_relayout();
+    assert_eq!(state.status, "2");
+
+    state
+        .scripts
+        .as_mut()
+        .expect("a window manager")
+        .link
+        .end_peer();
+    crate::wm::settle(&mut state);
+
+    let scripts = state.scripts.as_ref().expect("one started in its place");
+    assert!(!scripts.down());
+    assert_eq!(state.status, "1", "a new one, told to lay out once");
+    let said: Vec<&str> = state
+        .effects
+        .problems()
+        .iter()
+        .filter(|problem| problem.effect == "wm")
+        .map(|problem| problem.message.as_str())
+        .collect();
+    assert_eq!(
+        said,
+        ["the window manager closed its connection. It was started again."]
+    );
+    assert!(state.trigger("super+t"));
+    assert_eq!(state.status, "bound");
+
+    // And a reload that loads is the end of the matter.
+    state.reload_from(&directory.join("init.lua"));
+    assert!(
+        !state
+            .effects
+            .problems()
+            .iter()
+            .any(|problem| problem.effect == "wm")
+    );
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 /// **A framed pane's `style` is the configured style's name, the default's

@@ -335,7 +335,10 @@
 ---`config.lua`'s `wm`: how long the compositor waits for the window manager.
 ---@class sol.WmOptions
 ---@field ask_ms? number Milliseconds an event's answer is waited for before the compositor goes on by itself, above 0. Default 4.
----@field hard_ms? number Milliseconds the window manager's last word is waited for, before a reload and as the compositor ends, above 0. Default 1000.
+---@field hard_ms? number The hard deadline in milliseconds, above 0: a window manager that says nothing for `strikes` of them running, while an event waits, is ended and started again. Also how long its last word is waited for, before a reload and as the compositor ends. Default 1000.
+---@field strikes? integer How many hard deadlines running, 1 or more. Default 3.
+---@field restarts? integer How many times a window manager that stopped is started again within `restart_window_s`, 0 or more; one stop more and the shipped configuration runs in its place. Default 3.
+---@field restart_window_s? number Seconds, above 0. Default 60.
 ---@field load_ms? number Milliseconds a configuration may take to load again on a reload, above 0. Default 10000.
 
 ---What a `sol.watch` function is told (#473).
@@ -1910,7 +1913,8 @@ function sol.files(options) end
 ---How long the compositor waits for the window manager, which this
 ---configuration runs in: `config.wm`, which the shipped `init.lua` hands
 ---over. After `ask_ms` an event goes on without its answer, which is applied
----when it comes. A key left out, or one of the wrong kind, keeps the default.
+---when it comes; a window manager that stops answering, or goes, is started
+---again. A key left out, or one of the wrong kind, keeps the default.
 ---@param options? sol.WmOptions
 ---@return nil
 function sol.wm(options) end

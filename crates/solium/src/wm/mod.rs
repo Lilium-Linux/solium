@@ -9,10 +9,10 @@ pub(crate) mod events;
 pub(crate) mod link;
 pub(crate) mod rows;
 mod scripts;
+mod settings;
 pub(crate) mod stores;
-mod waits;
 mod wake;
 
 pub(crate) use scripts::{Late, Scripts};
-pub(crate) use waits::{Wait, Waits};
-pub(crate) use wake::Watch;
+pub(crate) use settings::{Restarts, Settings, Start, Wait};
+pub(crate) use wake::{Watch, settle};

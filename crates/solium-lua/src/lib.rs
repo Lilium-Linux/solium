@@ -56,11 +56,14 @@ pub struct Host {
 
 /// What the Lua host is started with: where the shipped Lua is, which a
 /// configuration's `require` finds and which is the configuration when the
-/// user has none, and whether the session runs in debug mode, as `hello`
-/// says.
+/// user has none; where the user's own is, which `require` finds first; and
+/// whether the session runs in debug mode, as `hello` says.
 #[derive(Clone, Debug)]
 pub struct Setup {
     pub shipped: std::path::PathBuf,
+    /// None when only what ships is to run: the compositor's way back from
+    /// a configuration that keeps stopping.
+    pub user: Option<std::path::PathBuf>,
     pub debug: bool,
 }
 

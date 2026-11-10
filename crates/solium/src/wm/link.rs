@@ -32,6 +32,11 @@ pub(crate) struct Link {
     stream: UnixStream,
     reader: RefCell<frame::Reader>,
     peer: Peer,
+    /// The connection failed: the window manager is stopped without a
+    /// goodbye it would not read.
+    abandoned: std::cell::Cell<bool>,
+    /// When the window manager last wrote anything.
+    heard: std::cell::Cell<Instant>,
 }
 
 enum Peer {
@@ -60,19 +65,28 @@ impl std::fmt::Debug for Link {
 impl Link {
     /// Start the window manager on the configuration at `config`, and wait
     /// `within` for its `hello-answer`: what the configuration asked for as
-    /// it loaded. Its questions while it loads go to `answers`.
+    /// it loaded. Its questions while it loads go to `answers`. With
+    /// `shipped_only` it reads nothing of the user's own.
     pub(crate) fn start(
         config: &Path,
+        shipped_only: bool,
         answers: &dyn Ask,
         within: Duration,
     ) -> Result<(Self, Vec<wire::Command>)> {
-        let link = Self::open(config)?;
+        let link = Self::open(config, shipped_only)?;
+        // What goes wrong on the socket is said as what the window manager
+        // did, for whoever reports it to put a name to.
+        let named = |err: anyhow::Error| anyhow!("the window manager {err:#}");
         link.send(&Message::Hello(wire::Hello {
             version: wire::VERSION.to_owned(),
             debug: crate::dev::debug_mode(),
             keeps: Vec::new(),
-        }))?;
-        match link.next(Some(Instant::now() + within), answers)? {
+        }))
+        .map_err(named)?;
+        let answered = link
+            .next(Some(Instant::now() + within), answers)
+            .map_err(named)?;
+        match answered {
             Some(Message::HelloAnswer(answer)) => {
                 if !crate::script::lua::compatible(wire::VERSION, &answer.version) {
                     bail!(
@@ -89,9 +103,11 @@ impl Link {
         }
     }
 
-    /// Write `message` to the window manager, whole.
+    /// Write `message` to the window manager, whole. An error here, and
+    /// from [`Self::next`], says what the window manager did: it follows
+    /// "the window manager" wherever it is reported.
     pub(crate) fn send(&self, message: &Message) -> Result<()> {
-        frame::write(&mut &self.stream, message).context("writing to the window manager")?;
+        frame::write(&mut &self.stream, message).context("could not be written to")?;
         if !matches!(message, Message::Hello(_)) {
             self.wake();
         }
@@ -114,7 +130,7 @@ impl Link {
                         .ask(query.clone())
                         .unwrap_or_else(|| unanswered(&query));
                     frame::write(&mut &self.stream, &Message::Reply((serial, reply)))
-                        .context("answering the window manager")?;
+                        .context("could not be answered")?;
                 }
                 Ok(Some(other)) => return Ok(Some(other)),
                 Ok(None) => {
@@ -122,7 +138,7 @@ impl Link {
                         return Ok(None);
                     }
                 }
-                Err(err) => bail!("the connection to the window manager failed: {err}"),
+                Err(err) => bail!("sent what is not a message: {err}"),
             }
         }
     }
@@ -148,8 +164,9 @@ impl Link {
             }
         };
         match read {
-            Ok(0) => bail!("the window manager closed the connection"),
+            Ok(0) => bail!("closed its connection"),
             Ok(count) => {
+                self.heard.set(Instant::now());
                 self.reader
                     .borrow_mut()
                     .push(chunk.get(..count).unwrap_or_default());
@@ -164,7 +181,7 @@ impl Link {
                 Ok(false)
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => Ok(true),
-            Err(err) => bail!("the connection to the window manager failed: {err}"),
+            Err(err) => bail!("could not be read from: {err}"),
         }
     }
 
@@ -176,13 +193,20 @@ impl Link {
 
     /// The `solium-lua` process, its standard input the socket.
     #[cfg(not(test))]
-    fn open(config: &Path) -> Result<Self> {
+    fn open(config: &Path, shipped_only: bool) -> Result<Self> {
         let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
         let program = program().map_err(|why| anyhow!(why))?;
         use std::os::unix::process::CommandExt as _;
-        let child = std::process::Command::new(&program)
-            .arg(config)
-            .arg(crate::assets::lua())
+        let mut command = std::process::Command::new(&program);
+        command.arg(config).arg(crate::assets::lua());
+        // Where the user's own Lua is, unless none of it is to be read.
+        if let Some(user) = (!shipped_only)
+            .then(crate::script::lua::user_config_dir)
+            .flatten()
+        {
+            command.arg(user);
+        }
+        let child = command
             .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
                 theirs,
             )))
@@ -206,7 +230,21 @@ impl Link {
             stream,
             reader: RefCell::new(frame::Reader::default()),
             peer,
+            abandoned: std::cell::Cell::new(false),
+            heard: std::cell::Cell::new(Instant::now()),
         })
+    }
+
+    /// When the window manager last wrote anything: an answer, a question,
+    /// or part of either.
+    pub(crate) fn heard(&self) -> Instant {
+        self.heard.get()
+    }
+
+    /// The connection has failed: when this is dropped the window manager
+    /// is stopped at once, not said goodbye to and waited for.
+    pub(crate) fn abandon(&self) {
+        self.abandoned.set(true);
     }
 
     /// Tell a window manager on a thread that a message is waiting.
@@ -230,11 +268,16 @@ impl Drop for Link {
     fn drop(&mut self) {
         match &mut self.peer {
             Peer::Process(child) => {
+                let child = child.get_mut();
+                if self.abandoned.get() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
                 let _ = frame::write(
                     &mut &self.stream,
                     &Message::Goodbye("the compositor is closing".to_owned()),
                 );
-                let child = child.get_mut();
                 let until = Instant::now() + Duration::from_secs(1);
                 while Instant::now() < until {
                     if let Ok(Some(_)) = child.try_wait() {
@@ -303,18 +346,19 @@ pub(crate) mod tests {
 
     impl Link {
         /// The window manager on a thread of its own, over a socket pair.
-        pub(super) fn open(config: &Path) -> Result<Self> {
+        pub(super) fn open(config: &Path, shipped_only: bool) -> Result<Self> {
             let (ours, theirs) =
                 UnixStream::pair().context("making the window manager's socket")?;
             let (control, heard) = mpsc::channel::<Control>();
             let config = config.to_owned();
+            let user = (!shipped_only).then(solium_lua::user_config_dir).flatten();
             // What it logs as it loads goes to the log the test is reading.
             let log = tracing::dispatcher::get_default(Clone::clone);
             let thread = std::thread::Builder::new()
                 .name("window manager".to_owned())
                 .spawn(move || {
                     let started = tracing::dispatcher::with_default(&log, || {
-                        solium_lua::Wm::start(theirs, &config, crate::assets::lua())
+                        solium_lua::Wm::start(theirs, &config, crate::assets::lua(), user)
                     });
                     let Ok(mut wm) = started else {
                         return;
@@ -359,6 +403,17 @@ pub(crate) mod tests {
                 },
             )
             .expect("a socket")
+        }
+
+        /// End the window manager on its thread, as one that crashed ends:
+        /// its end of the socket closes, and it says nothing first.
+        pub(crate) fn end_peer(&mut self) {
+            if let Peer::Thread { control, thread } = &mut self.peer {
+                control.take();
+                if let Some(thread) = thread.take() {
+                    let _ = thread.join();
+                }
+            }
         }
 
         /// Run `job` on the window manager's thread and hand back what it
@@ -412,8 +467,13 @@ pub(crate) mod tests {
             theirs
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("a timeout");
-            let mut scripts =
-                crate::wm::Scripts::over(Link::over(ours), commands, std::rc::Rc::default());
+            let mut scripts = crate::wm::Scripts::over(
+                Link::over(ours),
+                commands,
+                std::rc::Rc::default(),
+                Path::new("/played/by/hand.lua"),
+                false,
+            );
             scripts.patient = false;
             (
                 scripts,

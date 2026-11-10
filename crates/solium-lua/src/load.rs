@@ -26,6 +26,17 @@ pub fn config_path(shipped: &Path) -> std::path::PathBuf {
     shipped.join("init.lua")
 }
 
+/// Where `require` looks, in order: the user's directory when there is
+/// one, the configuration's own, the shipped set, then Lua's.
+fn search_path(directory: &str, setup: &Setup, lua: &str) -> String {
+    let shipped = setup.shipped.display();
+    let search = format!("{directory}/?.lua;{shipped}/?.lua;{lua}");
+    match &setup.user {
+        Some(user) => format!("{}/?.lua;{search}", user.display()),
+        None => search,
+    }
+}
+
 /// Where a user's own scripts live, whether or not they have any.
 pub fn user_config_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
@@ -252,13 +263,8 @@ impl Host {
             // *Where* the shipped directory is, is the host's [`Setup`]: the
             // compositor answers it once, for the Lua and the QML together.
             // What is local to this function is only the order.
-            let shipped = setup.shipped.display();
-            let mut search = format!("{directory}/?.lua;{shipped}/?.lua;{path}");
-            if let Some(user) = user_config_dir() {
-                search = format!("{}/?.lua;{search}", user.display());
-            }
             package
-                .set("path", search)
+                .set("path", search_path(directory, setup, &path))
                 .map_err(failed("extending package.path"))?;
         }
 
@@ -337,4 +343,26 @@ pub fn stores_of(lua: &Lua) -> Vec<(String, solium_json::Json)> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Setup, search_path};
+
+    #[test]
+    fn with_no_directory_of_the_users_require_finds_only_what_ships() {
+        let setup = |user: Option<&str>| Setup {
+            shipped: "/shipped".into(),
+            user: user.map(Into::into),
+            debug: false,
+        };
+        assert_eq!(
+            search_path("/config", &setup(Some("/home/user/solium")), "?.lua"),
+            "/home/user/solium/?.lua;/config/?.lua;/shipped/?.lua;?.lua"
+        );
+        assert_eq!(
+            search_path("/shipped", &setup(None), "?.lua"),
+            "/shipped/?.lua;/shipped/?.lua;?.lua"
+        );
+    }
 }

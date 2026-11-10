@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use solium_wm_protocol::{self as wire, Message};
 
 use super::*;
-use crate::wm::Waits;
+use crate::wm::Settings;
 use crate::wm::link::tests::Hand;
 
 /// A wait short enough to run out in a test, and long enough to be seen.
@@ -40,7 +40,7 @@ fn an_answer_in_time_is_handed_back_with_the_event() {
 #[test]
 fn an_answer_that_comes_late_is_kept_for_when_it_comes() {
     let (mut scripts, mut hand) = Hand::with(Vec::new());
-    scripts.waits.ask = SHORT;
+    scripts.settings.ask = SHORT;
     let outcome = scripts.relayout(empty_snapshot());
     assert!(outcome.commands.is_empty(), "nothing came: {outcome:?}");
     scripts.hear_ready();
@@ -60,7 +60,7 @@ fn an_answer_that_comes_late_is_kept_for_when_it_comes() {
 fn nothing_is_waited_for_while_the_window_manager_is_behind() {
     let (mut scripts, mut hand) = Hand::with(Vec::new());
     let wait = Duration::from_millis(150);
-    scripts.waits.ask = wait;
+    scripts.settings.ask = wait;
     let told = Instant::now();
     scripts.relayout(empty_snapshot());
     assert!(told.elapsed() >= wait, "the first is waited for");
@@ -90,7 +90,7 @@ fn nothing_is_waited_for_while_the_window_manager_is_behind() {
 #[test]
 fn the_last_word_is_waited_for_past_the_answers_before_it() {
     let (mut scripts, mut hand) = Hand::with(Vec::new());
-    scripts.waits.ask = SHORT;
+    scripts.settings.ask = SHORT;
     scripts.relayout(empty_snapshot());
     hand.answer(1, false, vec![wire::Command::Status("first".to_owned())]);
     hand.answer(2, false, quit());
@@ -125,7 +125,7 @@ fn a_bound_key_unanswered_in_time_is_not_the_focused_clients() {
         notes: Vec::new(),
     });
     let (mut scripts, mut hand) = Hand::with(vec![bound]);
-    scripts.waits.ask = SHORT;
+    scripts.settings.ask = SHORT;
     assert!(scripts.key("super+t", empty_snapshot()).handled);
     assert!(!scripts.key("super+u", empty_snapshot()).handled);
 
@@ -147,7 +147,7 @@ fn a_bound_key_unanswered_in_time_is_not_the_focused_clients() {
 #[test]
 fn a_wheel_turn_unanswered_in_time_is_taken_as_the_last_one_was() {
     let (mut scripts, mut hand) = Hand::with(Vec::new());
-    scripts.waits.ask = SHORT;
+    scripts.settings.ask = SHORT;
     assert!(
         !scripts.scrolled(0.0, 1.0, empty_snapshot()).handled,
         "nobody has taken one yet"
@@ -186,7 +186,7 @@ fn drawn_over_the_point(id: u64) -> Snapshot {
 #[test]
 fn a_question_is_answered_from_the_desktop_its_batch_was_sent_with() {
     let (mut scripts, mut hand) = Hand::with(Vec::new());
-    scripts.waits.ask = SHORT;
+    scripts.settings.ask = SHORT;
     scripts.relayout(drawn_over_the_point(7));
     scripts.relayout(empty_snapshot());
     assert_eq!((hand.batch(), hand.batch()), (1, 2));
@@ -220,17 +220,17 @@ fn the_wait_for_an_answer_is_the_configurations() {
     );
     let _ = std::fs::remove_dir_all(directory);
     assert_eq!(
-        scripts.waits,
-        Waits {
+        scripts.settings,
+        Settings {
             ask: Duration::from_secs(2),
             load: Duration::from_secs(20),
-            ..Waits::default()
+            ..Settings::default()
         }
     );
 
     let answered_in_60_ms = |ask: Duration| {
         let (mut scripts, mut hand) = Hand::with(Vec::new());
-        scripts.waits.ask = ask;
+        scripts.settings.ask = ask;
         let answering = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(60));
             hand.answer(1, false, quit());
@@ -240,7 +240,7 @@ fn the_wait_for_an_answer_is_the_configurations() {
         let _hand = answering.join();
         asked_to_quit(&outcome)
     };
-    assert!(!answered_in_60_ms(Waits::default().ask));
+    assert!(!answered_in_60_ms(Settings::default().ask));
     assert!(answered_in_60_ms(Duration::from_secs(2)));
 }
 
@@ -254,7 +254,7 @@ fn the_shipped_configuration_waits_as_the_compositor_does_by_default() {
         return;
     };
     let _ = std::fs::remove_dir_all(directory);
-    assert_eq!(scripts.waits, Waits::default());
+    assert_eq!(scripts.settings, Settings::default());
 }
 
 /// **A window manager that has gone is told nothing more**, and each event
@@ -266,4 +266,58 @@ fn a_window_manager_that_has_gone_is_told_nothing_more() {
     assert!(scripts.relayout(empty_snapshot()).commands.is_empty());
     assert!(scripts.down());
     assert!(!scripts.key("super+t", empty_snapshot()).handled);
+}
+
+/// **A window manager that says nothing for `wm.strikes` hard deadlines
+/// running, with a batch waiting, has stopped.** Counted from the last
+/// thing it said: a question is a sign of life, and one slow answer does
+/// not make the batches behind it late in their turn.
+#[test]
+fn a_window_manager_that_says_nothing_with_a_batch_waiting_has_stopped() {
+    let (mut scripts, mut hand) = Hand::with(Vec::new());
+    scripts.settings.ask = SHORT;
+    scripts.settings.hard = Duration::from_secs(1);
+    scripts.settings.strikes = 3;
+    let before = Instant::now();
+    scripts.relayout(empty_snapshot());
+    scripts.relayout(empty_snapshot());
+    let after = Instant::now();
+
+    scripts.stalled(before + Duration::from_millis(2999));
+    assert!(!scripts.down(), "three seconds have not passed");
+
+    // It asks something two seconds in: it is there, and slow.
+    hand.write(&Message::Query((1, wire::Query::Styles)));
+    scripts.hear_ready();
+    let asked = Instant::now();
+    scripts.stalled(after + Duration::from_secs(3));
+    assert!(!scripts.down(), "it said something since");
+
+    scripts.stalled(asked + Duration::from_secs(3));
+    assert!(scripts.down());
+    assert_eq!(scripts.why_down(), Some("answered nothing for 3000 ms"));
+}
+
+/// **Nothing waiting, nothing to answer**: a window manager nobody has
+/// told anything is not one that stopped, however long it is quiet.
+#[test]
+fn a_window_manager_with_nothing_to_answer_is_never_one_that_stopped() {
+    let (mut scripts, mut hand) = Hand::with(Vec::new());
+    hand.answer(1, false, Vec::new());
+    scripts.relayout(empty_snapshot());
+    scripts.stalled(Instant::now() + Duration::from_secs(3600));
+    assert!(!scripts.down());
+}
+
+/// **The shipped configuration loads with nothing of the user's own**: what
+/// the compositor starts in place of a configuration that keeps stopping.
+#[test]
+fn the_shipped_configuration_loads_by_itself() {
+    let scripts = Scripts::load_shipped().expect("the shipped configuration");
+    assert!(scripts.shipped_only());
+    assert_eq!(scripts.config(), crate::assets::lua().join("init.lua"));
+    assert!(
+        scripts.has_binding("super+shift+r"),
+        "with its own way to reload"
+    );
 }

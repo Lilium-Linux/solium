@@ -518,6 +518,9 @@ pub(crate) struct Solium {
     /// What keeps the window manager's socket in the event loop, from the
     /// backend that has one: [`Self::watch_wm`].
     pub(crate) wm_watch: Option<crate::wm::Watch>,
+    /// When the window manager last stopped and was started again, for
+    /// `wm.restarts`: [`Self::restart_wm`].
+    pub(crate) wm_restarts: crate::wm::Restarts,
 
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
@@ -1571,6 +1574,7 @@ impl Solium {
             input: crate::input::devices::Registry::default(),
             scripts: None,
             wm_watch: None,
+            wm_restarts: crate::wm::Restarts::default(),
             status: String::new(),
             script_grab: false,
             keys_forwarded: std::collections::HashSet::new(),

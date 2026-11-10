@@ -1194,6 +1194,17 @@ impl Solium {
         // The window manager reloads itself, carrying what it kept; one
         // that fails to load leaves the running configuration as it was.
         let reloaded = match self.scripts.take() {
+            // The shipped configuration, run in place of one that kept
+            // stopping, reads nothing of the user's: a reload is how theirs
+            // is tried again, in a window manager of its own, and the
+            // shipped one goes on if it will not load.
+            Some(scripts) if scripts.shipped_only() => match Scripts::load(path) {
+                Ok(loaded) => Ok(loaded),
+                Err(err) => {
+                    self.scripts = Some(scripts);
+                    Err(err)
+                }
+            },
             Some(mut scripts) => match scripts.reload(path) {
                 Ok(()) => Ok(scripts),
                 Err(err) => {
@@ -1203,6 +1214,86 @@ impl Solium {
             },
             None => Scripts::load(path),
         };
+        if reloaded.is_ok() {
+            // A reload that loads is the user's word that this is the
+            // window manager to run: what the last one's stops said is
+            // over, and so is their count. Before the new configuration is
+            // told the problems there are.
+            self.effects.clear_problems_of("wm");
+            self.wm_restarts = crate::wm::Restarts::default();
+        }
+        self.take_on(reloaded, path);
+    }
+
+    /// Start the window manager again, in place of one that stopped
+    /// answering or went ([`Scripts::down`]). Every window stays where it
+    /// is, and a problem says what happened.
+    ///
+    /// As a reload does it, with a new window manager: the timers, runs and
+    /// watches of the one that stopped went with it, and the new one is
+    /// told the desktop from the start. One that stops more than
+    /// `wm.restarts` times in `wm.restart_window_s` is replaced by the
+    /// shipped configuration, which reads nothing of the user's, and when
+    /// that stops as often, by nothing.
+    /// `tests::a_window_manager_that_goes_is_started_again_and_a_problem_says_so`.
+    pub(crate) fn restart_wm(&mut self) {
+        let Some(scripts) = self.scripts.take() else {
+            return;
+        };
+        let why = scripts.why_down().unwrap_or("stopped").to_owned();
+        let config = scripts.config().to_owned();
+        let shipped_only = scripts.shipped_only();
+        let window = scripts.settings.restart_window.as_secs_f64();
+        let start =
+            self.wm_restarts
+                .stopped(std::time::Instant::now(), &scripts.settings, shipped_only);
+        drop(scripts);
+        self.watch_wm();
+        tracing::error!(why, ?start, "the window manager stopped");
+        let again = format!("the window manager {why}. It was started again.");
+        let (started, said) = match start {
+            crate::wm::Start::Again if shipped_only => (Some(Scripts::load_shipped()), again),
+            crate::wm::Start::Again => (
+                // One that will not start at all is no better than one
+                // that keeps stopping.
+                Some(Scripts::load(&config).or_else(|err| {
+                    tracing::error!("{err:#}");
+                    Scripts::load_shipped()
+                })),
+                again,
+            ),
+            crate::wm::Start::Shipped => (
+                Some(Scripts::load_shipped()),
+                format!(
+                    "the window manager {why}, once too often in {window} s. The shipped \
+                     configuration is running in its place: reload to run yours again."
+                ),
+            ),
+            crate::wm::Start::Nothing => (
+                None,
+                format!(
+                    "the window manager {why}, once too often in {window} s, and so did \
+                     the shipped configuration. No window manager is running."
+                ),
+            ),
+        };
+        if !started.is_some_and(|started| self.take_on(started, &config)) {
+            // Nothing took its place: what it started is still its own.
+            self.runs.stop_all();
+            self.timers.clear();
+            self.files.reload();
+        }
+        self.effects.clear_problems_of("wm");
+        self.effects
+            .push_problem(crate::effect::host::Problem::error(
+                "wm", &config, None, said,
+            ));
+        self.redraw = true;
+    }
+
+    /// Take a window manager that has just loaded, or loaded again, in
+    /// place of the one before: whether there was one to take.
+    fn take_on(&mut self, reloaded: anyhow::Result<Scripts>, path: &std::path::Path) -> bool {
         match reloaded {
             Ok(scripts) => {
                 crate::qml::clear_cache();
@@ -1328,6 +1419,7 @@ impl Solium {
                          away and back again, which re-states where every desk sits"
                     );
                 }
+                true
             }
             Err(err) => {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
@@ -1338,6 +1430,7 @@ impl Solium {
                 self.effects.clear_problems_of("config");
                 self.effects
                     .push_problem(crate::effect::host::config_problem(&format!("{err:#}")));
+                false
             }
         }
     }

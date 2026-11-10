@@ -29,7 +29,7 @@ use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
-use crate::wm::{Wait, Waits};
+use crate::wm::{Settings, Wait};
 
 /// A batch the window manager has not answered yet.
 #[derive(Debug)]
@@ -96,12 +96,17 @@ pub(crate) struct Scripts {
     /// The answers that came with nobody waiting for them, oldest first.
     pub(crate) late: VecDeque<Late>,
     /// How long each kind of message is waited for: `wm`.
-    pub(crate) waits: Waits,
+    pub(crate) settings: Settings,
     /// Whether every answer is waited for, as a test does.
     #[cfg(test)]
     pub(crate) patient: bool,
-    /// The connection failed, with why said once: nothing more is sent.
-    down: bool,
+    /// The connection failed, or the window manager stopped answering,
+    /// and why: nothing more is sent.
+    down: Option<String>,
+    /// The configuration it was started on, to start it on again.
+    config: std::path::PathBuf,
+    /// It was started to read nothing of the user's own.
+    shipped_only: bool,
     pub(crate) took: Took,
     /// What the configuration answered its load with: the settings and
     /// requests its top level made, which [`Scripts::startup`] hands over
@@ -127,29 +132,43 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 impl Scripts {
     /// Load the configuration, cold.
     pub(crate) fn load(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::default())
+        Self::load_reading(config, StoreReads::default(), false)
+    }
+
+    /// Load the shipped configuration and nothing of the user's own: what
+    /// takes the place of a configuration that keeps stopping.
+    pub(crate) fn load_shipped() -> Result<Self> {
+        let config = crate::assets::lua().join("init.lua");
+        Self::load_reading(&config, StoreReads::default(), true)
     }
 
     /// Load the configuration for `solium --check`: as [`Self::load`] does,
     /// except that nothing of the user's is changed, so a store's broken
     /// file stays where it is and is said in [`Self::check_notes`] (#473).
     pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::checking())
+        Self::load_reading(config, StoreReads::checking(), false)
     }
 
-    fn load_reading(config: &Path, stores: StoreReads) -> Result<Self> {
+    fn load_reading(config: &Path, stores: StoreReads, shipped_only: bool) -> Result<Self> {
         let stores = Rc::new(stores);
         let answers = Answers {
             snapshot: None,
             stores: Rc::clone(&stores),
         };
-        let (link, commands) = Link::start(config, &answers, Waits::default().load)?;
-        Ok(Self::over(link, commands, stores))
+        let within = Settings::default().load;
+        let (link, commands) = Link::start(config, shipped_only, &answers, within)?;
+        Ok(Self::over(link, commands, stores, config, shipped_only))
     }
 
-    /// The window manager at the other end of `link`, which answered
-    /// `hello` with `commands`.
-    pub(crate) fn over(link: Link, commands: Vec<wire::Command>, stores: Rc<StoreReads>) -> Self {
+    /// The window manager at the other end of `link`, started on `config`,
+    /// which answered `hello` with `commands`.
+    pub(crate) fn over(
+        link: Link,
+        commands: Vec<wire::Command>,
+        stores: Rc<StoreReads>,
+        config: &Path,
+        shipped_only: bool,
+    ) -> Self {
         let loaded = wire::Answer {
             serial: 0,
             handled: false,
@@ -164,10 +183,12 @@ impl Scripts {
             serial: 0,
             pending: VecDeque::new(),
             late: VecDeque::new(),
-            waits: Waits::default(),
+            settings: Settings::default(),
             #[cfg(test)]
             patient: true,
-            down: false,
+            down: None,
+            config: config.to_owned(),
+            shipped_only,
             took: Took::default(),
             loaded: wire::Answer {
                 serial: 0,
@@ -187,7 +208,7 @@ impl Scripts {
             loaded_stores,
         };
         scripts.declarations_in(&loaded);
-        scripts.waits_in(&loaded);
+        scripts.settings_in(&loaded);
         scripts.loaded = loaded;
         scripts
     }
@@ -212,7 +233,7 @@ impl Scripts {
         change: bool,
         wait: Wait,
     ) -> Option<(Option<String>, Outcome)> {
-        if self.down {
+        if self.down() {
             return None;
         }
         let serial = batch.serial;
@@ -247,8 +268,8 @@ impl Scripts {
         }
         match wait {
             Wait::Frame if behind => std::time::Duration::ZERO,
-            Wait::Frame => self.waits.ask,
-            Wait::Last => self.waits.hard,
+            Wait::Frame => self.settings.ask,
+            Wait::Last => self.settings.hard,
         }
     }
 
@@ -296,7 +317,7 @@ impl Scripts {
                     return Some(Heard::Reloaded(reloaded));
                 }
                 Ok(Some(Message::Goodbye(why))) => {
-                    self.failed(&anyhow::anyhow!("the window manager left: {why}"));
+                    self.failed(&anyhow::anyhow!("left: {why}"));
                     return None;
                 }
                 Ok(Some(other)) => tracing::warn!(
@@ -315,8 +336,30 @@ impl Scripts {
     /// Read what the window manager has sent since it was last read,
     /// without waiting: its answers are in [`Self::late`] afterwards.
     pub(crate) fn hear_ready(&mut self) {
-        if !self.down {
+        if !self.down() {
             self.hear(Awaited::Nothing, None);
+        }
+    }
+
+    /// Whether the window manager has stopped answering, at `now`: a batch
+    /// is waiting, and it has said nothing for `wm.strikes` hard deadlines
+    /// running. Counted from the last thing it said, not from when the
+    /// batch was sent: one slow answer does not make the batches behind it
+    /// late in their turn.
+    pub(crate) fn stalled(&mut self, now: Instant) {
+        if self.down() {
+            return;
+        }
+        let Some(waiting) = self.pending.front() else {
+            return;
+        };
+        let quiet = now.saturating_duration_since(waiting.sent.max(self.link.heard()));
+        let allowed = self.settings.hard.saturating_mul(self.settings.strikes);
+        if quiet >= allowed {
+            self.failed(&anyhow::anyhow!(
+                "answered nothing for {} ms",
+                allowed.as_millis()
+            ));
         }
     }
 
@@ -350,44 +393,63 @@ impl Scripts {
             crate::wm::events::refuse_past_the_lock(&mut answer);
         }
         self.declarations_in(&answer);
-        self.waits_in(&answer);
+        self.settings_in(&answer);
         let decision = answer.decision.take();
         let mut outcome = crate::wm::events::outcome_of(answer);
         outcome.commands.splice(0..0, self.stores.take_read());
         (decision, outcome)
     }
 
-    /// The connection failed: say why, once, and send nothing more. What
-    /// was never answered never will be.
+    /// The window manager stopped, `err` being how: nothing more is sent,
+    /// and what was never answered never will be.
+    /// [`crate::state::Solium::restart_wm`] starts another.
     fn failed(&mut self, err: &anyhow::Error) {
-        if !std::mem::replace(&mut self.down, true) {
-            tracing::error!("{err:#}");
+        if self.down.is_none() {
+            let why = format!("{err:#}");
+            tracing::error!("the window manager {why}");
+            self.down = Some(why);
+            self.link.abandon();
         }
         self.pending.clear();
     }
 
-    /// Whether the connection to the window manager has failed.
+    /// Whether the window manager has stopped: gone, or not answering.
     pub(crate) fn down(&self) -> bool {
-        self.down
+        self.down.is_some()
+    }
+
+    /// How it stopped, as what follows "the window manager".
+    pub(crate) fn why_down(&self) -> Option<&str> {
+        self.down.as_deref()
+    }
+
+    /// The configuration it was started on.
+    pub(crate) fn config(&self) -> &Path {
+        &self.config
+    }
+
+    /// Whether it was started to read nothing of the user's own.
+    pub(crate) fn shipped_only(&self) -> bool {
+        self.shipped_only
     }
 
     /// Load the configuration again, the window manager carrying what it
     /// kept; [`Self::startup`] then hands over what the new one asked for.
     /// One that fails to load leaves everything as it was.
     pub(crate) fn reload(&mut self, config: &Path) -> Result<()> {
-        if self.down {
-            bail!("the window manager has gone");
+        if self.down() {
+            bail!("the window manager has stopped");
         }
         let path = config.to_string_lossy().into_owned();
         self.link.send(&Message::Reload(path))?;
         let within = {
             #[cfg(test)]
             {
-                self.waits.load.max(PATIENCE)
+                self.settings.load.max(PATIENCE)
             }
             #[cfg(not(test))]
             {
-                self.waits.load
+                self.settings.load
             }
         };
         let loaded = match self.hear(Awaited::Reloaded, Some(Instant::now() + within)) {
@@ -403,8 +465,8 @@ impl Scripts {
             notes: Vec::new(),
         };
         self.declarations_in(&loaded);
-        self.waits = Waits::default();
-        self.waits_in(&loaded);
+        self.settings = Settings::default();
+        self.settings_in(&loaded);
         self.loaded = loaded;
         self.started = false;
         Ok(())
@@ -473,7 +535,7 @@ impl Scripts {
     }
 
     /// Keep the waits an answer sets: the last `wm` section in it.
-    fn waits_in(&mut self, answer: &wire::Answer) {
+    fn settings_in(&mut self, answer: &wire::Answer) {
         if let Some(waits) = answer
             .commands
             .iter()
@@ -485,7 +547,7 @@ impl Scripts {
                 _ => None,
             })
         {
-            self.waits = crate::script::settings::wm::parse(&waits);
+            self.settings = crate::script::settings::wm::parse(&waits);
         }
     }
 

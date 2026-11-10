@@ -1,9 +1,12 @@
 //! `solium-lua`: Solium's Lua window manager, as the compositor starts it.
 //!
-//! `solium-lua <config> <shipped-lua>`, with the socket to the compositor
-//! as its standard input. It answers `hello`, then every batch, until the
-//! compositor says goodbye. Its log goes to its standard error, which is the
-//! compositor's.
+//! `solium-lua <config> <shipped-lua> [<user-lua>]`, with the socket to the
+//! compositor as its standard input: the configuration to load, where the
+//! shipped Lua is, and where the user's own is. It answers `hello`, then
+//! every batch, until the compositor says goodbye. Its log goes to its
+//! standard error, which is the compositor's. With no `<user-lua>` nothing
+//! of the user's own is read: how the compositor starts it in place of a
+//! configuration that keeps stopping.
 
 use std::io::IsTerminal;
 use std::os::fd::AsFd;
@@ -23,9 +26,10 @@ fn main() -> ExitCode {
         .init();
     let mut arguments = std::env::args_os().skip(1);
     let (Some(config), Some(shipped)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: solium-lua <config> <shipped-lua>, started by solium");
+        eprintln!("usage: solium-lua <config> <shipped-lua> [<user-lua>], started by solium");
         return ExitCode::from(2);
     };
+    let user = arguments.next().map(PathBuf::from);
     let stream = match std::io::stdin()
         .as_fd()
         .try_clone_to_owned()
@@ -38,7 +42,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match solium_lua::serve(stream, &PathBuf::from(config), PathBuf::from(shipped)) {
+    match solium_lua::serve(stream, &PathBuf::from(config), PathBuf::from(shipped), user) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("{err:#}");
