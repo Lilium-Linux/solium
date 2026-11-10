@@ -24,6 +24,7 @@
 //! "fake". An absolute scroll position would drift away from focus the moment
 //! a column ahead of it changed width.
 
+use crate::plain::Plain;
 use crate::{Floors, Rect, Settings};
 
 /// A column of the strip.
@@ -102,6 +103,82 @@ impl Scroller {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The strip as plain data: its columns, which has focus, where the
+    /// view sits, the widths it cycles through and where in them it is, and
+    /// each window's floor. [`Self::from_plain`] reads it back as the same
+    /// strip.
+    #[must_use]
+    pub fn to_plain(&self) -> Plain {
+        Plain::List(vec![
+            Plain::List(
+                self.columns
+                    .iter()
+                    .map(|column| {
+                        Plain::List(vec![
+                            Plain::List(
+                                column.windows.iter().copied().map(Plain::window).collect(),
+                            ),
+                            Plain::place(column.active),
+                            Plain::Num(column.width),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Plain::place(self.active),
+            Plain::Num(self.view_offset),
+            Plain::List(self.widths.iter().copied().map(Plain::Num).collect()),
+            Plain::place(self.preset),
+            crate::plain::of_floors(&self.floors),
+        ])
+    }
+
+    /// The strip [`Self::to_plain`] made `plain` from, or `None` when it is
+    /// not a strip: a column with no window in it, a focus past the end, no
+    /// width to cycle through, a width that is not a number.
+    #[must_use]
+    pub fn from_plain(plain: &Plain) -> Option<Self> {
+        let [columns, active, view_offset, widths, preset, floors] = plain.as_list()? else {
+            return None;
+        };
+        let columns = columns
+            .as_list()?
+            .iter()
+            .map(|column| {
+                let [windows, active, width] = column.as_list()? else {
+                    return None;
+                };
+                let windows = windows
+                    .as_list()?
+                    .iter()
+                    .map(Plain::as_window)
+                    .collect::<Option<Vec<u64>>>()?;
+                let active = active.as_place().filter(|active| *active < windows.len())?;
+                Some(Column {
+                    windows,
+                    active,
+                    width: width.as_num()?,
+                })
+            })
+            .collect::<Option<Vec<Column>>>()?;
+        let active = active
+            .as_place()
+            .filter(|active| *active < columns.len().max(1))?;
+        let widths = widths
+            .as_list()?
+            .iter()
+            .map(Plain::as_num)
+            .collect::<Option<Vec<f64>>>()?;
+        let preset = preset.as_place().filter(|preset| *preset < widths.len())?;
+        Some(Self {
+            columns,
+            active,
+            view_offset: view_offset.as_num()?,
+            widths,
+            preset,
+            floors: crate::plain::floors(floors)?,
+        })
     }
 
     /// A strip cycling through widths of the caller's choosing.

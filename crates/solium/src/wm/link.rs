@@ -66,10 +66,13 @@ impl Link {
     /// Start the window manager on the configuration at `config`, and wait
     /// `within` for its `hello-answer`: what the configuration asked for as
     /// it loaded. Its questions while it loads go to `answers`. With
-    /// `shipped_only` it reads nothing of the user's own.
+    /// `shipped_only` it reads nothing of the user's own. `keeps` is what
+    /// the window manager it takes the place of kept, handed to it in
+    /// `hello`: nothing, for the first.
     pub(crate) fn start(
         config: &Path,
         shipped_only: bool,
+        keeps: Vec<(String, wire::Doc)>,
         answers: &dyn Ask,
         within: Duration,
     ) -> Result<(Self, Vec<wire::Command>)> {
@@ -80,7 +83,7 @@ impl Link {
         link.send(&Message::Hello(wire::Hello {
             version: wire::VERSION.to_owned(),
             debug: crate::dev::debug_mode(),
-            keeps: Vec::new(),
+            keeps,
         }))
         .map_err(named)?;
         let answered = link

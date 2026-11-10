@@ -518,13 +518,20 @@ fn a_window_manager_that_goes_is_started_again_and_a_problem_says_so() {
         "state-wm-restart",
         r#"
         local laid = 0
-        sol.on("layout", function() laid = laid + 1; sol.status(tostring(laid)) end)
+        local kept = sol.keep("desk", { laid = 0 })
+        sol.on("layout", function()
+            laid = laid + 1
+            kept.laid = kept.laid + 1
+            sol.status(laid .. " of " .. kept.laid)
+        end)
         sol.bind("super+t", function() sol.status("bound") end)
         "#,
     );
     state.trigger_relayout();
     state.trigger_relayout();
-    assert_eq!(state.status, "2");
+    assert_eq!(state.status, "2 of 2");
+    // What it keeps, asked for as it is every `files.store_interval`.
+    crate::files::save_stores_at_last(&mut state);
 
     state
         .scripts
@@ -536,7 +543,10 @@ fn a_window_manager_that_goes_is_started_again_and_a_problem_says_so() {
 
     let scripts = state.scripts.as_ref().expect("one started in its place");
     assert!(!scripts.down());
-    assert_eq!(state.status, "1", "a new one, told to lay out once");
+    assert_eq!(
+        state.status, "1 of 3",
+        "a new one, told to lay out once, with what the old one kept"
+    );
     let said: Vec<&str> = state
         .effects
         .problems()

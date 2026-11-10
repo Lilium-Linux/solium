@@ -533,8 +533,9 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
         match command {
             wire::Command::Grab(grab) => outcome.grab = Some(grab),
             wire::Command::Status(status) => outcome.status = Some(status),
-            // Kept by [`Scripts::declarations_in`], not applied.
-            wire::Command::Declare(_) => {}
+            // Kept by [`Scripts`], not applied: what the window manager
+            // declares, and what it keeps.
+            wire::Command::Declare(_) | wire::Command::Keep(_) => {}
             command => outcome
                 .commands
                 .extend(crate::wm::convert::commands_of(command)),

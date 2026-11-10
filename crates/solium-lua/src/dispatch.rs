@@ -444,10 +444,31 @@ fn run(
                     sent.0.insert(name.clone(), text.clone());
                 }
             }
+            // And what it keeps, for the compositor to hold: what it hands
+            // to the window manager started in this one's place, should
+            // this one stop.
+            let keeps = super::keeps_of(lua);
+            let kept: Vec<(String, wire::Doc)> = {
+                let sent = lua.app_data_ref::<KeepsSent>();
+                keeps
+                    .into_iter()
+                    .filter(|(name, doc)| {
+                        sent.as_ref().and_then(|sent| sent.0.get(name)) != Some(doc)
+                    })
+                    .collect()
+            };
+            if let Some(mut sent) = lua.app_data_mut::<KeepsSent>() {
+                for (name, doc) in &kept {
+                    sent.0.insert(name.clone(), doc.clone());
+                }
+            }
             with_pending(lua, |pending| {
                 pending
                     .commands
                     .extend(changed.into_iter().map(wire::Command::Store));
+                pending
+                    .commands
+                    .extend(kept.into_iter().map(wire::Command::Keep));
             })?;
             Ok(false)
         }

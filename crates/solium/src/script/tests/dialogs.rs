@@ -3305,6 +3305,56 @@ mod reload {
         nothing_moved(&commands, &rects, &[1, 2, 3]);
     }
 
+    /// **And so does a window manager started in place of one that stopped.**
+    ///
+    /// The compositor asks for what the window manager keeps with its
+    /// stores, holds it as documents, and hands it to the next one in
+    /// `hello`: the tree crosses a socket twice and comes back the tree it
+    /// was, where a new window manager would otherwise build one from the
+    /// window list, as a reload did before #118.
+    #[test]
+    fn a_window_manager_started_in_its_place_finds_the_tiled_desk_exactly_as_it_was() {
+        let (mut scripts, entry) = session("");
+        let mut rects = HashMap::new();
+        press(&mut scripts, &mut rects, &[], "super+t", (1280.0, 720.0));
+        open(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
+        open(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
+        open(&mut scripts, &mut rects, 3, &[2, 1], (1900.0, 1100.0));
+        let dragged = scripts.resized(
+            1,
+            (900.0, 720.0),
+            (Some("right"), None),
+            desk(&rects, &[1, 3, 2], (900.0, 720.0)),
+        );
+        rects.extend(placed(&dragged.commands));
+        let tree = arrangement(&scripts, "tiling", "1@DP-1");
+        let now = desk(&rects, &[1, 3, 2], (900.0, 720.0));
+
+        let _ = scripts.save_stores(now.clone());
+        let keeps = scripts.take_keeps();
+        assert!(
+            keeps.iter().any(|(name, _)| name == "tiling"),
+            "the compositor was not sent the tiling keep: {:?}",
+            keeps.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        // Unchanged, it is not sent again.
+        let _ = scripts.save_stores(now.clone());
+        assert!(scripts.take_keeps().is_empty());
+        drop(scripts);
+
+        let mut again = Scripts::start_again(&entry, false, keeps).expect("started again");
+        let _ = again.startup();
+        let mut commands = again.restored(now.clone()).commands;
+        commands.extend(again.monitors_changed(now.clone()).commands);
+        commands.extend(again.relayout(now).commands);
+        assert_eq!(
+            arrangement(&again, "tiling", "1@DP-1"),
+            tree,
+            "the window manager started in its place has a different tree"
+        );
+        nothing_moved(&commands, &rects, &[1, 2, 3]);
+    }
+
     /// **#118 as it was reported: on workspace 3, Firefox and then kitty,
     /// a reload, and the two traded places.**
     ///

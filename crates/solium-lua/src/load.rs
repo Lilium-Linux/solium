@@ -48,11 +48,18 @@ pub fn user_config_dir() -> Option<std::path::PathBuf> {
 }
 
 impl Host {
-    /// Load the configuration and everything it pulls in, cold, and answer
-    /// with what its top level asked for and declared; what it asks of the
-    /// compositor as it loads goes to `ask`.
-    pub fn load(config: &Path, setup: Setup, ask: Box<dyn Ask>) -> Result<(Self, Answer)> {
-        let (lua, loaded) = Self::load_as(config, &setup, Keep::new(), ask)?;
+    /// Load the configuration and everything it pulls in, and answer with
+    /// what its top level asked for and declared; what it asks of the
+    /// compositor as it loads goes to `ask`. `carried` is what the window
+    /// manager before this one kept, when it is started in place of one:
+    /// nothing, cold.
+    pub fn load(
+        config: &Path,
+        setup: Setup,
+        carried: Keep,
+        ask: Box<dyn Ask>,
+    ) -> Result<(Self, Answer)> {
+        let (lua, loaded) = Self::load_as(config, &setup, carried, ask)?;
         Ok((
             Self {
                 lua,
@@ -110,10 +117,13 @@ impl Host {
         let Ok(keeps) = sol.get::<Table>("_keeps") else {
             return Keep::new();
         };
+        let mut said = std::collections::HashSet::new();
         let keeps = keeps
             .pairs::<String, Value>()
             .filter_map(Result::ok)
-            .filter_map(|(name, value)| Kept::read(&value, 0, &name).map(|kept| (name, kept)))
+            .filter_map(|(name, value)| {
+                Kept::read(&value, 0, &name, &mut said).map(|kept| (name, kept))
+            })
             .collect();
         // A store is carried as the plain data it saves, so a reload gives
         // back what a restart would (#473).
@@ -146,6 +156,7 @@ impl Host {
         lua.set_app_data(Asker(ask));
         lua.set_app_data(Pending::default());
         lua.set_app_data(StoresSent::default());
+        lua.set_app_data(KeepsSent::default());
         lua.set_app_data(Carried(carried));
 
         let sol = build_api(&lua).map_err(failed("building the script API"))?;
@@ -308,6 +319,30 @@ impl Host {
 
         Ok((lua, loaded))
     }
+}
+
+/// What the configuration keeps, each `sol.keep` table as the document
+/// the compositor holds for it, by name, in the order of the names. Read,
+/// not moved: the running scripts are left as they were.
+pub fn keeps_of(lua: &Lua) -> Vec<(String, solium_wm_protocol::Doc)> {
+    let Ok(keeps) = lua
+        .globals()
+        .get::<Table>("sol")
+        .and_then(|sol| sol.get::<Table>("_keeps"))
+    else {
+        return Vec::new();
+    };
+    let mut said = lua.remove_app_data::<KeepWarnings>().unwrap_or_default();
+    let mut docs: Vec<(String, solium_wm_protocol::Doc)> = keeps
+        .pairs::<String, Value>()
+        .filter_map(Result::ok)
+        .filter_map(|(name, value)| {
+            Kept::read(&value, 0, &name, &mut said.0).map(|kept| (name, kept.to_doc()))
+        })
+        .collect();
+    lua.set_app_data(said);
+    docs.sort_by(|(one, _), (other, _)| one.cmp(other));
+    docs
 }
 
 /// The stores as they would be saved: each `sol.store` table as the plain

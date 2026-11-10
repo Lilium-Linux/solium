@@ -91,7 +91,9 @@ impl Wm {
     /// Read the compositor's `hello`, load the configuration at `config`
     /// with the shipped Lua at `shipped` and the user's own at `user`, and
     /// answer: `hello-answer` with what it asked for as it loaded, or
-    /// `goodbye` with why it would not load, which is then the error.
+    /// `goodbye` with why it would not load, which is then the error. What
+    /// `hello` hands back of a window manager this one takes the place of
+    /// is what `sol.keep` answers with.
     pub fn start(
         stream: UnixStream,
         config: &Path,
@@ -122,7 +124,13 @@ impl Wm {
             user,
             debug: hello.debug,
         };
-        match Host::load(config, setup, Box::new(Asks(Rc::clone(&connection)))) {
+        let carried = crate::Keep::from_wire(&hello.keeps);
+        match Host::load(
+            config,
+            setup,
+            carried,
+            Box::new(Asks(Rc::clone(&connection))),
+        ) {
             Ok((host, loaded)) => {
                 connection.send(&Message::HelloAnswer(wire::HelloAnswer {
                     version: wire::VERSION.to_owned(),

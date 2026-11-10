@@ -122,7 +122,13 @@ pub(crate) struct Scripts {
     pub(crate) stores: Rc<StoreReads>,
     /// The stores read as it loaded, handed over with [`Self::startup`].
     loaded_stores: Vec<Command>,
+    /// What the window manager keeps, as it last said: held here for the
+    /// one started in its place, should it stop.
+    keeps: std::collections::BTreeMap<String, wire::Doc>,
 }
+
+/// What a window manager kept, by name, as the compositor holds it.
+pub(crate) type Keeps = Vec<(String, wire::Doc)>;
 
 /// How long a test waits for an answer: long enough that only a window
 /// manager that is not going to answer misses it.
@@ -132,31 +138,42 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 impl Scripts {
     /// Load the configuration, cold.
     pub(crate) fn load(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::default(), false)
+        Self::load_reading(config, StoreReads::default(), false, Vec::new())
     }
 
-    /// Load the shipped configuration and nothing of the user's own: what
-    /// takes the place of a configuration that keeps stopping.
-    pub(crate) fn load_shipped() -> Result<Self> {
-        let config = crate::assets::lua().join("init.lua");
-        Self::load_reading(&config, StoreReads::default(), true)
+    /// Start a window manager on `config` in place of one that stopped,
+    /// handing it what that one kept. With `shipped_only` it reads nothing
+    /// of the user's own: [`Self::shipped_config`], in place of a
+    /// configuration that keeps stopping.
+    pub(crate) fn start_again(config: &Path, shipped_only: bool, keeps: Keeps) -> Result<Self> {
+        Self::load_reading(config, StoreReads::default(), shipped_only, keeps)
+    }
+
+    /// The configuration that ships.
+    pub(crate) fn shipped_config() -> std::path::PathBuf {
+        crate::assets::lua().join("init.lua")
     }
 
     /// Load the configuration for `solium --check`: as [`Self::load`] does,
     /// except that nothing of the user's is changed, so a store's broken
     /// file stays where it is and is said in [`Self::check_notes`] (#473).
     pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::checking(), false)
+        Self::load_reading(config, StoreReads::checking(), false, Vec::new())
     }
 
-    fn load_reading(config: &Path, stores: StoreReads, shipped_only: bool) -> Result<Self> {
+    fn load_reading(
+        config: &Path,
+        stores: StoreReads,
+        shipped_only: bool,
+        keeps: Keeps,
+    ) -> Result<Self> {
         let stores = Rc::new(stores);
         let answers = Answers {
             snapshot: None,
             stores: Rc::clone(&stores),
         };
         let within = Settings::default().load;
-        let (link, commands) = Link::start(config, shipped_only, &answers, within)?;
+        let (link, commands) = Link::start(config, shipped_only, keeps, &answers, within)?;
         Ok(Self::over(link, commands, stores, config, shipped_only))
     }
 
@@ -206,6 +223,7 @@ impl Scripts {
             },
             stores,
             loaded_stores,
+            keeps: std::collections::BTreeMap::new(),
         };
         scripts.declarations_in(&loaded);
         scripts.settings_in(&loaded);
@@ -394,6 +412,11 @@ impl Scripts {
         }
         self.declarations_in(&answer);
         self.settings_in(&answer);
+        for command in &answer.commands {
+            if let wire::Command::Keep((name, doc)) = command {
+                self.keeps.insert(name.clone(), doc.clone());
+            }
+        }
         let decision = answer.decision.take();
         let mut outcome = crate::wm::events::outcome_of(answer);
         outcome.commands.splice(0..0, self.stores.take_read());
@@ -469,7 +492,17 @@ impl Scripts {
         self.settings_in(&loaded);
         self.loaded = loaded;
         self.started = false;
+        // The new configuration says what it keeps when it is next asked:
+        // what the old one kept under a name this one never asks for is
+        // nobody's.
+        self.keeps.clear();
         Ok(())
+    }
+
+    /// What the window manager keeps, as it last said, taken from it: for
+    /// the one started in its place.
+    pub(crate) fn take_keeps(&mut self) -> Keeps {
+        std::mem::take(&mut self.keeps).into_iter().collect()
     }
 
     /// Where the configuration is. See [`crate::script::lua::config_path`].

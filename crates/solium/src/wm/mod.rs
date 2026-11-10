@@ -13,6 +13,6 @@ mod settings;
 pub(crate) mod stores;
 mod wake;
 
-pub(crate) use scripts::{Late, Scripts};
+pub(crate) use scripts::{Keeps, Late, Scripts};
 pub(crate) use settings::{Restarts, Settings, Start, Wait};
 pub(crate) use wake::{Watch, settle};

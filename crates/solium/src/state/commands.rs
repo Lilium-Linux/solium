@@ -1231,16 +1231,21 @@ impl Solium {
     ///
     /// As a reload does it, with a new window manager: the timers, runs and
     /// watches of the one that stopped went with it, and the new one is
-    /// told the desktop from the start. One that stops more than
+    /// told the desktop from the start, and handed what the old one kept
+    /// as it last said, which the compositor asks for with the stores,
+    /// every `files.store_interval`. One that stops more than
     /// `wm.restarts` times in `wm.restart_window_s` is replaced by the
     /// shipped configuration, which reads nothing of the user's, and when
     /// that stops as often, by nothing.
     /// `tests::a_window_manager_that_goes_is_started_again_and_a_problem_says_so`.
     pub(crate) fn restart_wm(&mut self) {
-        let Some(scripts) = self.scripts.take() else {
+        let Some(mut scripts) = self.scripts.take() else {
             return;
         };
         let why = scripts.why_down().unwrap_or("stopped").to_owned();
+        // What it kept, as it last said, for the one started in its place:
+        // a tiled desk comes back split for split.
+        let keeps = scripts.take_keeps();
         let config = scripts.config().to_owned();
         let shipped_only = scripts.shipped_only();
         let window = scripts.settings.restart_window.as_secs_f64();
@@ -1251,19 +1256,23 @@ impl Solium {
         self.watch_wm();
         tracing::error!(why, ?start, "the window manager stopped");
         let again = format!("the window manager {why}. It was started again.");
+        let shipped =
+            |keeps: crate::wm::Keeps| Scripts::start_again(&Scripts::shipped_config(), true, keeps);
         let (started, said) = match start {
-            crate::wm::Start::Again if shipped_only => (Some(Scripts::load_shipped()), again),
+            crate::wm::Start::Again if shipped_only => (Some(shipped(keeps)), again),
             crate::wm::Start::Again => (
                 // One that will not start at all is no better than one
                 // that keeps stopping.
-                Some(Scripts::load(&config).or_else(|err| {
-                    tracing::error!("{err:#}");
-                    Scripts::load_shipped()
-                })),
+                Some(
+                    Scripts::start_again(&config, false, keeps.clone()).or_else(|err| {
+                        tracing::error!("{err:#}");
+                        shipped(keeps)
+                    }),
+                ),
                 again,
             ),
             crate::wm::Start::Shipped => (
-                Some(Scripts::load_shipped()),
+                Some(shipped(keeps)),
                 format!(
                     "the window manager {why}, once too often in {window} s. The shipped \
                      configuration is running in its place: reload to run yours again."

@@ -313,7 +313,8 @@ fn a_window_manager_with_nothing_to_answer_is_never_one_that_stopped() {
 /// the compositor starts in place of a configuration that keeps stopping.
 #[test]
 fn the_shipped_configuration_loads_by_itself() {
-    let scripts = Scripts::load_shipped().expect("the shipped configuration");
+    let scripts = Scripts::start_again(&Scripts::shipped_config(), true, Vec::new())
+        .expect("the shipped configuration");
     assert!(scripts.shipped_only());
     assert_eq!(scripts.config(), crate::assets::lua().join("init.lua"));
     assert!(

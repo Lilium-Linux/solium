@@ -102,8 +102,14 @@ impl Kept {
     ///
     /// `where_it_is` is the path from the keep's name down to this value, so a
     /// warning names the key someone can go and look at rather than saying
-    /// "something in your table".
-    pub fn read(value: &Value, depth: usize, where_it_is: &str) -> Option<Self> {
+    /// "something in your table". Each path is said once to `said`: the
+    /// keeps are read every second for the compositor, not only at a reload.
+    pub fn read(
+        value: &Value,
+        depth: usize,
+        where_it_is: &str,
+        said: &mut std::collections::HashSet<String>,
+    ) -> Option<Self> {
         match value {
             Value::Boolean(flag) => Some(Self::Bool(*flag)),
             Value::Integer(number) => Some(Self::Int(*number)),
@@ -111,6 +117,9 @@ impl Kept {
             Value::String(text) => text.to_str().ok().map(|text| Self::Text(text.to_owned())),
             Value::Table(table) => {
                 if depth >= KEEP_DEPTH {
+                    if !said.insert(where_it_is.to_owned()) {
+                        return None;
+                    }
                     tracing::warn!(
                         key = where_it_is,
                         depth = KEEP_DEPTH,
@@ -123,8 +132,8 @@ impl Kept {
                 for (key, value) in table.pairs::<Value, Value>().flatten() {
                     let named = format!("{where_it_is}.{}", describe_value(&key));
                     let (Some(key), Some(value)) = (
-                        Self::read(&key, depth + 1, &named),
-                        Self::read(&value, depth + 1, &named),
+                        Self::read(&key, depth + 1, &named, said),
+                        Self::read(&value, depth + 1, &named, said),
                     ) else {
                         continue;
                     };
@@ -147,13 +156,15 @@ impl Kept {
             // is not there, and Lua's own iteration never yields one.
             Value::Nil => None,
             other => {
-                tracing::warn!(
-                    key = where_it_is,
-                    kind = other.type_name(),
-                    "only plain data and the layouts sol.layout makes survive a reload, and this \
-                     is neither; it will be missing from the keep when the configuration is read \
-                     again"
-                );
+                if said.insert(where_it_is.to_owned()) {
+                    tracing::warn!(
+                        key = where_it_is,
+                        kind = other.type_name(),
+                        "only plain data and the layouts sol.layout makes survive a reload, and \
+                         this is neither; it will be missing from the keep when the \
+                         configuration is read again"
+                    );
+                }
                 None
             }
         }
