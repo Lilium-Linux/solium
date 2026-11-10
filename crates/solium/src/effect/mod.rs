@@ -1,4 +1,9 @@
 #![expect(unsafe_code, reason = "the calls into effect::gl")]
+#![expect(
+    clippy::disallowed_types,
+    reason = "an effect's Lua runs here, in its sandbox, and nowhere else in the compositor: \
+              `clippy.toml` denies it everywhere but this module"
+)]
 
 //! Effects as user folders: the host, the sandbox, the programs, the
 //! executor, the rules and the transitions. \[16\] §2; the spec §6.

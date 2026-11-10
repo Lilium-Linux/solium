@@ -1159,7 +1159,7 @@ impl Solium {
     /// `super+shift+r`; the Lua state does not. So the second half of a reload
     /// is putting the new scripts back in touch with the session they have
     /// inherited, and it has two parts, both of which are the contract on
-    /// [`crate::script::lua::Host::reload`]:
+    /// `solium_lua::Host::reload`:
     ///
     ///  * the window manager carries what the old scripts asked to keep into
     ///    the new ones, *before* they run, so a script's top level sees its

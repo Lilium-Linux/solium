@@ -20,7 +20,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use solium_wm_protocol::frame;
 use solium_wm_protocol::{self as wire, Message};
 
-use crate::script::lua::Ask;
+use solium_wm_protocol::Ask;
+
 use crate::wm::Chosen;
 
 /// How long a write to the window manager may block. Its socket's buffer
@@ -231,7 +232,7 @@ impl Link {
                 // Where the user's own Lua is, unless none of it is to be
                 // read.
                 if let Some(user) = (!shipped_only)
-                    .then(crate::script::lua::user_config_dir)
+                    .then(crate::wm::paths::user_config_dir)
                     .flatten()
                 {
                     command.arg(user);
@@ -377,8 +378,8 @@ pub(crate) mod tests {
     use solium_wm_protocol::{self as wire, Message, frame};
 
     use super::{Link, Peer};
-    use crate::script::lua::Ask;
     use crate::wm::Chosen;
+    use solium_wm_protocol::Ask;
 
     /// Something for the window manager's thread to run with it, and where
     /// its result goes.
@@ -401,7 +402,9 @@ pub(crate) mod tests {
                 UnixStream::pair().context("making the window manager's socket")?;
             let (control, heard) = mpsc::channel::<Control>();
             let config = config.to_owned();
-            let user = (!shipped_only).then(solium_lua::user_config_dir).flatten();
+            let user = (!shipped_only)
+                .then(crate::wm::paths::user_config_dir)
+                .flatten();
             // What it logs as it loads goes to the log the test is reading.
             let log = tracing::dispatcher::get_default(Clone::clone);
             let thread = std::thread::Builder::new()

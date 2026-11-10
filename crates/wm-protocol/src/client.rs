@@ -28,6 +28,14 @@ use std::time::Duration;
 use crate::frame::{self, FrameError};
 use crate::{Answer, Batch, Command, Hello, HelloAnswer, Message, Query, Reloaded, Reply};
 
+/// Who answers a question only the compositor can: the compositor, from
+/// what it knows of the desktop; and, at a window manager's end, whatever
+/// puts the question on the socket and waits for the reply.
+pub trait Ask {
+    /// The answer, or none when nobody can give one.
+    fn ask(&self, query: Query) -> Option<Reply>;
+}
+
 /// Why the conversation cannot go on.
 #[derive(Debug)]
 pub enum ClientError {

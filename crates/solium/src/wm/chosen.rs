@@ -59,7 +59,7 @@ impl Chosen {
     /// file.
     #[cfg(not(test))]
     pub(crate) fn read() -> (Self, Vec<String>) {
-        match crate::script::lua::user_config_dir() {
+        match crate::wm::paths::user_config_dir() {
             Some(directory) => Self::read_in(&directory),
             None => (Self::default(), Vec::new()),
         }
@@ -88,7 +88,7 @@ impl Chosen {
 
     /// Where the user's `wm.toml` is, or would be.
     pub(crate) fn file() -> Option<PathBuf> {
-        crate::script::lua::user_config_dir().map(|directory| file_in(&directory))
+        crate::wm::paths::user_config_dir().map(|directory| file_in(&directory))
     }
 
     /// What `text` says, `~/` standing for `home`, and what is wrong with

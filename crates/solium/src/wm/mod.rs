@@ -8,6 +8,7 @@ pub(crate) mod convert;
 pub(crate) mod diff;
 pub(crate) mod events;
 pub(crate) mod link;
+pub(crate) mod paths;
 pub(crate) mod rows;
 mod scripts;
 mod settings;

@@ -81,12 +81,7 @@ pub fn focused_id(lua: &Lua) -> Option<u64> {
         .and_then(|mirror| mirror.focused().map(|window| window.id))
 }
 
-/// Who answers a question only the compositor can: in the same process,
-/// the compositor's own predicates over its snapshot; across a socket, a
-/// query and its reply.
-pub trait Ask {
-    fn ask(&self, query: solium_wm_protocol::Query) -> Option<solium_wm_protocol::Reply>;
-}
+pub use solium_wm_protocol::Ask;
 
 /// The [`Ask`] a handler's questions go to, in the Lua state's app data
 /// while it runs.

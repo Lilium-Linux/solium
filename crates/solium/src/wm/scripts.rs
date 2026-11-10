@@ -24,12 +24,12 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use solium_wm_protocol::{self as wire, Message};
 
-use crate::script::lua::Ask;
 use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
 use crate::wm::{Chosen, Settings, Wait};
+use solium_wm_protocol::Ask;
 
 /// A batch the window manager has not answered yet.
 #[derive(Debug)]
@@ -597,14 +597,14 @@ impl Scripts {
         std::mem::take(&mut self.keeps).into_iter().collect()
     }
 
-    /// Where the configuration is. See [`crate::script::lua::config_path`].
+    /// Where the configuration is. See [`crate::wm::paths::config_path`].
     pub(crate) fn config_path() -> std::path::PathBuf {
-        crate::script::lua::config_path(&crate::assets::lua())
+        crate::wm::paths::config_path(&crate::assets::lua())
     }
 
     /// Where a user's own scripts live, whether or not they have any.
     pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
-        crate::script::lua::user_config_dir()
+        crate::wm::paths::user_config_dir()
     }
 
     /// The window manager's stores, as it would save them, each as its

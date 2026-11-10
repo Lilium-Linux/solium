@@ -24,8 +24,8 @@ solium-json = { path = "../json", features = ["lua"] }
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
 solium-layout = { path = "../layout" }
-# The Lua window manager, linked while it runs in the compositor's process.
-solium-lua = { path = "../solium-lua" }
+# The window manager protocol: what the compositor says to whichever window
+# manager it started, and hears from it.
 solium-wm-protocol = { path = "../wm-protocol" }
 
 # The lock screen's password check (#281): the protocol the `solium-auth`
@@ -140,6 +140,11 @@ cc = "1"
 pkg-config = "0.3"
 
 [dev-dependencies]
+# The Lua window manager, which a session runs as a program of its own
+# (`solium-lua`). The tests run it on a thread instead, over a socket pair,
+# so each of them crosses the protocol without starting a process: the only
+# place this crate links it.
+solium-lua = { path = "../solium-lua" }
 # A real Wayland client, for `state::tests::scale_resend`. `Window` only
 # wraps a real `ToplevelSurface`, and nothing fabricates one except a client
 # actually asking for one over the wire -- `wl-probe` (see its own

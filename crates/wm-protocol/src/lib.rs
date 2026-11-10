@@ -34,7 +34,7 @@ pub mod store;
 pub mod touch;
 mod wire;
 
-pub use client::compatible;
+pub use client::{Ask, compatible};
 pub use wire::{DecodeError, Input, Wire};
 
 #[allow(

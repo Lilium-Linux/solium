@@ -32,7 +32,7 @@ pub use files::*;
 pub use keep::*;
 pub use layouts::*;
 pub use listens::{listen, listen_if_changed, listens};
-pub use load::{config_path, keeps_of, stores_of, user_config_dir};
+pub use load::{keeps_of, stores_of};
 pub use motion::*;
 pub use pending::*;
 pub use runs::*;

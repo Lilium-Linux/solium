@@ -9,23 +9,6 @@ use solium_wm_protocol::Answer;
 
 use crate::*;
 
-/// Where the configuration is: `SOLIUM_LUA_INIT` when it is set, else the
-/// user's own `init.lua`, else the one in `shipped`. The user's file wins,
-/// and the shipped one is the fallback rather than a default that has to be
-/// copied before anything works.
-pub fn config_path(shipped: &Path) -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os("SOLIUM_LUA_INIT") {
-        return std::path::PathBuf::from(path);
-    }
-    if let Some(user) = user_config_dir() {
-        let path = user.join("init.lua");
-        if path.is_file() {
-            return path;
-        }
-    }
-    shipped.join("init.lua")
-}
-
 /// Where `require` looks, in order: the user's directory when there is
 /// one, the configuration's own, the shipped set, then Lua's.
 fn search_path(directory: &str, setup: &Setup, lua: &str) -> String {
@@ -35,16 +18,6 @@ fn search_path(directory: &str, setup: &Setup, lua: &str) -> String {
         Some(user) => format!("{}/?.lua;{search}", user.display()),
         None => search,
     }
-}
-
-/// Where a user's own scripts live, whether or not they have any.
-pub fn user_config_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
-        })
-        .map(|base| base.join("solium"))
 }
 
 impl Host {

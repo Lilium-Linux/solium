@@ -19,3 +19,15 @@ disallowed-methods = [
     { path = "smithay::wayland::selection::data_device::set_data_device_focus", reason = "the clipboard follows the keyboard: `Solium::give_keyboard` (src/focus.rs) moves both" },
     { path = "smithay::wayland::selection::primary_selection::set_primary_focus", reason = "the primary selection follows the keyboard: `Solium::give_keyboard` (src/focus.rs) moves both" },
 ]
+
+# The window manager is a program of its own (`crates/solium-lua`, or the one
+# `wm.toml` names), and the compositor runs none of its Lua. The one Lua left
+# in this process is an effect's, in its sandbox: `src/effect/` allows these
+# under an `#![expect]`, and a test may use them to write its fixtures. Named
+# anywhere else, they are a window manager's logic finding its way back in.
+disallowed-types = [
+    { path = "mlua::Lua", reason = "only an effect's sandbox runs Lua in the compositor (src/effect/); a window manager is a process of its own and talks to it over the protocol" },
+    { path = "mlua::Table", reason = "only an effect's sandbox runs Lua in the compositor (src/effect/); settings reach the compositor as a `script::Doc`" },
+    { path = "mlua::Value", reason = "only an effect's sandbox runs Lua in the compositor (src/effect/); settings reach the compositor as a `script::Doc`" },
+    { path = "mlua::Function", reason = "only an effect's sandbox runs Lua in the compositor (src/effect/); a window manager's handlers run in its own process" },
+]

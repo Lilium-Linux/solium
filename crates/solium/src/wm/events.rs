@@ -11,9 +11,9 @@
 
 use solium_wm_protocol as wire;
 
-use crate::script::lua::Ask;
 use crate::script::*;
 use crate::wm::{Scripts, Wait};
+use solium_wm_protocol::Ask;
 
 impl Scripts {
     /// Run whatever a key combination is bound to. Handled when a binding
