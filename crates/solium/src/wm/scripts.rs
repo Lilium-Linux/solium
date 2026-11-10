@@ -1,18 +1,86 @@
 //! The window manager as the compositor holds it: what it loaded with, what
-//! it declared, and what it was last told.
+//! it declared, what it was last told, and what it has not answered yet.
+//!
+//! The window manager answers batches in the order it was sent them. The
+//! compositor waits for each answer, so the next event is told to a window
+//! manager that knows what the last one came to, but only `wm.ask_ms`, one
+//! frame: after that it goes on with its own answer (the entry points in
+//! [`crate::wm::events`] say what each is), and the window manager's is
+//! applied when it comes, in the order it came. While one is late, nothing
+//! after it is waited for either, until the window manager has caught up:
+//! a slow one costs a frame once, not a frame an event. An answer nobody is
+//! waiting for is kept in [`Scripts::late`], which
+//! [`crate::state::Solium::apply`] empties before anything else.
+//!
+//! A test waits for every answer however long it takes, so what it asserts
+//! has happened by the time it looks; `script::tests::waits` keeps the
+//! session's time.
 
+use std::collections::VecDeque;
 use std::path::Path;
-
-use anyhow::Result;
-use solium_wm_protocol as wire;
-
 use std::rc::Rc;
+use std::time::Instant;
+
+use anyhow::{Result, bail};
+use solium_wm_protocol::{self as wire, Message};
 
 use crate::script::lua::Ask;
 use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
+use crate::wm::{Wait, Waits};
+
+/// A batch the window manager has not answered yet.
+#[derive(Debug)]
+struct Pending {
+    serial: u64,
+    sent: Instant,
+    /// Who answers what the window manager asks while it handles the batch:
+    /// the compositor, over the desktop as the batch found it.
+    answers: Answers,
+    /// A binding fired at the lock screen: its answer is held to the lock's
+    /// rule whenever it comes.
+    at_the_lock: bool,
+    /// A window going fullscreen or maximised, or leaving either.
+    change: bool,
+}
+
+/// An answer that came with nobody waiting for it.
+#[derive(Debug)]
+pub(crate) struct Late {
+    pub(crate) outcome: Outcome,
+    /// It answers a window's fullscreen or maximise, and is applied as one:
+    /// a listener that turns the change back is not told it again.
+    pub(crate) change: bool,
+}
+
+/// What [`Scripts::hear`] reads for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Awaited {
+    /// Nothing: whatever has come is kept for later.
+    Nothing,
+    /// The answer to this batch.
+    Answer(u64),
+    /// The answer to a reload.
+    Reloaded,
+}
+
+/// What it read.
+enum Heard {
+    Answer(Option<String>, Outcome),
+    Reloaded(wire::Reloaded),
+}
+
+/// What the last answer to each kind of ask said, which is the
+/// compositor's own answer to the next one the window manager is late for.
+#[derive(Debug, Default)]
+pub(crate) struct Took {
+    /// A modified wheel turn.
+    pub(crate) scroll: bool,
+    /// A window's own resize.
+    pub(crate) resize: bool,
+}
 
 /// The window manager, as the compositor talks to it: over its socket.
 #[derive(Debug)]
@@ -23,6 +91,18 @@ pub(crate) struct Scripts {
     pub(crate) told: crate::wm::diff::Told,
     /// The last batch's serial.
     pub(crate) serial: u64,
+    /// The batches sent and not answered yet, oldest first.
+    pending: VecDeque<Pending>,
+    /// The answers that came with nobody waiting for them, oldest first.
+    pub(crate) late: VecDeque<Late>,
+    /// How long each kind of message is waited for: `wm`.
+    pub(crate) waits: Waits,
+    /// Whether every answer is waited for, as a test does.
+    #[cfg(test)]
+    pub(crate) patient: bool,
+    /// The connection failed, with why said once: nothing more is sent.
+    down: bool,
+    pub(crate) took: Took,
     /// What the configuration answered its load with: the settings and
     /// requests its top level made, which [`Scripts::startup`] hands over
     /// and the readers of the load (`qml`, `session`, the effect rules)
@@ -38,6 +118,11 @@ pub(crate) struct Scripts {
     /// The stores read as it loaded, handed over with [`Self::startup`].
     loaded_stores: Vec<Command>,
 }
+
+/// How long a test waits for an answer: long enough that only a window
+/// manager that is not going to answer misses it.
+#[cfg(test)]
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Scripts {
     /// Load the configuration, cold.
@@ -58,7 +143,13 @@ impl Scripts {
             snapshot: None,
             stores: Rc::clone(&stores),
         };
-        let (link, commands) = Link::start(config, &answers)?;
+        let (link, commands) = Link::start(config, &answers, Waits::default().load)?;
+        Ok(Self::over(link, commands, stores))
+    }
+
+    /// The window manager at the other end of `link`, which answered
+    /// `hello` with `commands`.
+    pub(crate) fn over(link: Link, commands: Vec<wire::Command>, stores: Rc<StoreReads>) -> Self {
         let loaded = wire::Answer {
             serial: 0,
             handled: false,
@@ -71,6 +162,13 @@ impl Scripts {
             link,
             told: crate::wm::diff::Told::new(),
             serial: 0,
+            pending: VecDeque::new(),
+            late: VecDeque::new(),
+            waits: Waits::default(),
+            #[cfg(test)]
+            patient: true,
+            down: false,
+            took: Took::default(),
             loaded: wire::Answer {
                 serial: 0,
                 handled: false,
@@ -89,25 +187,214 @@ impl Scripts {
             loaded_stores,
         };
         scripts.declarations_in(&loaded);
+        scripts.waits_in(&loaded);
         scripts.loaded = loaded;
-        Ok(scripts)
+        scripts
     }
 
     /// Who answers the window manager's questions: the compositor, over
     /// `snapshot` when a dispatch has one.
-    pub(crate) fn answers(&self, snapshot: Option<Snapshot>) -> Box<dyn Ask> {
-        Box::new(Answers {
+    pub(crate) fn answers(&self, snapshot: Option<Snapshot>) -> Answers {
+        Answers {
             snapshot,
             stores: Rc::clone(&self.stores),
-        })
+        }
+    }
+
+    /// Send `batch`, and wait for its answer as `wait` says. `None` when it
+    /// did not come in that time: it is applied when it does, out of
+    /// [`Self::late`].
+    pub(crate) fn send_batch(
+        &mut self,
+        batch: wire::Batch,
+        answers: Answers,
+        at_the_lock: bool,
+        change: bool,
+        wait: Wait,
+    ) -> Option<(Option<String>, Outcome)> {
+        if self.down {
+            return None;
+        }
+        let serial = batch.serial;
+        if let Err(err) = self.link.send(&Message::Batch(batch)) {
+            self.failed(&err);
+            return None;
+        }
+        let behind = !self.pending.is_empty();
+        self.pending.push_back(Pending {
+            serial,
+            sent: Instant::now(),
+            answers,
+            at_the_lock,
+            change,
+        });
+        let within = self.within(wait, behind);
+        if within.is_zero() {
+            return None;
+        }
+        match self.hear(Awaited::Answer(serial), Some(Instant::now() + within)) {
+            Some(Heard::Answer(decision, outcome)) => Some((decision, outcome)),
+            _ => None,
+        }
+    }
+
+    /// How long an event sent with `wait` is waited for, the window manager
+    /// being `behind` when it had not answered the one before.
+    fn within(&self, wait: Wait, behind: bool) -> std::time::Duration {
+        #[cfg(test)]
+        if self.patient {
+            return PATIENCE;
+        }
+        match wait {
+            Wait::Frame if behind => std::time::Duration::ZERO,
+            Wait::Frame => self.waits.ask,
+            Wait::Last => self.waits.hard,
+        }
+    }
+
+    /// Read what the window manager has sent, answering its questions,
+    /// until `awaited` comes or `until` passes; with no `until`, only what
+    /// has already come. Every other answer on the way is kept in
+    /// [`Self::late`], in the order it came.
+    fn hear(&mut self, awaited: Awaited, until: Option<Instant>) -> Option<Heard> {
+        loop {
+            let read = {
+                let nobody = self.answers(None);
+                // A question is about the batch being handled, which is the
+                // oldest one not answered yet.
+                let answers: &dyn Ask = self
+                    .pending
+                    .front()
+                    .map_or(&nobody, |pending| &pending.answers);
+                self.link.next(until, answers)
+            };
+            match read {
+                Ok(Some(Message::Answer(answer))) => {
+                    let serial = answer.serial;
+                    let Some(pending) = self.answered(serial) else {
+                        tracing::warn!(
+                            serial,
+                            "the window manager answered a batch it was not waiting on; left out"
+                        );
+                        continue;
+                    };
+                    let (decision, outcome) = self.arrived(&pending, answer);
+                    if awaited == Awaited::Answer(serial) {
+                        return Some(Heard::Answer(decision, outcome));
+                    }
+                    tracing::debug!(
+                        serial,
+                        after_ms = pending.sent.elapsed().as_secs_f64() * 1000.0,
+                        "an answer nobody waited for"
+                    );
+                    self.late.push_back(Late {
+                        outcome,
+                        change: pending.change,
+                    });
+                }
+                Ok(Some(Message::Reloaded(reloaded))) if awaited == Awaited::Reloaded => {
+                    return Some(Heard::Reloaded(reloaded));
+                }
+                Ok(Some(Message::Goodbye(why))) => {
+                    self.failed(&anyhow::anyhow!("the window manager left: {why}"));
+                    return None;
+                }
+                Ok(Some(other)) => tracing::warn!(
+                    ?other,
+                    "a message the compositor does not take from the window manager; left out"
+                ),
+                Ok(None) => return None,
+                Err(err) => {
+                    self.failed(&err);
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Read what the window manager has sent since it was last read,
+    /// without waiting: its answers are in [`Self::late`] afterwards.
+    pub(crate) fn hear_ready(&mut self) {
+        if !self.down {
+            self.hear(Awaited::Nothing, None);
+        }
+    }
+
+    /// The batch `serial` answers, taken off the unanswered. One before it
+    /// that was never answered is dropped with it: answers come in order.
+    fn answered(&mut self, serial: u64) -> Option<Pending> {
+        while let Some(pending) = self.pending.pop_front() {
+            if pending.serial == serial {
+                return Some(pending);
+            }
+            if pending.serial > serial {
+                self.pending.push_front(pending);
+                return None;
+            }
+            tracing::warn!(
+                serial = pending.serial,
+                "the window manager never answered a batch"
+            );
+        }
+        None
+    }
+
+    /// An answer as the compositor applies it, with what it declares and
+    /// sets kept on the way.
+    fn arrived(
+        &mut self,
+        pending: &Pending,
+        mut answer: wire::Answer,
+    ) -> (Option<String>, Outcome) {
+        if pending.at_the_lock {
+            crate::wm::events::refuse_past_the_lock(&mut answer);
+        }
+        self.declarations_in(&answer);
+        self.waits_in(&answer);
+        let decision = answer.decision.take();
+        let mut outcome = crate::wm::events::outcome_of(answer);
+        outcome.commands.splice(0..0, self.stores.take_read());
+        (decision, outcome)
+    }
+
+    /// The connection failed: say why, once, and send nothing more. What
+    /// was never answered never will be.
+    fn failed(&mut self, err: &anyhow::Error) {
+        if !std::mem::replace(&mut self.down, true) {
+            tracing::error!("{err:#}");
+        }
+        self.pending.clear();
+    }
+
+    /// Whether the connection to the window manager has failed.
+    pub(crate) fn down(&self) -> bool {
+        self.down
     }
 
     /// Load the configuration again, the window manager carrying what it
     /// kept; [`Self::startup`] then hands over what the new one asked for.
     /// One that fails to load leaves everything as it was.
     pub(crate) fn reload(&mut self, config: &Path) -> Result<()> {
-        let answers = self.answers(None);
-        let loaded = self.link.reload(config, &*answers)?;
+        if self.down {
+            bail!("the window manager has gone");
+        }
+        let path = config.to_string_lossy().into_owned();
+        self.link.send(&Message::Reload(path))?;
+        let within = {
+            #[cfg(test)]
+            {
+                self.waits.load.max(PATIENCE)
+            }
+            #[cfg(not(test))]
+            {
+                self.waits.load
+            }
+        };
+        let loaded = match self.hear(Awaited::Reloaded, Some(Instant::now() + within)) {
+            Some(Heard::Reloaded(wire::Reloaded::Loaded(loaded))) => loaded,
+            Some(Heard::Reloaded(wire::Reloaded::Failed(why))) => bail!(why),
+            _ => bail!("the window manager did not load the configuration again within {within:?}"),
+        };
         self.loaded_stores = self.stores.take_read();
         self.declared = wire::Declarations {
             bindings: Vec::new(),
@@ -116,6 +403,8 @@ impl Scripts {
             notes: Vec::new(),
         };
         self.declarations_in(&loaded);
+        self.waits = Waits::default();
+        self.waits_in(&loaded);
         self.loaded = loaded;
         self.started = false;
         Ok(())
@@ -145,7 +434,7 @@ impl Scripts {
                         .collect::<Vec<_>>()
                         .join("\n")
                 }),
-                &*self.answers(None),
+                &self.answers(None),
             )
             .lines()
             .filter_map(|line| line.split_once('\t'))
@@ -180,6 +469,23 @@ impl Scripts {
             })
         {
             self.declared = declared.clone();
+        }
+    }
+
+    /// Keep the waits an answer sets: the last `wm` section in it.
+    fn waits_in(&mut self, answer: &wire::Answer) {
+        if let Some(waits) = answer
+            .commands
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                wire::Command::Configure((section, nodes)) if section == "wm" => {
+                    crate::wm::convert::doc(nodes).ok()
+                }
+                _ => None,
+            })
+        {
+            self.waits = crate::script::settings::wm::parse(&waits);
         }
     }
 

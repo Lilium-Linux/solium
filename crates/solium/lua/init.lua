@@ -61,6 +61,9 @@ sol.audio(config.audio or {})
 sol.run_defaults(config.run)
 -- How much a `sol.read` reads. See `config.lua`.
 sol.files(config.files)
+-- How long the compositor waits for this configuration's answers. See
+-- `config.lua`.
+sol.wm(config.wm)
 -- libinput device settings: tap-to-click, scrolling, acceleration and the
 -- rest, by device type and by device, applied now and again on every
 -- reload. See `config.lua`.

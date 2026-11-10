@@ -498,6 +498,7 @@ pub(crate) fn run() -> Result<()> {
         dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    state.wm_watch = Some(crate::wm::Watch::new(event_loop.handle(), |state| state));
     state.start_scripts(scripts);
     // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
     // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the

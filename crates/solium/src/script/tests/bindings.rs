@@ -1100,17 +1100,23 @@ fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
         Some(true)
     );
 
-    let answer = scripts
+    // Straight over the socket, to see the answer as it was written.
+    scripts
         .link
-        .answer(
+        .send(&solium_wm_protocol::Message::Batch(
             solium_wm_protocol::Batch {
                 serial: 9,
                 changes: Vec::new(),
                 events: vec![solium_wm_protocol::Event::Relayout],
             },
-            &crate::wm::events::Answers::over(empty_snapshot()),
-        )
-        .expect("an answer");
+        ))
+        .expect("sent");
+    let Ok(Some(solium_wm_protocol::Message::Answer(answer))) = scripts.link.next(
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(10)),
+        &crate::wm::events::Answers::over(empty_snapshot()),
+    ) else {
+        panic!("no answer");
+    };
     assert!(
         !answer
             .commands

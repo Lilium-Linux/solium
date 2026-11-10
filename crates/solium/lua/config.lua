@@ -758,6 +758,25 @@ local defaults = {
         store_max = 1048576,
     },
 
+    -- The window manager, which this configuration runs in, is a program of
+    -- its own: the compositor tells it what happens and waits for what it
+    -- answers. These are how long.
+    wm = {
+        -- How long, in milliseconds, an event's answer is waited for. After
+        -- that the compositor goes on by itself (a bound key is not typed
+        -- into the focused window, a new window is placed plainly), applies
+        -- the answer when it comes, and waits for no other until the window
+        -- manager has caught up. One frame at 260 Hz. Above 0.
+        ask_ms = 4,
+        -- How long, in milliseconds, the window manager's last word is
+        -- waited for: the stores it saves before a reload, and as the
+        -- compositor ends. Above 0.
+        hard_ms = 1000,
+        -- How long, in milliseconds, a configuration may take to load again
+        -- on a reload. Above 0.
+        load_ms = 10000,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.

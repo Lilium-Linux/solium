@@ -895,17 +895,29 @@ pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
 /// At the compositor's end: save the stores that changed, and wait a
 /// bounded time for every write to land.
 pub(crate) fn finish(state: &mut Solium) {
-    save_stores(state);
+    save_stores_at_last(state);
     state.files.wait_for_writes();
 }
 
 /// Ask the configuration for the stores that changed, and save them.
-pub(crate) fn save_stores(state: &mut Solium) {
+fn save_stores(state: &mut Solium) {
     let snapshot = state.snapshot();
     let Some(mut scripts) = state.scripts.take() else {
         return;
     };
     let outcome = scripts.save_stores(snapshot);
+    state.scripts = Some(scripts);
+    state.apply(outcome);
+}
+
+/// [`save_stores`], when nothing comes after it: before the configuration
+/// is loaded again, and at the compositor's end.
+pub(crate) fn save_stores_at_last(state: &mut Solium) {
+    let snapshot = state.snapshot();
+    let Some(mut scripts) = state.scripts.take() else {
+        return;
+    };
+    let outcome = scripts.save_stores_at_last(snapshot);
     state.scripts = Some(scripts);
     state.apply(outcome);
 }

@@ -148,6 +148,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     ("settings/effects.rs", include_str!("settings/effects.rs")),
     ("settings/mod.rs", include_str!("settings/mod.rs")),
     ("settings/read.rs", include_str!("settings/read.rs")),
+    ("settings/wm.rs", include_str!("settings/wm.rs")),
     (
         "settings/workspaces.rs",
         include_str!("settings/workspaces.rs"),

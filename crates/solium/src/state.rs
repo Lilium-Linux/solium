@@ -513,8 +513,11 @@ pub(crate) struct Solium {
     /// device met since start. See `input::devices` (#157).
     pub(crate) input: crate::input::devices::Registry,
 
-    /// The Lua runtime. Modes live in here, not in the compositor.
+    /// The window manager. Modes live in there, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
+    /// What keeps the window manager's socket in the event loop, from the
+    /// backend that has one: [`Self::watch_wm`].
+    pub(crate) wm_watch: Option<crate::wm::Watch>,
 
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
@@ -1567,6 +1570,7 @@ impl Solium {
             profile: Profile::from_env(),
             input: crate::input::devices::Registry::default(),
             scripts: None,
+            wm_watch: None,
             status: String::new(),
             script_grab: false,
             keys_forwarded: std::collections::HashSet::new(),

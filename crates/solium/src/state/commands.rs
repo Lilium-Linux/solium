@@ -298,8 +298,33 @@ impl Solium {
         handled
     }
 
-    /// Apply what a script asked for.
+    /// Apply what a script asked for, after whatever the window manager
+    /// answered before it that nobody was waiting for: answers are applied
+    /// in the order they came.
     pub(crate) fn apply(&mut self, outcome: Outcome) {
+        self.apply_late();
+        self.apply_answer(outcome);
+    }
+
+    /// Apply the window manager's answers that came with nobody waiting for
+    /// them ([`Scripts::late`]), oldest first.
+    pub(crate) fn apply_late(&mut self) {
+        while let Some(late) = self
+            .scripts
+            .as_mut()
+            .and_then(|scripts| scripts.late.pop_front())
+        {
+            // The answer to a window's fullscreen or maximise is applied as
+            // `Self::tell_change` applies one in time.
+            let telling = self.telling_change;
+            self.telling_change = telling || late.change;
+            self.apply_answer(late.outcome);
+            self.telling_change = telling;
+        }
+    }
+
+    /// Apply one answer.
+    fn apply_answer(&mut self, outcome: Outcome) {
         self.dispatching += 1;
         // Anything a script asked for changes what is on screen, and almost
         // all of it starts an animation. Damage-driven rendering only draws
@@ -1165,7 +1190,7 @@ impl Solium {
     pub(crate) fn reload_from(&mut self, path: &std::path::Path) {
         // The stores saved now, whatever the new configuration turns out to
         // be, so a reload never loses what a restart would keep (#473).
-        crate::files::save_stores(self);
+        crate::files::save_stores_at_last(self);
         // The window manager reloads itself, carrying what it kept; one
         // that fails to load leaves the running configuration as it was.
         let reloaded = match self.scripts.take() {
@@ -1412,11 +1437,13 @@ impl Solium {
         self.keyboard = crate::keymap::describe(self);
         let Some(mut scripts) = scripts else {
             self.scripts = None;
+            self.watch_wm();
             return;
         };
         self.inhibitors.settings = crate::shortcuts_inhibit::Settings::default();
         let outcome = scripts.startup();
         self.scripts = Some(scripts);
+        self.watch_wm();
         // What the configuration does to the keyboard as it starts is told
         // nothing, and what the keys do after it is:
         // `keyboard_change::tests::a_new_keymap_and_a_starting_configuration_are_told_nothing`.
@@ -1425,6 +1452,21 @@ impl Solium {
         self.keyboard_changed();
         self.refresh_inhibitors();
         self.warn_about_unwatched_configured_paths();
+    }
+
+    /// Have the event loop wake on the window manager's socket, the one
+    /// there is now: an answer the compositor stopped waiting for is applied
+    /// when it comes (`wm::wake`).
+    pub(crate) fn watch_wm(&mut self) {
+        let Some(watch) = self.wm_watch.as_mut() else {
+            return;
+        };
+        let socket = self
+            .scripts
+            .as_ref()
+            .filter(|scripts| !scripts.down())
+            .and_then(|scripts| scripts.link.socket().ok());
+        watch.on(socket);
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {

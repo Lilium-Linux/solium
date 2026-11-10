@@ -1,31 +1,31 @@
 //! The compositor's end of the socket to the window manager.
 //!
-//! Each message to it is answered before the compositor goes on, under a
-//! deadline: `hello` with `hello-answer`, a batch with its answer, a reload
-//! with `reloaded`. A question the window manager asks on the way, a
-//! `query`, is answered from the compositor's state as it is read.
+//! Messages go out whole and come back whole, and that is all this is: who
+//! waits for which answer, and for how long, is [`crate::wm::Scripts`]'s. A
+//! question the window manager asks, a `query`, is answered here as it is
+//! read, from whoever the reader says answers.
 //!
 //! The window manager is the `solium-lua` program, the socket its standard
 //! input. A test runs it on a thread of its own instead, over a socket pair
 //! all the same, so every test of the configuration crosses the protocol.
 
 use std::cell::RefCell;
+use std::io::Read as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use solium_wm_protocol::frame::{self, FrameError};
+use solium_wm_protocol::frame;
 use solium_wm_protocol::{self as wire, Message};
 
 use crate::script::lua::Ask;
 
-/// How long a configuration may take to load, or to load again.
-const LOADING: Duration = Duration::from_secs(10);
-/// How long a batch may take to be answered. A listener is stopped by the
-/// window manager after 100 ms of its own; this is for a window manager
-/// that has stopped answering altogether.
-const ANSWERING: Duration = Duration::from_secs(1);
+/// How long a write to the window manager may block. Its socket's buffer
+/// holds hundreds of batches, so a write blocks only when the window manager
+/// has read none of them: that one has stopped, and the compositor does not
+/// stop with it.
+const WRITING: Duration = Duration::from_secs(1);
 
 /// The connection, and the window manager at its other end.
 pub(crate) struct Link {
@@ -59,17 +59,21 @@ impl std::fmt::Debug for Link {
 
 impl Link {
     /// Start the window manager on the configuration at `config`, and wait
-    /// for its `hello-answer`: what the configuration asked for as it
-    /// loaded. Its questions while it loads go to `answers`.
-    pub(crate) fn start(config: &Path, answers: &dyn Ask) -> Result<(Self, Vec<wire::Command>)> {
+    /// `within` for its `hello-answer`: what the configuration asked for as
+    /// it loaded. Its questions while it loads go to `answers`.
+    pub(crate) fn start(
+        config: &Path,
+        answers: &dyn Ask,
+        within: Duration,
+    ) -> Result<(Self, Vec<wire::Command>)> {
         let link = Self::open(config)?;
-        let hello = Message::Hello(wire::Hello {
+        link.send(&Message::Hello(wire::Hello {
             version: wire::VERSION.to_owned(),
             debug: crate::dev::debug_mode(),
             keeps: Vec::new(),
-        });
-        match link.request(&hello, answers, LOADING)? {
-            Message::HelloAnswer(answer) => {
+        }))?;
+        match link.next(Some(Instant::now() + within), answers)? {
+            Some(Message::HelloAnswer(answer)) => {
                 if !crate::script::lua::compatible(wire::VERSION, &answer.version) {
                     bail!(
                         "the window manager speaks the protocol {}, the compositor {}",
@@ -79,30 +83,95 @@ impl Link {
                 }
                 Ok((link, answer.commands))
             }
-            Message::Goodbye(why) => Err(anyhow!(why)),
-            other => bail!("the window manager answered `hello` with {other:?}"),
+            Some(Message::Goodbye(why)) => Err(anyhow!(why)),
+            Some(other) => bail!("the window manager answered `hello` with {other:?}"),
+            None => bail!("the window manager did not answer `hello` within {within:?}"),
         }
     }
 
-    /// The window manager's answer to `batch`.
-    pub(crate) fn answer(&self, batch: wire::Batch, answers: &dyn Ask) -> Result<wire::Answer> {
-        let serial = batch.serial;
-        match self.request(&Message::Batch(batch), answers, ANSWERING)? {
-            Message::Answer(answer) if answer.serial == serial => Ok(answer),
-            other => bail!("the window manager answered batch {serial} with {other:?}"),
+    /// Write `message` to the window manager, whole.
+    pub(crate) fn send(&self, message: &Message) -> Result<()> {
+        frame::write(&mut &self.stream, message).context("writing to the window manager")?;
+        if !matches!(message, Message::Hello(_)) {
+            self.wake();
+        }
+        Ok(())
+    }
+
+    /// The window manager's next message, its questions answered from
+    /// `answers` on the way. Waited for until `until`; with none, only read
+    /// if it has already come. `None` when nothing came.
+    pub(crate) fn next(
+        &self,
+        until: Option<Instant>,
+        answers: &dyn Ask,
+    ) -> Result<Option<Message>> {
+        loop {
+            let read = self.reader.borrow_mut().next_message();
+            match read {
+                Ok(Some(Message::Query((serial, query)))) => {
+                    let reply = answers
+                        .ask(query.clone())
+                        .unwrap_or_else(|| unanswered(&query));
+                    frame::write(&mut &self.stream, &Message::Reply((serial, reply)))
+                        .context("answering the window manager")?;
+                }
+                Ok(Some(other)) => return Ok(Some(other)),
+                Ok(None) => {
+                    if !self.fill(until)? {
+                        return Ok(None);
+                    }
+                }
+                Err(err) => bail!("the connection to the window manager failed: {err}"),
+            }
         }
     }
 
-    /// Have the window manager load the configuration at `config` again,
-    /// carrying what it kept: what it asked for as it loaded, or why it
-    /// would not load, in which case the one that was running goes on.
-    pub(crate) fn reload(&self, config: &Path, answers: &dyn Ask) -> Result<wire::Answer> {
-        let path = config.to_string_lossy().into_owned();
-        match self.request(&Message::Reload(path), answers, LOADING)? {
-            Message::Reloaded(wire::Reloaded::Loaded(answer)) => Ok(answer),
-            Message::Reloaded(wire::Reloaded::Failed(why)) => Err(anyhow!(why)),
-            other => bail!("the window manager answered a reload with {other:?}"),
+    /// Read more of what the window manager wrote: `false` when nothing
+    /// came by `until`, or, with none, when nothing is there to read.
+    fn fill(&self, until: Option<Instant>) -> Result<bool> {
+        let mut chunk = [0u8; 64 * 1024];
+        let read = match until {
+            Some(until) => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(false);
+                }
+                self.stream.set_read_timeout(Some(left))?;
+                (&self.stream).read(&mut chunk)
+            }
+            None => {
+                self.stream.set_nonblocking(true)?;
+                let read = (&self.stream).read(&mut chunk);
+                self.stream.set_nonblocking(false)?;
+                read
+            }
+        };
+        match read {
+            Ok(0) => bail!("the window manager closed the connection"),
+            Ok(count) => {
+                self.reader
+                    .borrow_mut()
+                    .push(chunk.get(..count).unwrap_or_default());
+                Ok(true)
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => Ok(true),
+            Err(err) => bail!("the connection to the window manager failed: {err}"),
         }
+    }
+
+    /// The socket, for the event loop to wake on what the window manager
+    /// writes.
+    pub(crate) fn socket(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.stream.try_clone().map(std::os::fd::OwnedFd::from)
     }
 
     /// The `solium-lua` process, its standard input the socket.
@@ -125,45 +194,19 @@ impl Link {
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
         tracing::info!(pid = child.id(), "window manager started");
-        Ok(Self {
-            stream: ours,
-            reader: RefCell::new(frame::Reader::default()),
-            peer: Peer::Process(RefCell::new(child)),
-        })
+        Self::connected(ours, Peer::Process(RefCell::new(child)))
     }
 
-    /// Write `message`, and read until the window manager answers it,
-    /// answering its questions on the way, for at most `within`.
-    fn request(&self, message: &Message, answers: &dyn Ask, within: Duration) -> Result<Message> {
-        frame::write(&mut &self.stream, message).context("writing to the window manager")?;
-        if !matches!(message, Message::Hello(_)) {
-            self.wake();
-        }
-        let until = Instant::now() + within;
-        loop {
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                bail!("the window manager did not answer within {within:?}");
-            }
-            self.stream.set_read_timeout(Some(left))?;
-            let read = self.reader.borrow_mut().read_blocking(&mut &self.stream);
-            match read {
-                Ok(Message::Query((serial, query))) => {
-                    let reply = answers
-                        .ask(query.clone())
-                        .unwrap_or_else(|| unanswered(&query));
-                    frame::write(&mut &self.stream, &Message::Reply((serial, reply)))
-                        .context("answering the window manager")?;
-                }
-                Ok(other) => return Ok(other),
-                Err(FrameError::Io(err))
-                    if matches!(
-                        err.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
-                Err(err) => bail!("the connection to the window manager failed: {err}"),
-            }
-        }
+    /// The compositor's end of `stream`, with `peer` at the other.
+    fn connected(stream: UnixStream, peer: Peer) -> Result<Self> {
+        stream
+            .set_write_timeout(Some(WRITING))
+            .context("bounding a write to the window manager")?;
+        Ok(Self {
+            stream,
+            reader: RefCell::new(frame::Reader::default()),
+            peer,
+        })
     }
 
     /// Tell a window manager on a thread that a message is waiting.
@@ -234,17 +277,15 @@ fn unanswered(query: &wire::Query) -> wire::Reply {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::cell::RefCell;
     use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
-    use solium_wm_protocol::Message;
-    use solium_wm_protocol::frame::{self, FrameError};
+    use solium_wm_protocol::{self as wire, Message, frame};
 
-    use super::{Link, Peer, unanswered};
+    use super::{Link, Peer};
     use crate::script::lua::Ask;
 
     /// Something for the window manager's thread to run with it, and where
@@ -298,14 +339,26 @@ pub(crate) mod tests {
                     }
                 })
                 .context("starting the window manager's thread")?;
-            Ok(Self {
-                stream: ours,
-                reader: RefCell::new(frame::Reader::default()),
-                peer: Peer::Thread {
+            Self::connected(
+                ours,
+                Peer::Thread {
                     control: Some(control),
                     thread: Some(thread),
                 },
-            })
+            )
+        }
+
+        /// The compositor's end of `stream`, whose other end a test holds
+        /// and answers by hand.
+        fn over(stream: UnixStream) -> Self {
+            Self::connected(
+                stream,
+                Peer::Thread {
+                    control: None,
+                    thread: None,
+                },
+            )
+            .expect("a socket")
         }
 
         /// Run `job` on the window manager's thread and hand back what it
@@ -323,7 +376,6 @@ pub(crate) mod tests {
             if control.send(Control::Run(job, log, back)).is_err() {
                 return "error: the window manager has gone".to_owned();
             }
-            let _ = self.stream.set_read_timeout(Some(Duration::from_millis(1)));
             loop {
                 match result.try_recv() {
                     Ok(said) => return said,
@@ -332,19 +384,74 @@ pub(crate) mod tests {
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
-                let read = self.reader.borrow_mut().read_blocking(&mut &self.stream);
-                match read {
-                    Ok(Message::Query((serial, query))) => {
-                        let reply = answers
-                            .ask(query.clone())
-                            .unwrap_or_else(|| unanswered(&query));
-                        let _ = frame::write(&mut &self.stream, &Message::Reply((serial, reply)));
+                match self.next(Some(Instant::now() + Duration::from_millis(1)), answers) {
+                    Ok(None) => {}
+                    Ok(Some(other)) => {
+                        panic!("the window manager sent {other:?} outside a request")
                     }
-                    Ok(other) => panic!("the window manager sent {other:?} outside a request"),
-                    Err(FrameError::Io(_)) => {}
-                    Err(err) => return format!("error: {err}"),
+                    Err(err) => return format!("error: {err:#}"),
                 }
             }
+        }
+    }
+
+    /// A window manager played by hand: the test holds its end of the
+    /// socket, and answers what it chooses, when it chooses, so what is in
+    /// time and what is late is the test's to say.
+    pub(crate) struct Hand {
+        stream: UnixStream,
+        reader: frame::Reader,
+    }
+
+    impl Hand {
+        /// The compositor's side of a window manager that answered `hello`
+        /// with `commands`, and its other end. It keeps the session's time:
+        /// an answer is waited for as long as `wm` says, and no longer.
+        pub(crate) fn with(commands: Vec<wire::Command>) -> (crate::wm::Scripts, Self) {
+            let (ours, theirs) = UnixStream::pair().expect("a socket pair");
+            theirs
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("a timeout");
+            let mut scripts =
+                crate::wm::Scripts::over(Link::over(ours), commands, std::rc::Rc::default());
+            scripts.patient = false;
+            (
+                scripts,
+                Self {
+                    stream: theirs,
+                    reader: frame::Reader::default(),
+                },
+            )
+        }
+
+        /// The next thing the compositor sent.
+        pub(crate) fn read(&mut self) -> Message {
+            self.reader
+                .read_blocking(&mut &self.stream)
+                .expect("a message from the compositor")
+        }
+
+        /// The serial of the next batch the compositor sent.
+        pub(crate) fn batch(&mut self) -> u64 {
+            match self.read() {
+                Message::Batch(batch) => batch.serial,
+                other => panic!("not a batch: {other:?}"),
+            }
+        }
+
+        pub(crate) fn write(&mut self, message: &Message) {
+            frame::write(&mut &self.stream, message).expect("written to the compositor");
+        }
+
+        /// Answer batch `serial` with `commands`.
+        pub(crate) fn answer(&mut self, serial: u64, handled: bool, commands: Vec<wire::Command>) {
+            self.write(&Message::Answer(wire::Answer {
+                serial,
+                handled,
+                commands,
+                motion: None,
+                decision: None,
+            }));
         }
     }
 }

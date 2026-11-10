@@ -459,6 +459,56 @@ fn settle_tells_the_scripts_once_per_change_of_the_problems() {
     assert_eq!(told, ["", "1", "1", "2"]);
 }
 
+/// **Answers are applied in the order they came**: one the compositor
+/// stopped waiting for is applied before the next, and by the event loop as
+/// soon as it comes, with nothing else to turn the loop.
+#[test]
+fn a_late_answer_is_applied_when_it_comes_and_before_the_next() {
+    use crate::script::Outcome;
+    use crate::wm::link::tests::Hand;
+    use solium_wm_protocol::Command;
+
+    let display = smithay::reexports::wayland_server::Display::<Solium>::new()
+        .expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let mut event_loop: smithay::reexports::calloop::EventLoop<'static, Solium> =
+        smithay::reexports::calloop::EventLoop::try_new().expect("an event loop");
+    state.wm_watch = Some(crate::wm::Watch::new(event_loop.handle(), |state| state));
+    let (mut scripts, mut hand) = Hand::with(Vec::new());
+    scripts.waits.ask = std::time::Duration::from_millis(5);
+    state.start_scripts(Some(scripts));
+
+    state.trigger_relayout();
+    assert_eq!(hand.batch(), 1);
+    assert_eq!(
+        state.status, "",
+        "unanswered, and the compositor has gone on"
+    );
+    hand.answer(1, false, vec![Command::Status("late".to_owned())]);
+    event_loop
+        .dispatch(Some(std::time::Duration::from_secs(5)), &mut state)
+        .expect("dispatching");
+    assert_eq!(state.status, "late", "applied when it came");
+
+    state.trigger_relayout();
+    assert_eq!(hand.batch(), 2);
+    hand.answer(2, false, vec![Command::Status("late again".to_owned())]);
+    if let Some(scripts) = state.scripts.as_mut() {
+        scripts.hear_ready();
+    }
+    state.apply(Outcome {
+        status: Some("the next".to_owned()),
+        ..Outcome::default()
+    });
+    assert_eq!(state.status, "the next", "after the one before it");
+    assert!(
+        state
+            .scripts
+            .as_ref()
+            .is_some_and(|scripts| scripts.late.is_empty())
+    );
+}
+
 /// **A framed pane's `style` is the configured style's name, the default's
 /// when none is named, and a bare pane's is `"none"`** (Ruling 15): a rule on
 /// `style = "top"` reaches a window framed by the default style as it does

@@ -1,15 +1,19 @@
 //! The events the compositor tells the window manager: each entry point
-//! `state/` calls builds one [`wire::Event`], sends it in a [`wire::Batch`]
-//! with what changed since the last, and reads the [`wire::Answer`] back as
-//! an [`Outcome`]. The window manager's half is
-//! [`crate::script::lua::Host::handle`]; between them is a function call
-//! here, and a socket when the window manager is a process of its own.
+//! `state/` calls builds one [`wire::Event`] and sends it in a
+//! [`wire::Batch`] with what changed since the last.
+//!
+//! What an entry point hands back is the [`wire::Answer`] as an [`Outcome`]
+//! when it came in time ([`crate::wm::Scripts`] says how long that is), and
+//! otherwise the compositor's own answer: nothing, for most, and where an
+//! event's answer decides what becomes of it (a key, a wheel turn, a new
+//! window), what its entry point says. The window manager's own is applied
+//! when it comes.
 
 use solium_wm_protocol as wire;
 
 use crate::script::lua::Ask;
 use crate::script::*;
-use crate::wm::Scripts;
+use crate::wm::{Scripts, Wait};
 
 impl Scripts {
     /// Run whatever a key combination is bound to. Handled when a binding
@@ -18,10 +22,20 @@ impl Scripts {
     ///
     /// At the lock screen, nothing the answer asks that reaches past the
     /// lock is applied, whatever the window manager let through.
+    ///
+    /// Unanswered in time, a bound key is the window manager's all the same:
+    /// it is not typed into the focused client, and what its binding asks
+    /// for is applied when it comes.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
         let locked = snapshot.locked;
-        let (_, outcome) = self.send_as(snapshot, wire::Event::Key(combo.to_owned()), locked);
-        outcome
+        let event = wire::Event::Key(combo.to_owned());
+        match self.event(Some(snapshot), event, Wait::Frame, locked, false) {
+            Some((_, outcome)) => outcome,
+            None => Outcome {
+                handled: self.has_binding(combo),
+                ..Outcome::default()
+            },
+        }
     }
 
     /// Tell scripts a window has appeared.
@@ -29,18 +43,24 @@ impl Scripts {
     /// Every listener runs. Returns whether any of them did: nothing happening
     /// is a valid answer, and the compositor then uses its own plain animation
     /// rather than leaving a window to pop into existence.
+    ///
+    /// Unanswered in time, the window gets the compositor's plain placement,
+    /// and the window manager's moves it from there.
     pub(crate) fn opened(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
         self.send(snapshot, wire::Event::Opened(id))
     }
 
-    /// A window went fullscreen, or left it: `(id, entering)`.
+    /// A window went fullscreen, or left it: `(id, entering)`. Its answer
+    /// carries the motion the change is drawn with: the compositor's own
+    /// when it is late.
     pub(crate) fn fullscreen(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Fullscreen((id, entering)))
+        self.change(snapshot, wire::Event::Fullscreen((id, entering)))
     }
 
-    /// A window was maximised, or let out of it: `(id, entering)`.
+    /// A window was maximised, or let out of it: `(id, entering)`, as
+    /// [`Self::fullscreen`] is told.
     pub(crate) fn maximize(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Maximize((id, entering)))
+        self.change(snapshot, wire::Event::Maximize((id, entering)))
     }
 
     /// A press while a mode holds input.
@@ -110,6 +130,10 @@ impl Scripts {
     }
 
     /// A window's own resize moved an edge to `edge_at`.
+    ///
+    /// A layout that takes it moves a seam, and the compositor resizes the
+    /// window itself when none does. Unanswered in time, it is taken as the
+    /// last one was, a drag being a run of them.
     pub(crate) fn resized(
         &mut self,
         id: u64,
@@ -117,16 +141,23 @@ impl Scripts {
         sides: (Option<&'static str>, Option<&'static str>),
         snapshot: Snapshot,
     ) -> Outcome {
-        self.send(
-            snapshot,
-            wire::Event::Resized(wire::Resized {
-                id,
-                x: edge_at.0,
-                y: edge_at.1,
-                horizontal: sides.0.map(str::to_owned),
-                vertical: sides.1.map(str::to_owned),
-            }),
-        )
+        let event = wire::Event::Resized(wire::Resized {
+            id,
+            x: edge_at.0,
+            y: edge_at.1,
+            horizontal: sides.0.map(str::to_owned),
+            vertical: sides.1.map(str::to_owned),
+        });
+        match self.event(Some(snapshot), event, Wait::Frame, false, false) {
+            Some((_, outcome)) => {
+                self.took.resize = outcome.handled && !outcome.commands.is_empty();
+                outcome
+            }
+            None => Outcome {
+                handled: self.took.resize,
+                ..Outcome::default()
+            },
+        }
     }
 
     pub(crate) fn closed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
@@ -147,13 +178,18 @@ impl Scripts {
 
     /// A notification arriving, for `sol.on("notification")` to decide its
     /// fate; `None` when no decider said anything.
+    ///
+    /// Unanswered in time, nothing was decided, and the notification is
+    /// shown as one nobody decided about is.
     pub(crate) fn notification_decision(
         &mut self,
         arrival: &crate::json::Json,
         snapshot: Snapshot,
     ) -> (Option<crate::json::Json>, Outcome) {
-        let (decision, outcome) =
-            self.send_for(snapshot, wire::Event::Notification(arrival.render()));
+        let event = wire::Event::Notification(arrival.render());
+        let (decision, outcome) = self
+            .event(Some(snapshot), event, Wait::Frame, false, false)
+            .unwrap_or_default();
         (
             decision.and_then(|text| crate::json::Json::parse(&text)),
             outcome,
@@ -185,15 +221,14 @@ impl Scripts {
     /// The notifications of the configuration's own that are gone, whose
     /// action functions are let go.
     pub(crate) fn notify_forget(&mut self, tokens: &[u64]) {
-        self.serial += 1;
-        let batch = wire::Batch {
-            serial: self.serial,
-            changes: Vec::new(),
-            events: vec![wire::Event::NotifyForget(tokens.to_vec())],
-        };
-        let answers = self.answers(None);
-        if let Err(err) = self.link.answer(batch, &*answers) {
-            tracing::error!("{err:#}");
+        let event = wire::Event::NotifyForget(tokens.to_vec());
+        // Nothing to apply: what it asked for while forgetting, if
+        // anything, is applied with the next answer.
+        if let Some((_, outcome)) = self.event(None, event, Wait::Frame, false, false) {
+            self.late.push_back(crate::wm::Late {
+                outcome,
+                change: false,
+            });
         }
     }
 
@@ -390,70 +425,90 @@ impl Scripts {
     }
 
     /// A modified wheel turn, offered to the scripts.
+    ///
+    /// One nobody takes goes on to the window under the pointer. Unanswered
+    /// in time, it is taken as the last one was, a scroll being a run of
+    /// them.
     pub(crate) fn scrolled(&mut self, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Scrolled((dx, dy)))
+        let event = wire::Event::Scrolled((dx, dy));
+        match self.event(Some(snapshot), event, Wait::Frame, false, false) {
+            Some((_, outcome)) => {
+                self.took.scroll = outcome.handled;
+                outcome
+            }
+            None => Outcome {
+                handled: self.took.scroll,
+                ..Outcome::default()
+            },
+        }
     }
 
     /// Ask for the stores that changed, to save them: every
-    /// `files.store_interval` on the compositor's clock, and at its end.
+    /// `files.store_interval` on the compositor's clock.
     pub(crate) fn save_stores(&mut self, snapshot: Snapshot) -> Outcome {
         self.send(snapshot, wire::Event::SaveStores)
     }
 
-    /// Send one event, with what changed since the last batch, and read the
-    /// answer as the compositor applies it.
+    /// [`Self::save_stores`], before the configuration is loaded again and
+    /// at the compositor's end: waited for the longest, since nothing comes
+    /// after it to apply a late answer.
+    pub(crate) fn save_stores_at_last(&mut self, snapshot: Snapshot) -> Outcome {
+        self.event(
+            Some(snapshot),
+            wire::Event::SaveStores,
+            Wait::Last,
+            false,
+            false,
+        )
+        .map(|(_, outcome)| outcome)
+        .unwrap_or_default()
+    }
+
+    /// Send one event, with what changed since the last batch: its answer,
+    /// or an empty one when it is late.
     fn send(&mut self, snapshot: Snapshot, event: wire::Event) -> Outcome {
-        self.send_for(snapshot, event).1
+        self.event(Some(snapshot), event, Wait::Frame, false, false)
+            .map(|(_, outcome)| outcome)
+            .unwrap_or_default()
     }
 
-    /// [`Self::send`], with the answer's decision, as JSON text.
-    fn send_for(&mut self, snapshot: Snapshot, event: wire::Event) -> (Option<String>, Outcome) {
-        self.send_as(snapshot, event, false)
+    /// Send a window's fullscreen or maximise, whose answer is applied as
+    /// one whenever it comes.
+    fn change(&mut self, snapshot: Snapshot, event: wire::Event) -> Outcome {
+        self.event(Some(snapshot), event, Wait::Frame, false, true)
+            .map(|(_, outcome)| outcome)
+            .unwrap_or_default()
     }
 
-    /// [`Self::send_for`], for a binding fired at the lock screen when
-    /// `at_the_lock`.
-    fn send_as(
+    /// Send one event in a batch of its own, with what changed since the
+    /// last when there is a snapshot to tell it from: its decision and its
+    /// outcome when the answer came within `wait`.
+    fn event(
         &mut self,
-        snapshot: Snapshot,
+        snapshot: Option<Snapshot>,
         event: wire::Event,
+        wait: Wait,
         at_the_lock: bool,
-    ) -> (Option<String>, Outcome) {
+        change: bool,
+    ) -> Option<(Option<String>, Outcome)> {
         self.serial += 1;
         let batch = wire::Batch {
             serial: self.serial,
-            changes: self.told.changes(&snapshot),
+            changes: snapshot
+                .as_ref()
+                .map(|snapshot| self.told.changes(snapshot))
+                .unwrap_or_default(),
             events: vec![event],
         };
-        let answers = self.answers(Some(snapshot));
-        let serial = batch.serial;
-        let mut answer = self.link.answer(batch, &*answers).unwrap_or_else(|err| {
-            // A window manager that does not answer has asked for nothing:
-            // a key it did not take is the focused client's.
-            tracing::error!("{err:#}");
-            wire::Answer {
-                serial,
-                handled: false,
-                commands: Vec::new(),
-                motion: None,
-                decision: None,
-            }
-        });
-        if at_the_lock {
-            refuse_past_the_lock(&mut answer);
-        }
-        self.declarations_in(&answer);
-        let decision = answer.decision.clone();
-        let mut outcome = outcome_of(answer);
-        outcome.commands.splice(0..0, self.stores.take_read());
-        (decision, outcome)
+        let answers = self.answers(snapshot);
+        self.send_batch(batch, answers, at_the_lock, change, wait)
     }
 }
 
 /// Take out of an answer to a binding fired at the lock screen what would
 /// reach past the lock (#224): the compositor holds to the rule whatever the
 /// window manager does.
-fn refuse_past_the_lock(answer: &mut wire::Answer) {
+pub(crate) fn refuse_past_the_lock(answer: &mut wire::Answer) {
     answer.commands.retain(|command| {
         let reaches = crate::wm::convert::reaches_past_the_lock(command);
         if reaches {
@@ -494,6 +549,7 @@ pub(crate) fn outcome_of(answer: wire::Answer) -> Outcome {
 /// The compositor's answers, in the same process: its own predicates over
 /// the snapshot a dispatch was handed, when there is one, and the stores'
 /// files.
+#[derive(Debug)]
 pub(crate) struct Answers {
     pub(crate) snapshot: Option<Snapshot>,
     pub(crate) stores: std::rc::Rc<crate::wm::stores::StoreReads>,

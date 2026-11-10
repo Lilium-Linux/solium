@@ -555,6 +555,7 @@ mod process;
 mod services;
 mod settings;
 mod shipped;
+mod waits;
 mod windows;
 
 impl Scripts {
@@ -575,7 +576,7 @@ impl Scripts {
                     .eval::<String>()
                     .unwrap_or_else(|err| format!("error: {err}"))
             }),
-            &*self.answers(None),
+            &self.answers(None),
         )
     }
 

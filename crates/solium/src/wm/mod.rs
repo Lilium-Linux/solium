@@ -10,5 +10,9 @@ pub(crate) mod link;
 pub(crate) mod rows;
 mod scripts;
 pub(crate) mod stores;
+mod waits;
+mod wake;
 
-pub(crate) use scripts::Scripts;
+pub(crate) use scripts::{Late, Scripts};
+pub(crate) use waits::{Wait, Waits};
+pub(crate) use wake::Watch;

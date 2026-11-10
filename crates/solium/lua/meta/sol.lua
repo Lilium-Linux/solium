@@ -332,6 +332,12 @@
 ---@field store_interval? number Milliseconds between the comparisons of each store with what was last saved, above 0. Default 1000.
 ---@field store_max? integer The most bytes of a store's file that are read, 0 or more; a larger file is broken. Default 1048576 (1 MiB).
 
+---`config.lua`'s `wm`: how long the compositor waits for the window manager.
+---@class sol.WmOptions
+---@field ask_ms? number Milliseconds an event's answer is waited for before the compositor goes on by itself, above 0. Default 4.
+---@field hard_ms? number Milliseconds the window manager's last word is waited for, before a reload and as the compositor ends, above 0. Default 1000.
+---@field load_ms? number Milliseconds a configuration may take to load again on a reload, above 0. Default 10000.
+
 ---What a `sol.watch` function is told (#473).
 ---@class sol.WatchEvent
 ---@field kind "changed"|"created"|"removed" `"changed"`: written and closed, or another file renamed onto it. `"created"`: it appeared. `"removed"`: deleted, or renamed away.
@@ -1900,6 +1906,14 @@ function sol.store(name, defaults) end
 ---@param options? sol.FilesOptions
 ---@return nil
 function sol.files(options) end
+
+---How long the compositor waits for the window manager, which this
+---configuration runs in: `config.wm`, which the shipped `init.lua` hands
+---over. After `ask_ms` an event goes on without its answer, which is applied
+---when it comes. A key left out, or one of the wrong kind, keeps the default.
+---@param options? sol.WmOptions
+---@return nil
+function sol.wm(options) end
 
 ---Whether a program can be found on `PATH`. A name with a `/` in it is
 ---checked as a path. Nothing is run.

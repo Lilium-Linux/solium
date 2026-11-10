@@ -396,6 +396,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         crate::dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    solium.wm_watch = Some(crate::wm::Watch::new(loop_handle.clone(), |state| {
+        &mut state.solium
+    }));
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());

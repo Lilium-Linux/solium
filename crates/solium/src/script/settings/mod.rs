@@ -23,5 +23,6 @@ pub(crate) mod resize;
 pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod toplevels;
+pub(crate) mod wm;
 pub(crate) mod workspaces;
 pub(crate) mod x11;

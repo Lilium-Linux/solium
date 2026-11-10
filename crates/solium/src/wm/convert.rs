@@ -409,6 +409,9 @@ fn configure(
         // window manager loaded with ([`crate::script::Scripts::qml`]); a
         // later one changes nothing that is running.
         "qml" | "session" => Vec::new(),
+        // The connection's own, read where an answer arrives
+        // ([`crate::wm::Scripts`]): how long the next one is waited for.
+        "wm" => Vec::new(),
         other => return Err(format!("`{other}` is not a settings section")),
     })
 }
