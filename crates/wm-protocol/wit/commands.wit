@@ -145,7 +145,10 @@ interface commands {
     /// A key binding, so a key is answered without a question: the compositor
     /// knows the combination is taken.
     record binding {
-        /// The combination, in its one spelling (`combo::normalise`).
+        /// The combination: any of the modifiers `ctrl`, `alt`, `shift`
+        /// and `super`, and one key by its XKB name, joined by `+`, in any
+        /// order and either case: `super+shift+e`. The `key` event names
+        /// it as it is written here.
         combo: string,
         /// What it does, as the window manager says it.
         note: option<string>,

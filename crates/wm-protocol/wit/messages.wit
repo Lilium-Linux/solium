@@ -97,7 +97,8 @@ interface messages {
     variant event {
         /// The configuration was loaded: the desktop's first moment.
         startup,
-        /// A bound key combination, in its canonical spelling.
+        /// A key combination the window manager bound was pressed, named
+        /// as it wrote it in its `binding`.
         key(string),
         opened(u64),
         fullscreen(tuple<u64, bool>),

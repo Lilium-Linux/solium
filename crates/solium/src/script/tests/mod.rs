@@ -552,6 +552,7 @@ mod keep;
 mod monitors;
 mod present;
 mod process;
+mod rust_wm;
 mod services;
 mod settings;
 mod shipped;

@@ -28,7 +28,7 @@ impl Scripts {
     /// for is applied when it comes.
     pub(crate) fn key(&mut self, combo: &str, snapshot: Snapshot) -> Outcome {
         let locked = snapshot.locked;
-        let event = wire::Event::Key(combo.to_owned());
+        let event = wire::Event::Key(self.spelled(combo));
         match self.event(Some(snapshot), event, Wait::Frame, locked, false) {
             Some((_, outcome)) => outcome,
             None => Outcome {

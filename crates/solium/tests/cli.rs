@@ -342,6 +342,44 @@ fn check_runs_the_window_manager_wm_toml_names() {
     );
 }
 
+/// **A window manager that is not the Lua one is checked as it is**: the
+/// example written in Rust against the protocol crate
+/// (`crates/wm-protocol/examples/tiny_wm.rs`), started as its own program
+/// from `wm.toml`, answers `hello` with its bindings, and the check lists
+/// them with what each does. No Lua runs.
+#[test]
+fn check_lists_the_bindings_of_a_window_manager_in_another_language() {
+    let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("examples/tiny_wm");
+    assert!(
+        wm.is_file(),
+        "{} is not built: cargo build -p solium-wm-protocol --examples",
+        wm.display()
+    );
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-rust", |dir| {
+        // Not Lua at all: a window manager that read it would fail to load.
+        std::fs::write(dir.join("init.lua"), "this is not a configuration").expect("an init.lua");
+        std::fs::create_dir_all(dir.join("solium")).expect("the configuration directory");
+        std::fs::write(
+            dir.join("solium/wm.toml"),
+            format!("command = [{:?}]\n", wm.display().to_string()),
+        )
+        .expect("a wm.toml");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("tiny_wm  (wm.toml)"), "{out}");
+    assert!(out.contains("ok: 5 binding(s)"), "{out}");
+    for (combo, note) in [
+        ("super+return", "open a terminal"),
+        ("shift+super+e", "end the session"),
+    ] {
+        assert!(
+            out.lines()
+                .any(|line| line.contains(combo) && line.contains(note)),
+            "{combo}: {out}"
+        );
+    }
+}
+
 /// **`solium pin set` and `solium pin clear` need a terminal**: with
 /// standard input not one, each exits 1 saying so, before asking for anything
 /// or writing anything, and `pin` with any other word is refused like any

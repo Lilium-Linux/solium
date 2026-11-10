@@ -134,6 +134,9 @@ pub(crate) struct Scripts {
     /// is sent, but for those that need no listening
     /// ([`wire::listen::ALWAYS`]).
     listens: std::collections::BTreeSet<String>,
+    /// Each bound combination the window manager wrote in a spelling of
+    /// its own, by its one spelling.
+    spellings: std::collections::HashMap<String, String>,
 }
 
 /// What a window manager kept, by name, as the compositor holds it.
@@ -193,6 +196,27 @@ impl Scripts {
         Ok(scripts)
     }
 
+    /// A window manager that is not the Lua one, run by `run` on a thread
+    /// with its end of the socket, as a program `wm.toml` names is run.
+    #[cfg(test)]
+    pub(crate) fn played(
+        run: impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    ) -> Result<Self> {
+        let stores = Rc::new(StoreReads::default());
+        let answers = Answers {
+            snapshot: None,
+            stores: Rc::clone(&stores),
+        };
+        let (link, commands) = Link::played(run, &answers)?;
+        Ok(Self::over(
+            link,
+            commands,
+            stores,
+            Path::new("/a/window/manager/of/its/own"),
+            false,
+        ))
+    }
+
     /// The window manager at the other end of `link`, started on `config`,
     /// which answered `hello` with `commands`.
     pub(crate) fn over(
@@ -243,6 +267,7 @@ impl Scripts {
             loaded_stores,
             keeps: std::collections::BTreeMap::new(),
             listens: std::collections::BTreeSet::new(),
+            spellings: std::collections::HashMap::new(),
         };
         scripts.declarations_in(&loaded);
         scripts.listens_in(&loaded);
@@ -546,12 +571,12 @@ impl Scripts {
             _ => bail!("the window manager did not load the configuration again within {within:?}"),
         };
         self.loaded_stores = self.stores.take_read();
-        self.declared = wire::Declarations {
+        self.declare(wire::Declarations {
             bindings: Vec::new(),
             unbound: Vec::new(),
             unknown: Vec::new(),
             notes: Vec::new(),
-        };
+        });
         self.declarations_in(&loaded);
         self.listens.clear();
         self.listens_in(&loaded);
@@ -630,8 +655,48 @@ impl Scripts {
                 _ => None,
             })
         {
-            self.declared = declared.clone();
+            self.declare(declared.clone());
         }
+    }
+
+    /// Keep `declared` as the key filter searches it: each combination in
+    /// its one spelling, sorted. A window manager writes a combination as
+    /// it likes, `super+shift+e` or `Shift+Super+E`, in any order, and is
+    /// told of the key in the spelling it used ([`Self::spelled`]).
+    fn declare(&mut self, mut declared: wire::Declarations) {
+        self.spellings.clear();
+        for binding in &mut declared.bindings {
+            let canonical = normalise_combo(&binding.combo);
+            if canonical != binding.combo {
+                let written = std::mem::replace(&mut binding.combo, canonical.clone());
+                self.spellings.entry(canonical).or_insert(written);
+            }
+        }
+        for binding in &mut declared.unbound {
+            binding.combo = normalise_combo(&binding.combo);
+        }
+        // Stable, so of one combination declared twice the first is kept.
+        declared
+            .bindings
+            .sort_by(|one, other| one.combo.cmp(&other.combo));
+        declared.bindings.dedup_by(|later, first| {
+            let twice = later.combo == first.combo;
+            if twice {
+                tracing::warn!(
+                    combo = later.combo,
+                    "the window manager bound a key twice; the first is kept"
+                );
+            }
+            twice
+        });
+        self.declared = declared;
+    }
+
+    /// `combo` as the window manager wrote it when it bound it, which is
+    /// how it is told the key was pressed.
+    pub(crate) fn spelled(&self, combo: &str) -> String {
+        let canonical = normalise_combo(combo);
+        self.spellings.get(&canonical).cloned().unwrap_or(canonical)
     }
 
     /// Keep the events an answer says the window manager listens to: the

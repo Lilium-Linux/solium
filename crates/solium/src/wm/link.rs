@@ -80,7 +80,20 @@ impl Link {
         answers: &dyn Ask,
         within: Duration,
     ) -> Result<(Self, Vec<wire::Command>)> {
-        let link = Self::open(config, shipped_only, chosen)?;
+        Self::open(config, shipped_only, chosen)?.greeted(keeps, answers, within)
+    }
+
+    /// Say `hello` to the window manager at the other end, and wait
+    /// `within` for its `hello-answer`: the link, and what it asked for.
+    /// One that speaks another version of the protocol, says goodbye, or
+    /// says nothing in that time is the error.
+    fn greeted(
+        self,
+        keeps: Vec<(String, wire::Doc)>,
+        answers: &dyn Ask,
+        within: Duration,
+    ) -> Result<(Self, Vec<wire::Command>)> {
+        let link = self;
         // What goes wrong on the socket is said as what the window manager
         // did, for whoever reports it to put a name to.
         let named = |err: anyhow::Error| anyhow!("the window manager {err:#}");
@@ -324,8 +337,10 @@ impl Drop for Link {
             }
             #[cfg(test)]
             Peer::Thread { control, thread } => {
-                // Its loop ends with the last message it will be told of.
+                // Its loop ends with the last message it will be told of,
+                // or, for one that reads the socket itself, with the socket.
                 control.take();
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
                 if let Some(thread) = thread.take() {
                     let _ = thread.join();
                 }
@@ -438,6 +453,30 @@ pub(crate) mod tests {
                 },
             )
             .expect("a socket")
+        }
+
+        /// A window manager that is not the Lua one, run by `run` on a
+        /// thread of its own with the other end of the socket: it reads and
+        /// answers for itself, as a program started for it would, and is
+        /// greeted as one is.
+        pub(crate) fn played(
+            run: impl FnOnce(UnixStream) + Send + 'static,
+            answers: &dyn Ask,
+        ) -> Result<(Self, Vec<wire::Command>)> {
+            let (ours, theirs) =
+                UnixStream::pair().context("making the window manager's socket")?;
+            let thread = std::thread::Builder::new()
+                .name("window manager".to_owned())
+                .spawn(move || run(theirs))
+                .context("starting the window manager's thread")?;
+            Self::connected(
+                ours,
+                Peer::Thread {
+                    control: None,
+                    thread: Some(thread),
+                },
+            )?
+            .greeted(Vec::new(), answers, Duration::from_secs(10))
         }
 
         /// End the window manager on its thread, as one that crashed ends:
