@@ -73,9 +73,23 @@ impl<'a> Report<'a> {
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
 pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
     report.line(&format!("checking {}", path.display()));
-    match crate::wm::link::program() {
-        Ok(program) => report.line(&format!("  solium-lua  {}", program.display())),
-        Err(why) => report.line(&format!("  solium-lua  missing: {why}")),
+    // Which window manager answers for it: the program `wm.toml` names, or
+    // the shipped one. What is wrong with that file fails the check, as a
+    // setting nothing reads does: the file would not do what it says.
+    let (chosen, said) = crate::wm::Chosen::read();
+    match chosen.command.as_deref() {
+        Some(command) => report.line(&format!(
+            "  window manager  {}  (wm.toml)",
+            crate::wm::Chosen::spelled(command)
+        )),
+        None => match crate::wm::link::program() {
+            Ok(program) => report.line(&format!("  solium-lua  {}", program.display())),
+            Err(why) => report.line(&format!("  solium-lua  missing: {why}")),
+        },
+    }
+    for line in &said {
+        let file = crate::wm::Chosen::file().unwrap_or_default();
+        report.fail(&format!("  {}: {line}", file.display()));
     }
     // Read only: a check changes none of the user's files (#473).
     match crate::script::Scripts::load_for_check(path) {

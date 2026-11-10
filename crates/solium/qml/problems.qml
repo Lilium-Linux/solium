@@ -29,7 +29,12 @@ Item {
                 width: parent.width
                 text: modelData.text
                 color: modelData.severity === "warning" ? Theme.warning : Theme.danger
-                elide: Text.ElideMiddle
+                // A few rows are read whole, wrapped: what stopped and what
+                // was done about it is a sentence or two. Many are a line
+                // each, so that all of them fit.
+                wrapMode: Text.Wrap
+                maximumLineCount: overlay.rows.length > 3 ? 1 : 4
+                elide: maximumLineCount > 1 ? Text.ElideRight : Text.ElideMiddle
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.fontSize
             }

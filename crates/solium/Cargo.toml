@@ -65,6 +65,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
 
+# `wm.toml`, which says which window manager is started (`src/wm/chosen.rs`):
+# read before any window manager runs, so it cannot be the window manager's
+# own configuration, and TOML because that is what a small file of this kind
+# is expected to be. Only the parser: no serde, no writer. Already in the
+# lockfile, with everything it pulls in, through `pipewire`'s build scripts;
+# MIT OR Apache-2.0.
+toml = { version = "1.2", default-features = false, features = ["std", "parse"] }
+
 # XCursor themes: finding one on the icon search path, following what it
 # inherits, and parsing the files. Smithay ships no loader of its own, so this
 # is the crate everything else in this space already uses -- winit, smithay's

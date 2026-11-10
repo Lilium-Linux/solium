@@ -25,6 +25,14 @@
 //! `the_calls_reach_systemd_and_dbus_as_their_methods` and
 //! `a_session_ends_the_graphical_session_it_started` hold it to that.
 //!
+//! The same bus thread asks systemd for one more thing, which is not about
+//! the session's environment: the window manager's process in a scope of its
+//! own, with a CPU weight ([`Session::window_manager`]), so its answers stay
+//! inside a frame while every core is busy. Asked after the process has
+//! started, so that starting it never waits on systemd, or needs one:
+//! `the_window_manager_is_scoped_once_for_each_process` and
+//! `the_scope_reaches_systemd_as_a_transient_unit`.
+//!
 //! Before any of that, the bus thread asks systemd who has
 //! `graphical-session.target` ([`claim`]). What an earlier session left
 //! running is stopped first, and another desktop of this user's is left
@@ -132,6 +140,13 @@ pub(crate) enum Call {
     StopUnit(String),
     /// `org.freedesktop.systemd1.Manager.UnsetEnvironment`.
     UnsetEnvironment(Vec<String>),
+    /// `org.freedesktop.systemd1.Manager.StartTransientUnit`: the scope
+    /// `unit`, holding the process `pid`, at `cpu_weight`.
+    Scope {
+        unit: String,
+        pid: u32,
+        cpu_weight: u64,
+    },
 }
 
 /// Where calls go: the bus thread, or a test's list.
@@ -156,6 +171,8 @@ pub(crate) struct Session {
     started: bool,
     /// Every name exported, in the order first sent, for the unset on exit.
     exported: Vec<&'static str>,
+    /// The window manager's process that was last given its scope.
+    scoped: Option<u32>,
 }
 
 impl std::fmt::Debug for Session {
@@ -185,6 +202,7 @@ impl Session {
             settled: false,
             started: false,
             exported: Vec::new(),
+            scoped: None,
         }
     }
 
@@ -244,6 +262,7 @@ impl Session {
             settled: false,
             started: false,
             exported: Vec::new(),
+            scoped: None,
         }
     }
 
@@ -265,6 +284,32 @@ impl Session {
         }
         self.settled = true;
         self.start_when_ready();
+    }
+
+    /// The window manager's process, `pid`, has started: ask systemd to
+    /// put it in a scope of its own in `session.slice`, where what a
+    /// session cannot do without belongs, at `cpu_weight` (`wm.toml`'s
+    /// `cpu_weight`, as `CPUWeight=` counts it).
+    ///
+    /// Asked once for each process, so a reload, which is the same
+    /// process, asks nothing. A session that tells nobody asks nothing
+    /// either: nested, or started by hand, the window manager stays the
+    /// plain child it was started as, in whatever scope the compositor is
+    /// in. So does one whose systemd refuses, which is said in the log and
+    /// changes nothing else. The scope goes when the process does.
+    pub(crate) fn window_manager(&mut self, pid: u32, cpu_weight: u64) {
+        if self.scoped == Some(pid) {
+            return;
+        }
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        self.scoped = Some(pid);
+        sink.send(Call::Scope {
+            unit: format!("solium-wm-{pid}.scope"),
+            pid,
+            cpu_weight,
+        });
     }
 
     /// Stop the target and unset what was exported. Also on drop, for a
@@ -719,6 +764,34 @@ fn perform(connection: &zbus::blocking::Connection, call: &Call) -> zbus::Result
         Call::UnsetEnvironment(names) => manager("UnsetEnvironment", names),
         Call::StartUnit(unit) => manager("StartUnit", &(unit.as_str(), "replace")),
         Call::StopUnit(unit) => manager("StopUnit", &(unit.as_str(), "replace")),
+        Call::Scope {
+            unit,
+            pid,
+            cpu_weight,
+        } => {
+            use zbus::zvariant::Value;
+            let properties: Vec<(&str, Value<'_>)> = vec![
+                ("Description", Value::from("Solium's window manager")),
+                ("Slice", Value::from("session.slice")),
+                ("PIDs", Value::from(vec![*pid])),
+                ("CPUWeight", Value::from(*cpu_weight)),
+                // Gone with its process, however that ended, so the next
+                // one's name is free.
+                ("CollectMode", Value::from("inactive-or-failed")),
+            ];
+            // Units started with it: none.
+            let with: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
+            // `fail`: a unit of this name already there is left as it is.
+            connection
+                .call_method(
+                    Some(SYSTEMD),
+                    SYSTEMD_PATH,
+                    Some(SYSTEMD_MANAGER),
+                    "StartTransientUnit",
+                    &(unit.as_str(), "fail", properties, with),
+                )
+                .map(drop)
+        }
         Call::UpdateActivationEnvironment(variables) => {
             let environment: HashMap<&str, &str> = variables
                 .iter()
@@ -1298,6 +1371,41 @@ mod tests {
             self.world().stop(&name);
             OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/2").expect("a job path")
         }
+        fn start_transient_unit(
+            &self,
+            name: String,
+            mode: String,
+            properties: Vec<(String, zbus::zvariant::OwnedValue)>,
+            with: Vec<(String, Vec<(String, zbus::zvariant::OwnedValue)>)>,
+        ) -> OwnedObjectPath {
+            use zbus::zvariant::Value;
+            let properties: Vec<String> = properties
+                .iter()
+                .map(|(key, value)| {
+                    let value = match &**value {
+                        Value::Str(text) => text.to_string(),
+                        Value::U64(number) => number.to_string(),
+                        Value::Array(items) => format!(
+                            "{:?}",
+                            items
+                                .iter()
+                                .map(|item| match item {
+                                    Value::U32(number) => number.to_string(),
+                                    other => format!("{other:?}"),
+                                })
+                                .collect::<Vec<_>>()
+                        ),
+                        other => format!("{other:?}"),
+                    };
+                    format!("{key}={value}")
+                })
+                .collect();
+            self.hear(format!(
+                "systemd1.Manager.StartTransientUnit {name} {mode} {properties:?} with {}",
+                with.len()
+            ));
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/3").expect("a job path")
+        }
         fn get_unit(&self, name: String) -> zbus::fdo::Result<OwnedObjectPath> {
             self.hear(format!("systemd1.Manager.GetUnit {name}"));
             if !self.finds || name != GRAPHICAL {
@@ -1562,6 +1670,74 @@ mod tests {
         let mut expected = vec![LISTED.to_owned()];
         expected.extend(told("wayland-9"));
         assert_eq!(bus.play(Settings::default()), expected);
+    }
+
+    /// The window manager's scope is asked for once for each process: a
+    /// reload is the same process, a restart is another. A session that
+    /// tells nobody (nested, a manual start, `session.systemd = false`)
+    /// asks for none, and the window manager stays a plain child.
+    #[test]
+    fn the_window_manager_is_scoped_once_for_each_process() {
+        let recorder = Recorder::default();
+        let mut session = Session::with_sink(
+            Settings::default(),
+            Box::new(recorder.clone()),
+            "Lilium".to_owned(),
+            None,
+        );
+        session.window_manager(4100, 1000);
+        session.window_manager(4100, 1000);
+        session.window_manager(4207, 250);
+        assert_eq!(
+            *recorder.calls.borrow(),
+            [
+                Call::Scope {
+                    unit: "solium-wm-4100.scope".to_owned(),
+                    pid: 4100,
+                    cpu_weight: 1000,
+                },
+                Call::Scope {
+                    unit: "solium-wm-4207.scope".to_owned(),
+                    pid: 4207,
+                    cpu_weight: 250,
+                },
+            ]
+        );
+
+        let mut nobody = Session::off();
+        nobody.window_manager(4100, 1000);
+        assert_eq!(
+            nobody.scoped, None,
+            "nothing was asked, so nothing is remembered"
+        );
+    }
+
+    /// The scope arrives as the transient unit systemd makes of it: its
+    /// name, the process it holds, the slice a session's essentials go in,
+    /// and the weight, with nothing of the session's own said before the
+    /// session has a socket.
+    #[test]
+    fn the_scope_reaches_systemd_as_a_transient_unit() {
+        let bus = StandIn::new(&[]);
+        let mut session = Session::begin(
+            Settings::default(),
+            Place::Session,
+            Some(bus.address.clone()),
+            None,
+        );
+        session.window_manager(4100, 1000);
+        session.end();
+        assert_eq!(
+            *bus.heard.lock().expect("the list"),
+            [
+                LISTED.to_owned(),
+                "systemd1.Manager.StartTransientUnit solium-wm-4100.scope fail \
+                 [\"Description=Solium's window manager\", \"Slice=session.slice\", \
+                 \"PIDs=[\\\"4100\\\"]\", \"CPUWeight=1000\", \
+                 \"CollectMode=inactive-or-failed\"] with 0"
+                    .to_owned(),
+            ]
+        );
     }
 
     /// The portals' `Requisite=` keeps `graphical-session.target` needed after

@@ -3,6 +3,7 @@
 //! compositor's own types, only as much of it as changed; and what it asks
 //! for, converted to the compositor's commands.
 
+pub(crate) mod chosen;
 pub(crate) mod convert;
 pub(crate) mod diff;
 pub(crate) mod events;
@@ -13,6 +14,7 @@ mod settings;
 pub(crate) mod stores;
 mod wake;
 
+pub(crate) use chosen::Chosen;
 pub(crate) use scripts::{Keeps, Late, Scripts};
 pub(crate) use settings::{Restarts, Settings, Start, Wait};
 pub(crate) use wake::{Watch, settle};

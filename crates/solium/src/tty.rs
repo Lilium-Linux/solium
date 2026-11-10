@@ -357,13 +357,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    let scripts = solium.first_scripts(&config);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.

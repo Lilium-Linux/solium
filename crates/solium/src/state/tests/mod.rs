@@ -573,6 +573,53 @@ fn a_window_manager_that_goes_is_started_again_and_a_problem_says_so() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// **A window manager that will not start gives way to the shipped
+/// configuration, and a problem says why**: a session starts with the
+/// shipped bindings and the reason on screen, never with no window manager
+/// and no key that opens a terminal. One that starts is itself, with
+/// nothing said.
+#[test]
+fn a_window_manager_that_will_not_start_gives_way_to_the_shipped_configuration() {
+    let directory = crate::effect::host::tests::scratch("state-wm-first");
+    let entry = directory.join("init.lua");
+    let display = TestDisplay::new().expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let said = |state: &Solium| -> Vec<String> {
+        state
+            .effects
+            .problems()
+            .iter()
+            .filter(|problem| problem.effect == "wm")
+            .map(|problem| problem.message.clone())
+            .collect()
+    };
+
+    std::fs::write(&entry, r#"sol.bind("super+t", function() end)"#).expect("writing");
+    let scripts = state.first_scripts(&entry).expect("the one asked for");
+    assert!(!scripts.shipped_only());
+    assert_eq!(scripts.config(), entry);
+    assert_eq!(said(&state), Vec::<String>::new());
+    drop(scripts);
+
+    std::fs::write(&entry, "sol.bind(\"super+t\", function() end").expect("writing");
+    let scripts = state
+        .first_scripts(&entry)
+        .expect("the shipped configuration in its place");
+    assert!(scripts.shipped_only());
+    assert_eq!(scripts.config(), crate::script::Scripts::shipped_config());
+    let said = said(&state);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].starts_with("the window manager would not start: ")
+            && said[0].contains("init.lua")
+            && said[0].ends_with(
+                "The shipped configuration is running in its place: reload to run yours again."
+            ),
+        "{said:?}"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// **A framed pane's `style` is the configured style's name, the default's
 /// when none is named, and a bare pane's is `"none"`** (Ruling 15): a rule on
 /// `style = "top"` reaches a window framed by the default style as it does

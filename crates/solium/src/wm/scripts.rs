@@ -29,7 +29,7 @@ use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
-use crate::wm::{Settings, Wait};
+use crate::wm::{Chosen, Settings, Wait};
 
 /// A batch the window manager has not answered yet.
 #[derive(Debug)]
@@ -107,6 +107,11 @@ pub(crate) struct Scripts {
     config: std::path::PathBuf,
     /// It was started to read nothing of the user's own.
     shipped_only: bool,
+    /// What `wm.toml` said when it was started: the command it is, unless
+    /// it is the shipped one, and the weight of its scope.
+    chosen: Chosen,
+    /// What was wrong with `wm.toml` then, a line each.
+    chosen_said: Vec<String>,
     pub(crate) took: Took,
     /// What the configuration answered its load with: the settings and
     /// requests its top level made, which [`Scripts::startup`] hands over
@@ -173,8 +178,15 @@ impl Scripts {
             stores: Rc::clone(&stores),
         };
         let within = Settings::default().load;
-        let (link, commands) = Link::start(config, shipped_only, keeps, &answers, within)?;
-        Ok(Self::over(link, commands, stores, config, shipped_only))
+        let (chosen, said) = Chosen::read();
+        for line in &said {
+            tracing::warn!(file = ?Chosen::file(), "{line}");
+        }
+        let (link, commands) = Link::start(config, shipped_only, &chosen, keeps, &answers, within)?;
+        let mut scripts = Self::over(link, commands, stores, config, shipped_only);
+        scripts.chosen = chosen;
+        scripts.chosen_said = said;
+        Ok(scripts)
     }
 
     /// The window manager at the other end of `link`, started on `config`,
@@ -206,6 +218,8 @@ impl Scripts {
             down: None,
             config: config.to_owned(),
             shipped_only,
+            chosen: Chosen::default(),
+            chosen_said: Vec::new(),
             took: Took::default(),
             loaded: wire::Answer {
                 serial: 0,
@@ -454,6 +468,49 @@ impl Scripts {
     /// Whether it was started to read nothing of the user's own.
     pub(crate) fn shipped_only(&self) -> bool {
         self.shipped_only
+    }
+
+    /// What `wm.toml` said when this window manager was started.
+    pub(crate) fn chosen(&self) -> &Chosen {
+        &self.chosen
+    }
+
+    /// What was wrong with `wm.toml` when this window manager was started,
+    /// a line each.
+    pub(crate) fn chosen_said(&self) -> &[String] {
+        &self.chosen_said
+    }
+
+    /// Whether `wm.toml` now names another program than the one running,
+    /// so that a reload is a new window manager and not this one loading
+    /// again.
+    pub(crate) fn chosen_another(&self) -> bool {
+        !self.shipped_only && Chosen::read().0.command != self.chosen.command
+    }
+
+    /// The window manager's process, when it is one.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.link.pid()
+    }
+
+    /// The file that says which window manager this is, for a problem
+    /// about it to name: `wm.toml` when that named its program, and the
+    /// configuration it was started on otherwise.
+    pub(crate) fn named_in(&self) -> std::path::PathBuf {
+        Self::named_by(&self.chosen, self.shipped_only, &self.config)
+    }
+
+    /// [`Self::named_in`], of a window manager started on `config` as
+    /// `chosen` says.
+    pub(crate) fn named_by(
+        chosen: &Chosen,
+        shipped_only: bool,
+        config: &Path,
+    ) -> std::path::PathBuf {
+        match (&chosen.command, Chosen::file()) {
+            (Some(_), Some(file)) if !shipped_only => file,
+            _ => config.to_owned(),
+        }
     }
 
     /// Load the configuration again, the window manager carrying what it

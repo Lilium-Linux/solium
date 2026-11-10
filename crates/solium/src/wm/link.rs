@@ -5,8 +5,9 @@
 //! question the window manager asks, a `query`, is answered here as it is
 //! read, from whoever the reader says answers.
 //!
-//! The window manager is the `solium-lua` program, the socket its standard
-//! input. A test runs it on a thread of its own instead, over a socket pair
+//! The window manager is a program of its own, the socket its standard
+//! input: the shipped `solium-lua`, or the command the user's `wm.toml`
+//! names ([`crate::wm::Chosen`]). A test runs it on a thread of its own instead, over a socket pair
 //! all the same, so every test of the configuration crosses the protocol.
 
 use std::cell::RefCell;
@@ -20,6 +21,7 @@ use solium_wm_protocol::frame;
 use solium_wm_protocol::{self as wire, Message};
 
 use crate::script::lua::Ask;
+use crate::wm::Chosen;
 
 /// How long a write to the window manager may block. Its socket's buffer
 /// holds hundreds of batches, so a write blocks only when the window manager
@@ -66,17 +68,19 @@ impl Link {
     /// Start the window manager on the configuration at `config`, and wait
     /// `within` for its `hello-answer`: what the configuration asked for as
     /// it loaded. Its questions while it loads go to `answers`. With
-    /// `shipped_only` it reads nothing of the user's own. `keeps` is what
-    /// the window manager it takes the place of kept, handed to it in
-    /// `hello`: nothing, for the first.
+    /// `shipped_only` it reads nothing of the user's own, and is the
+    /// shipped window manager whatever `chosen`, the user's `wm.toml`,
+    /// names. `keeps` is what the window manager it takes the place of
+    /// kept, handed to it in `hello`: nothing, for the first.
     pub(crate) fn start(
         config: &Path,
         shipped_only: bool,
+        chosen: &Chosen,
         keeps: Vec<(String, wire::Doc)>,
         answers: &dyn Ask,
         within: Duration,
     ) -> Result<(Self, Vec<wire::Command>)> {
-        let link = Self::open(config, shipped_only)?;
+        let link = Self::open(config, shipped_only, chosen)?;
         // What goes wrong on the socket is said as what the window manager
         // did, for whoever reports it to put a name to.
         let named = |err: anyhow::Error| anyhow!("the window manager {err:#}");
@@ -194,21 +198,34 @@ impl Link {
         self.stream.try_clone().map(std::os::fd::OwnedFd::from)
     }
 
-    /// The `solium-lua` process, its standard input the socket.
+    /// The window manager's process, its standard input the socket: the
+    /// command `chosen` names, as it is written, or the shipped
+    /// `solium-lua` on `config`.
     #[cfg(not(test))]
-    fn open(config: &Path, shipped_only: bool) -> Result<Self> {
+    fn open(config: &Path, shipped_only: bool, chosen: &Chosen) -> Result<Self> {
         let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
-        let program = program().map_err(|why| anyhow!(why))?;
         use std::os::unix::process::CommandExt as _;
-        let mut command = std::process::Command::new(&program);
-        command.arg(config).arg(crate::assets::lua());
-        // Where the user's own Lua is, unless none of it is to be read.
-        if let Some(user) = (!shipped_only)
-            .then(crate::script::lua::user_config_dir)
-            .flatten()
-        {
-            command.arg(user);
-        }
+        let (program, mut command) = match chosen.command.as_deref() {
+            Some([program, arguments @ ..]) if !shipped_only => {
+                let mut command = std::process::Command::new(program);
+                command.args(arguments);
+                (std::path::PathBuf::from(program), command)
+            }
+            _ => {
+                let program = program().map_err(|why| anyhow!(why))?;
+                let mut command = std::process::Command::new(&program);
+                command.arg(config).arg(crate::assets::lua());
+                // Where the user's own Lua is, unless none of it is to be
+                // read.
+                if let Some(user) = (!shipped_only)
+                    .then(crate::script::lua::user_config_dir)
+                    .flatten()
+                {
+                    command.arg(user);
+                }
+                (program, command)
+            }
+        };
         let child = command
             .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
                 theirs,
@@ -220,7 +237,11 @@ impl Link {
             .process_group(0)
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
-        tracing::info!(pid = child.id(), "window manager started");
+        tracing::info!(
+            pid = child.id(),
+            program = %program.display(),
+            "window manager started"
+        );
         Self::connected(ours, Peer::Process(RefCell::new(child)))
     }
 
@@ -236,6 +257,15 @@ impl Link {
             abandoned: std::cell::Cell::new(false),
             heard: std::cell::Cell::new(Instant::now()),
         })
+    }
+
+    /// The window manager's process, when it is one.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        match &self.peer {
+            Peer::Process(child) => Some(child.borrow().id()),
+            #[cfg(test)]
+            Peer::Thread { .. } => None,
+        }
     }
 
     /// When the window manager last wrote anything: an answer, a question,
@@ -333,6 +363,7 @@ pub(crate) mod tests {
 
     use super::{Link, Peer};
     use crate::script::lua::Ask;
+    use crate::wm::Chosen;
 
     /// Something for the window manager's thread to run with it, and where
     /// its result goes.
@@ -348,8 +379,9 @@ pub(crate) mod tests {
     }
 
     impl Link {
-        /// The window manager on a thread of its own, over a socket pair.
-        pub(super) fn open(config: &Path, shipped_only: bool) -> Result<Self> {
+        /// The window manager on a thread of its own, over a socket pair:
+        /// the Lua one, whatever `wm.toml` names.
+        pub(super) fn open(config: &Path, shipped_only: bool, _chosen: &Chosen) -> Result<Self> {
             let (ours, theirs) =
                 UnixStream::pair().context("making the window manager's socket")?;
             let (control, heard) = mpsc::channel::<Control>();

@@ -458,17 +458,12 @@ pub(crate) fn run() -> Result<()> {
         .map(|(output, _)| output.clone())
         .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
 
-    // Scripts are loaded before the first frame so a mode can be triggered
-    // immediately. A broken config leaves the compositor usable and unbound
-    // rather than refusing to start.
+    // The window manager is started before the first frame so a mode can be
+    // triggered immediately. One that will not start is replaced by the
+    // shipped configuration rather than refusing to start
+    // (`Solium::first_scripts`).
     let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    let scripts = state.first_scripts(&config);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.

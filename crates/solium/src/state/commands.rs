@@ -1198,13 +1198,18 @@ impl Solium {
             // stopping, reads nothing of the user's: a reload is how theirs
             // is tried again, in a window manager of its own, and the
             // shipped one goes on if it will not load.
-            Some(scripts) if scripts.shipped_only() => match Scripts::load(path) {
-                Ok(loaded) => Ok(loaded),
-                Err(err) => {
-                    self.scripts = Some(scripts);
-                    Err(err)
+            // And when `wm.toml` names another program than the one
+            // running, the reload is that program started, the one running
+            // going on if it will not.
+            Some(scripts) if scripts.shipped_only() || scripts.chosen_another() => {
+                match Scripts::load(path) {
+                    Ok(loaded) => Ok(loaded),
+                    Err(err) => {
+                        self.scripts = Some(scripts);
+                        Err(err)
+                    }
                 }
-            },
+            }
             Some(mut scripts) => match scripts.reload(path) {
                 Ok(()) => Ok(scripts),
                 Err(err) => {
@@ -1223,6 +1228,48 @@ impl Solium {
             self.wm_restarts = crate::wm::Restarts::default();
         }
         self.take_on(reloaded, path);
+    }
+
+    /// The window manager a session starts with: the user's, on `config`,
+    /// or, when that will not start (a `wm.toml` naming a program that is
+    /// not there, a configuration that does not load), the shipped
+    /// configuration in its place, which reads nothing of the user's, with
+    /// a problem saying why. A desktop with the shipped bindings and the
+    /// reason on screen can be mended from inside it; one with no window
+    /// manager has no key that opens a terminal. A reload tries the user's
+    /// again, as it does after [`Self::restart_wm`] gave up on it.
+    pub(crate) fn first_scripts(&mut self, config: &std::path::Path) -> Option<Scripts> {
+        let err = match Scripts::load(config) {
+            Ok(scripts) => return Some(scripts),
+            Err(err) => err,
+        };
+        tracing::error!(?err, config = %config.display(), "the window manager would not start");
+        let (scripts, said) =
+            match Scripts::start_again(&Scripts::shipped_config(), true, Vec::new()) {
+                Ok(scripts) => (
+                    Some(scripts),
+                    format!(
+                        "the window manager would not start: {err:#}. The shipped configuration \
+                     is running in its place: reload to run yours again."
+                    ),
+                ),
+                Err(shipped) => {
+                    tracing::error!(err = ?shipped, "nor would the shipped configuration");
+                    (
+                        None,
+                        format!(
+                            "the window manager would not start: {err:#}. Neither would the \
+                         shipped configuration: {shipped:#}. No window manager is running."
+                        ),
+                    )
+                }
+            };
+        let named_in = Scripts::named_by(&crate::wm::Chosen::read().0, false, config);
+        self.effects
+            .push_problem(crate::effect::host::Problem::error(
+                "wm", &named_in, None, said,
+            ));
+        scripts
     }
 
     /// Start the window manager again, in place of one that stopped
@@ -1247,6 +1294,7 @@ impl Solium {
         // a tiled desk comes back split for split.
         let keeps = scripts.take_keeps();
         let config = scripts.config().to_owned();
+        let named_in = scripts.named_in();
         let shipped_only = scripts.shipped_only();
         let window = scripts.settings.restart_window.as_secs_f64();
         let start =
@@ -1295,7 +1343,7 @@ impl Solium {
         self.effects.clear_problems_of("wm");
         self.effects
             .push_problem(crate::effect::host::Problem::error(
-                "wm", &config, None, said,
+                "wm", &named_in, None, said,
             ));
         self.redraw = true;
     }
@@ -1544,6 +1592,26 @@ impl Solium {
         };
         self.inhibitors.settings = crate::shortcuts_inhibit::Settings::default();
         let outcome = scripts.startup();
+        // Its process in a scope of its own, when this is the session: a
+        // new process each time one is started, and the same one after a
+        // reload, which asks nothing.
+        if let Some(pid) = scripts.pid() {
+            self.session
+                .window_manager(pid, scripts.chosen().cpu_weight);
+        }
+        // What was wrong with `wm.toml` when it was started, where a
+        // mistake in any other part of the configuration is said.
+        self.effects.clear_problems_of("wm.toml");
+        if let Some(file) = crate::wm::Chosen::file() {
+            for line in scripts.chosen_said() {
+                self.effects
+                    .push_problem(crate::effect::host::Problem::warning(
+                        "wm.toml",
+                        &file,
+                        line.clone(),
+                    ));
+            }
+        }
         self.scripts = Some(scripts);
         self.watch_wm();
         // What the configuration does to the keyboard as it starts is told

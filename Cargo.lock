@@ -2339,6 +2339,7 @@ dependencies = [
  "solium-layout",
  "solium-lua",
  "solium-wm-protocol",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
