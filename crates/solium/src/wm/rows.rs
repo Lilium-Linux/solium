@@ -195,8 +195,14 @@ impl DocBuilder {
         if let Some(node) = self.nodes.get_mut(at as usize) {
             *node = wire::DocNode::Table(wire::DocTable {
                 list,
-                fields,
-                numbered,
+                fields: fields
+                    .into_iter()
+                    .map(|(name, node)| wire::DocField { name, node })
+                    .collect(),
+                numbered: numbered
+                    .into_iter()
+                    .map(|(key, node)| wire::DocNumbered { key, node })
+                    .collect(),
             });
         }
     }

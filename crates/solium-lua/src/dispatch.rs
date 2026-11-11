@@ -152,9 +152,13 @@ fn run(
             }
         }
         E::Opened(id) => call_listeners(lua, "open", id),
-        E::Fullscreen((id, entering)) => call_listeners(lua, "fullscreen", (id, entering)),
-        E::Maximize((id, entering)) => call_listeners(lua, "maximize", (id, entering)),
-        E::Click((x, y)) => call_listeners(lua, "click", (x, y)),
+        E::Fullscreen(wire::WindowChange { id, entering }) => {
+            call_listeners(lua, "fullscreen", (id, entering))
+        }
+        E::Maximize(wire::WindowChange { id, entering }) => {
+            call_listeners(lua, "maximize", (id, entering))
+        }
+        E::Click(wire::Point { x, y }) => call_listeners(lua, "click", (x, y)),
         E::Touch(event) => {
             let table = lua.create_table()?;
             table.set("kind", event.kind)?;
@@ -172,7 +176,7 @@ fn run(
             table.set("vy", event.vy)?;
             call_listeners(lua, "touch", table)
         }
-        E::Focused((id, cause, changed)) => {
+        E::Focused(wire::FocusMoved { id, cause, changed }) => {
             let source = cause.name();
             call_listeners(lua, "focus", (id, source, changed))
         }
@@ -185,9 +189,11 @@ fn run(
             let field: Value = sol.get::<mlua::Function>("text_input")?.call(())?;
             call_listeners(lua, "text_input", (field, why))
         }
-        E::Activated((id, why)) => call_listeners(lua, "activate", (id, why)),
+        E::Activated(wire::Activation { id, why }) => call_listeners(lua, "activate", (id, why)),
         E::Renamed(id) => call_listeners(lua, "rename", id),
-        E::Sized((id, size)) => call_listeners(lua, "size", (id, size.w, size.h)),
+        E::Sized(wire::WindowSize { id, size }) => {
+            call_listeners(lua, "size", (id, size.w, size.h))
+        }
         E::Resized(resized) => {
             let wire::Resized {
                 id,
@@ -218,7 +224,7 @@ fn run(
             }
             Ok(false)
         }
-        E::NotifyAction((token, key)) => {
+        E::NotifyAction(wire::NotifyChosen { token, key }) => {
             let kept: Table = sol.get("_notify_actions")?;
             let Some(functions) = kept.get::<Option<Table>>(token)? else {
                 return Ok(false);
@@ -241,12 +247,16 @@ fn run(
         E::MonitorsChanged => call_listeners(lua, "monitors", ()),
         E::ProblemsChanged => call_listeners(lua, "problems", ()),
         E::Restored => call_listeners(lua, "restore", ()),
-        E::FrameAction((id, name, data)) => {
-            call_listeners(lua, "frame", (id, name, json_value(lua, &data)))
-        }
-        E::SurfaceAction((name, action, data)) => {
-            call_listeners(lua, "surface", (name, action, json_value(lua, &data)))
-        }
+        E::FrameAction(wire::FrameAction {
+            id,
+            action: name,
+            data,
+        }) => call_listeners(lua, "frame", (id, name, json_value(lua, &data))),
+        E::SurfaceAction(wire::SurfaceAction {
+            surface: name,
+            action,
+            data,
+        }) => call_listeners(lua, "surface", (name, action, json_value(lua, &data))),
         E::AttemptsSettled(settled) => {
             let attempts: Table = sol.get("_attempts")?;
             let strikes: Table = sol.get("_strikes")?;
@@ -278,7 +288,7 @@ fn run(
                             })
                             .unwrap_or_default();
                         for command in dropped {
-                            if let wire::Command::Act((attempt, ..)) = command {
+                            if let wire::Command::Act(wire::Act { attempt, .. }) = command {
                                 attempts.set(attempt, Value::Nil)?;
                             }
                         }
@@ -294,8 +304,8 @@ fn run(
             let strikes: Table = sol.get("_strikes")?;
             for each in heard {
                 let (id, stream, line) = match each {
-                    wire::RunHeard::Stdout((id, line)) => (id, "stdout", line),
-                    wire::RunHeard::Stderr((id, line)) => (id, "stderr", line),
+                    wire::RunHeard::Stdout(wire::RunLine { id, line }) => (id, "stdout", line),
+                    wire::RunHeard::Stderr(wire::RunLine { id, line }) => (id, "stderr", line),
                     wire::RunHeard::Done(ended) => {
                         let Some(kept) = runs.get::<Option<Table>>(ended.id)? else {
                             continue;
@@ -331,7 +341,7 @@ fn run(
             let timers: Table = sol.get("_timers")?;
             let strikes: Table = sol.get("_strikes")?;
             let mut gone = Vec::new();
-            for (id, last) in due {
+            for wire::TimerDue { id, last } in due {
                 let Some(run) = timers.get::<Option<mlua::Function>>(id)? else {
                     gone.push(id);
                     continue;
@@ -360,7 +370,10 @@ fn run(
             let mut gone = Vec::new();
             for each in heard {
                 match each {
-                    wire::FileHeard::Read((id, result)) => {
+                    wire::FileHeard::Read(wire::ReadEnded {
+                        id,
+                        outcome: result,
+                    }) => {
                         let Some(done) = files.get::<Option<mlua::Function>>(id)? else {
                             continue;
                         };
@@ -381,7 +394,7 @@ fn run(
                             }
                         }
                     }
-                    wire::FileHeard::Wrote((id, error)) => {
+                    wire::FileHeard::Wrote(wire::WriteEnded { id, error }) => {
                         let Some(done) = files.get::<Option<mlua::Function>>(id)? else {
                             continue;
                         };
@@ -391,7 +404,11 @@ fn run(
                     wire::FileHeard::WatchEnded(id) => {
                         watches.set(id, Value::Nil)?;
                     }
-                    wire::FileHeard::Watched((id, kind, path)) => {
+                    wire::FileHeard::Watched(wire::WatchHeard {
+                        id,
+                        change: kind,
+                        path,
+                    }) => {
                         let Some(run) = watches.get::<Option<mlua::Function>>(id)? else {
                             gone.push(id);
                             continue;
@@ -429,8 +446,8 @@ fn run(
         E::Resizing(moved) => {
             call_listeners(lua, "resizing", (moved.id, moved.phase, moved.x, moved.y))
         }
-        E::Dropped((id, x, y)) => call_listeners(lua, "drop", (id, x, y)),
-        E::Scrolled((dx, dy)) => call_listeners(lua, "scroll", (dx, dy)),
+        E::Dropped(wire::Dropped { id, x, y }) => call_listeners(lua, "drop", (id, x, y)),
+        E::Scrolled(wire::Scrolled { dx, dy }) => call_listeners(lua, "scroll", (dx, dy)),
         E::SaveStores => {
             // Read whole before what was sent is looked at: reading them
             // borrows the Lua state's app data too.
@@ -471,12 +488,16 @@ fn run(
                 }
             }
             with_pending(lua, |pending| {
+                pending.commands.extend(
+                    changed
+                        .into_iter()
+                        .map(|(name, content)| wire::Command::Store(wire::Store { name, content })),
+                );
                 pending
                     .commands
-                    .extend(changed.into_iter().map(wire::Command::Store));
-                pending
-                    .commands
-                    .extend(kept.into_iter().map(wire::Command::Keep));
+                    .extend(kept.into_iter().map(|(name, document)| {
+                        wire::Command::Keep(wire::Kept { name, document })
+                    }));
             })?;
             Ok(false)
         }

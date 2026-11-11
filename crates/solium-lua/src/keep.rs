@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use solium_layout::plain::Plain;
-use solium_wm_protocol::{Doc, DocNode, DocTable};
+use solium_wm_protocol::{Doc, DocField, DocNode, DocNumbered, DocTable};
 
 /// What a script handed the host to hold while the Lua state is replaced.
 ///
@@ -62,12 +62,13 @@ impl Keep {
     /// What the compositor held for the window manager this one is started
     /// in place of, as `hello` hands it back. One that does not read back
     /// is left out, and said.
-    pub fn from_wire(keeps: &[(String, Doc)]) -> Self {
+    pub fn from_wire(keeps: &[solium_wm_protocol::Kept]) -> Self {
         Self {
             keeps: keeps
                 .iter()
-                .filter_map(|(name, doc)| {
-                    let kept = Kept::from_doc(doc);
+                .filter_map(|held| {
+                    let name = &held.name;
+                    let kept = Kept::from_doc(&held.document);
                     if kept.is_none() {
                         tracing::warn!(
                             keep = name,
@@ -151,10 +152,16 @@ impl Kept {
                     next += 1;
                 }
                 for (key, value) in numbered {
-                    table.numbered.push((key, value.node(nodes)));
+                    table.numbered.push(DocNumbered {
+                        key,
+                        node: value.node(nodes),
+                    });
                 }
                 for (key, value) in fields {
-                    table.fields.push((key, value.node(nodes)));
+                    table.fields.push(DocField {
+                        name: key,
+                        node: value.node(nodes),
+                    });
                 }
                 put(nodes, at, DocNode::Table(table));
             }
@@ -193,8 +200,8 @@ impl Kept {
                     table
                         .fields
                         .iter()
-                        .find(|(field, _)| field == name)
-                        .map(|(_, at)| *at)
+                        .find(|field| field.name == name)
+                        .map(|field| field.node)
                 };
                 if let Some(kind) = field(LAYOUT) {
                     let plain = field(PLAIN)
@@ -220,11 +227,11 @@ impl Kept {
                 let numbered = table
                     .numbered
                     .iter()
-                    .map(|(key, at)| (Self::Int(*key), *at));
+                    .map(|numbered| (Self::Int(numbered.key), numbered.node));
                 let named = table
                     .fields
                     .iter()
-                    .map(|(name, at)| (Self::Text(name.clone()), *at));
+                    .map(|field| (Self::Text(field.name.clone()), field.node));
                 for (key, at) in listed.chain(numbered).chain(named) {
                     if let Some(value) = Self::read_node(doc, at, depth + 1)? {
                         pairs.push((key, value));
@@ -263,7 +270,16 @@ fn layout_node(kind: &str, plain: &Plain, nodes: &mut Vec<DocNode>) {
         at,
         DocNode::Table(DocTable {
             list: Vec::new(),
-            fields: vec![(PLAIN.to_owned(), data), (LAYOUT.to_owned(), named)],
+            fields: vec![
+                DocField {
+                    name: PLAIN.to_owned(),
+                    node: data,
+                },
+                DocField {
+                    name: LAYOUT.to_owned(),
+                    node: named,
+                },
+            ],
             numbered: Vec::new(),
         }),
     );
@@ -421,10 +437,14 @@ mod tests {
                 *root = 40;
             }
         }
+        let held = |name: &str, document| solium_wm_protocol::Kept {
+            name: name.to_owned(),
+            document,
+        };
         let keep = Keep::from_wire(&[
-            ("ring".to_owned(), ring),
-            ("broken".to_owned(), broken),
-            ("whole".to_owned(), Kept::Int(3).to_doc()),
+            held("ring", ring),
+            held("broken", broken),
+            held("whole", Kept::Int(3).to_doc()),
         ]);
         let names: Vec<&String> = keep.keeps.keys().collect();
         assert_eq!(names, ["whole"], "{keep:?}");

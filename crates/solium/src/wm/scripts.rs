@@ -476,8 +476,8 @@ impl Scripts {
         self.listens_in(&answer);
         self.settings_in(&answer);
         for command in &answer.commands {
-            if let wire::Command::Keep((name, doc)) = command {
-                self.keeps.insert(name.clone(), doc.clone());
+            if let wire::Command::Keep(kept) = command {
+                self.keeps.insert(kept.name.clone(), kept.document.clone());
             }
         }
         let decision = answer.decision.take();
@@ -779,8 +779,8 @@ impl Scripts {
         self.listens_in(&answer);
         self.settings_in(&answer);
         for command in &answer.commands {
-            if let wire::Command::Keep((name, doc)) = command {
-                self.keeps.insert(name.clone(), doc.clone());
+            if let wire::Command::Keep(kept) = command {
+                self.keeps.insert(kept.name.clone(), kept.document.clone());
             }
         }
         let outcome = crate::wm::events::outcome_of(answer);
@@ -797,8 +797,8 @@ impl Scripts {
             .iter()
             .rev()
             .find_map(|command| match command {
-                wire::Command::Configure((section, nodes)) if section == "wm" => {
-                    crate::wm::convert::doc(nodes).ok()
+                wire::Command::Configure(configure) if configure.section == "wm" => {
+                    crate::wm::convert::doc(&configure.settings).ok()
                 }
                 _ => None,
             })
@@ -861,8 +861,8 @@ impl Scripts {
             .iter()
             .rev()
             .find_map(|command| match command {
-                solium_wm_protocol::Command::Configure((section, nodes)) if section == name => {
-                    crate::wm::convert::doc(nodes).ok()
+                solium_wm_protocol::Command::Configure(configure) if configure.section == name => {
+                    crate::wm::convert::doc(&configure.settings).ok()
                 }
                 _ => None,
             })

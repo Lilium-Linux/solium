@@ -21,7 +21,7 @@
 use solium_wm_protocol::client::{Client, ClientError, Heard};
 use solium_wm_protocol::mirror::Mirror;
 use solium_wm_protocol::{
-    Answer, Binding, Command, Declarations, Easing, Event, FocusCause, Motion, Place, Rect,
+    Answer, Binding, Command, Declarations, Easing, Event, Focus, FocusCause, Motion, Place, Rect,
     Reloaded,
 };
 
@@ -123,7 +123,13 @@ impl Tiny {
 
     /// What a key it bound does.
     fn key(&self, combo: &str) -> Vec<Command> {
-        let focus = |id: u64| Command::Focus((id, FocusCause::Binding, None));
+        let focus = |id: u64| {
+            Command::Focus(Focus {
+                id,
+                cause: FocusCause::Binding,
+                warp: None,
+            })
+        };
         match combo {
             "super+return" => {
                 let terminal = std::env::var("TERMINAL").unwrap_or_else(|_| "foot".to_owned());

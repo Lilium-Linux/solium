@@ -157,7 +157,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 body: text("body"),
                 icon: text("icon"),
                 urgency,
-                actions,
+                actions: actions
+                    .into_iter()
+                    .map(|(key, label)| solium_wm_protocol::NotifyAction { key, label })
+                    .collect(),
                 expire_timeout,
             };
             with_pending(lua, |pending| {

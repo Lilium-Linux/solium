@@ -253,11 +253,16 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         .ok()
                         .flatten()
                         .map_or(MAX_STORE, |settings| settings.store_max);
-                    let saved =
-                        match ask(lua, solium_wm_protocol::Query::Store((name.clone(), max))) {
-                            Some(solium_wm_protocol::Reply::Store(saved)) => saved,
-                            _ => None,
-                        };
+                    let saved = match ask(
+                        lua,
+                        solium_wm_protocol::Query::Store(solium_wm_protocol::StoreRead {
+                            name: name.clone(),
+                            max,
+                        }),
+                    ) {
+                        Some(solium_wm_protocol::Reply::Store(saved)) => saved,
+                        _ => None,
+                    };
                     let loaded = saved.as_deref().and_then(solium_json::Json::parse);
                     if let Some(loaded) = &loaded {
                         // What is already saved, so it is not sent back

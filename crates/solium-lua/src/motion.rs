@@ -525,19 +525,19 @@ pub fn motion_from(options: Option<&Table>) -> mlua::Result<(Option<Duration>, O
 pub fn resolved(
     motion: Option<PresentMotion>,
     animation: AnimationSpec,
-) -> Vec<(String, solium_wm_protocol::Motion)> {
+) -> Vec<solium_wm_protocol::Channel> {
     motion.map_or_else(Vec::new, |motion| {
         motion
             .into_iter()
-            .map(|(property, (duration, easing))| {
-                (
-                    property.to_owned(),
-                    to_wire::motion(AnimationSpec {
+            .map(
+                |(property, (duration, easing))| solium_wm_protocol::Channel {
+                    name: property.to_owned(),
+                    motion: to_wire::motion(AnimationSpec {
                         duration: duration.unwrap_or(animation.duration),
                         easing: easing.unwrap_or(animation.easing),
                     }),
-                )
-            })
+                },
+            )
             .collect()
     })
 }

@@ -140,7 +140,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     if !solium_wm_protocol::touch::RESIZE_EDGES.contains(&edges.as_str()) {
                         return Err(mlua::Error::runtime("sol.touch: invalid resize edges"));
                     }
-                    TouchAction::Resize((options.get("window")?, edges))
+                    TouchAction::Resize(solium_wm_protocol::TouchResize {
+                        id: options.get("window")?,
+                        edges,
+                    })
                 }
                 _ => {
                     return Err(mlua::Error::runtime(
@@ -149,7 +152,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 }
             };
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::Touch((slot, action)));
+                pending.push(solium_wm_protocol::Command::Touch(
+                    solium_wm_protocol::TouchClaim { slot, action },
+                ));
             })
         })?,
     )?;
@@ -162,7 +167,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 ));
             }
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::Click((x, y)))
+                pending.push(solium_wm_protocol::Command::Click(
+                    solium_wm_protocol::Point { x, y },
+                ))
             })
         })?,
     )?;
@@ -193,7 +200,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             }
             with_pending(lua, |pending| {
                 let cause = pending.source;
-                pending.push(solium_wm_protocol::Command::Press((id, press, cause)));
+                pending.push(solium_wm_protocol::Command::Press(
+                    solium_wm_protocol::PressOn { id, press, cause },
+                ));
             })
         })?,
     )?;

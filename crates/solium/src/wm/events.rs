@@ -62,18 +62,24 @@ impl Scripts {
     /// carries the motion the change is drawn with: the compositor's own
     /// when it is late.
     pub(crate) fn fullscreen(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
-        self.change(snapshot, wire::Event::Fullscreen((id, entering)))
+        self.change(
+            snapshot,
+            wire::Event::Fullscreen(wire::WindowChange { id, entering }),
+        )
     }
 
     /// A window was maximised, or let out of it: `(id, entering)`, as
     /// [`Self::fullscreen`] is told.
     pub(crate) fn maximize(&mut self, id: u64, entering: bool, snapshot: Snapshot) -> Outcome {
-        self.change(snapshot, wire::Event::Maximize((id, entering)))
+        self.change(
+            snapshot,
+            wire::Event::Maximize(wire::WindowChange { id, entering }),
+        )
     }
 
     /// A press while a mode holds input.
     pub(crate) fn click(&mut self, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Click((x, y)))
+        self.send(snapshot, wire::Event::Click(wire::Point { x, y }))
     }
 
     /// A finger, routed to the scripts.
@@ -109,7 +115,11 @@ impl Scripts {
     ) -> Outcome {
         self.send(
             snapshot,
-            wire::Event::Focused((id, crate::wm::convert::focus_cause(source), changed)),
+            wire::Event::Focused(wire::FocusMoved {
+                id,
+                cause: crate::wm::convert::focus_cause(source),
+                changed,
+            }),
         )
     }
 
@@ -134,7 +144,13 @@ impl Scripts {
 
     /// A window asked to be activated, and why.
     pub(crate) fn activated(&mut self, id: u64, why: &'static str, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Activated((id, why.to_owned())))
+        self.send(
+            snapshot,
+            wire::Event::Activated(wire::Activation {
+                id,
+                why: why.to_owned(),
+            }),
+        )
     }
 
     /// A window's title, or its application's name, changed.
@@ -149,7 +165,7 @@ impl Scripts {
             w: size.0,
             h: size.1,
         };
-        self.send(snapshot, wire::Event::Sized((id, size)))
+        self.send(snapshot, wire::Event::Sized(wire::WindowSize { id, size }))
     }
 
     /// A window's own resize moved an edge to `edge_at`.
@@ -257,7 +273,13 @@ impl Scripts {
 
     /// One of the configuration's own notifications was acted on.
     pub(crate) fn notify_action(&mut self, token: u64, key: &str, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::NotifyAction((token, key.to_owned())))
+        self.send(
+            snapshot,
+            wire::Event::NotifyAction(wire::NotifyChosen {
+                token,
+                key: key.to_owned(),
+            }),
+        )
     }
 
     pub(crate) fn minimized(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
@@ -290,7 +312,11 @@ impl Scripts {
     ) -> Outcome {
         self.send(
             snapshot,
-            wire::Event::FrameAction((id, name.to_owned(), data.render())),
+            wire::Event::FrameAction(wire::FrameAction {
+                id,
+                action: name.to_owned(),
+                data: data.render(),
+            }),
         )
     }
 
@@ -304,7 +330,11 @@ impl Scripts {
     ) -> Outcome {
         self.send(
             snapshot,
-            wire::Event::SurfaceAction((name.to_owned(), action.to_owned(), data.render())),
+            wire::Event::SurfaceAction(wire::SurfaceAction {
+                surface: name.to_owned(),
+                action: action.to_owned(),
+                data: data.render(),
+            }),
         )
     }
 
@@ -339,12 +369,18 @@ impl Scripts {
                     id,
                     stream: Stream::Stdout,
                     line,
-                } => wire::RunHeard::Stdout((*id, line.clone())),
+                } => wire::RunHeard::Stdout(wire::RunLine {
+                    id: *id,
+                    line: line.clone(),
+                }),
                 Heard::Line {
                     id,
                     stream: Stream::Stderr,
                     line,
-                } => wire::RunHeard::Stderr((*id, line.clone())),
+                } => wire::RunHeard::Stderr(wire::RunLine {
+                    id: *id,
+                    line: line.clone(),
+                }),
                 Heard::Done { id, ended } => wire::RunHeard::Done(wire::RunEnded {
                     id: *id,
                     code: ended.code,
@@ -362,7 +398,17 @@ impl Scripts {
 
     /// The timers due, each with whether this is its last time.
     pub(crate) fn timers_due(&mut self, due: &[(u64, bool)], snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Timers(due.to_vec()))
+        self.send(
+            snapshot,
+            wire::Event::Timers(
+                due.iter()
+                    .map(|(id, last)| wire::TimerDue {
+                        id: *id,
+                        last: *last,
+                    })
+                    .collect(),
+            ),
+        )
     }
 
     /// What the configuration's reads, writes and watches came to (#473),
@@ -376,23 +422,26 @@ impl Scripts {
         let heard = heard
             .iter()
             .map(|each| match each {
-                Heard::Read { id, result } => wire::FileHeard::Read((
-                    *id,
-                    match result {
+                Heard::Read { id, result } => wire::FileHeard::Read(wire::ReadEnded {
+                    id: *id,
+                    outcome: match result {
                         Ok(data) => wire::ResultBytes::Ok(data.clone()),
                         Err(err) => wire::ResultBytes::Error(err.clone()),
                     },
-                )),
-                Heard::Wrote { id, error } => wire::FileHeard::Wrote((*id, error.clone())),
-                Heard::Watched { id, kind, path } => wire::FileHeard::Watched((
-                    *id,
-                    match kind {
+                }),
+                Heard::Wrote { id, error } => wire::FileHeard::Wrote(wire::WriteEnded {
+                    id: *id,
+                    error: error.clone(),
+                }),
+                Heard::Watched { id, kind, path } => wire::FileHeard::Watched(wire::WatchHeard {
+                    id: *id,
+                    change: match kind {
                         Kind::Changed => wire::FileChange::Changed,
                         Kind::Created => wire::FileChange::Created,
                         Kind::Removed => wire::FileChange::Removed,
                     },
-                    path.clone(),
-                )),
+                    path: path.clone(),
+                }),
                 Heard::WatchEnded { id } => wire::FileHeard::WatchEnded(*id),
             })
             .collect();
@@ -444,7 +493,7 @@ impl Scripts {
     }
 
     pub(crate) fn dropped(&mut self, id: u64, x: f64, y: f64, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Dropped((id, x, y)))
+        self.send(snapshot, wire::Event::Dropped(wire::Dropped { id, x, y }))
     }
 
     /// A modified wheel turn, offered to the scripts.
@@ -453,7 +502,7 @@ impl Scripts {
     /// in time, it is taken as the last one was, a scroll being a run of
     /// them.
     pub(crate) fn scrolled(&mut self, dx: f64, dy: f64, snapshot: Snapshot) -> Outcome {
-        let event = wire::Event::Scrolled((dx, dy));
+        let event = wire::Event::Scrolled(wire::Scrolled { dx, dy });
         match self.event(Some(snapshot), event, Wait::Frame, false, false) {
             Some((_, outcome)) => {
                 self.took.scroll = outcome.handled;
@@ -609,7 +658,11 @@ impl Ask for Answers {
             // it paints there. No row of a snapshot is what is left of a
             // window whose client has gone, and a minimized window is under
             // no point, even while a present on it plays out (#30).
-            wire::Query::WindowAt((x, y, skip)) => {
+            wire::Query::WindowAt(wire::WindowAt {
+                x,
+                y,
+                passing: skip,
+            }) => {
                 let snapshot = self.snapshot.as_ref()?;
                 let point = smithay::utils::Point::<f64, smithay::utils::Logical>::from((x, y));
                 Some(wire::Reply::Window(
@@ -642,7 +695,7 @@ impl Ask for Answers {
                     })
                     .collect(),
             )),
-            wire::Query::Store((name, max)) => {
+            wire::Query::Store(wire::StoreRead { name, max }) => {
                 Some(wire::Reply::Store(self.stores.read(&name, max)))
             }
         }
@@ -663,12 +716,12 @@ mod tests {
             handled: true,
             commands: vec![
                 wire::Command::Close(7),
-                wire::Command::Act((
-                    1,
-                    "audio.mute".to_owned(),
-                    "{}".to_owned(),
-                    wire::FocusCause::Binding,
-                )),
+                wire::Command::Act(wire::Act {
+                    attempt: 1,
+                    action: "audio.mute".to_owned(),
+                    data: "{}".to_owned(),
+                    cause: wire::FocusCause::Binding,
+                }),
                 wire::Command::Quit,
             ],
             motion: None,
@@ -677,12 +730,12 @@ mod tests {
         super::refuse_past_the_lock(&mut answer);
         assert_eq!(
             answer.commands,
-            [wire::Command::Act((
-                1,
-                "audio.mute".to_owned(),
-                "{}".to_owned(),
-                wire::FocusCause::Binding
-            ))]
+            [wire::Command::Act(wire::Act {
+                attempt: 1,
+                action: "audio.mute".to_owned(),
+                data: "{}".to_owned(),
+                cause: wire::FocusCause::Binding,
+            })]
         );
     }
 }

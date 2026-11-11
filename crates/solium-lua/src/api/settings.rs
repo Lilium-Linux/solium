@@ -12,10 +12,12 @@ pub(crate) fn configure(
     options: solium_wm_protocol::Doc,
 ) -> mlua::Result<()> {
     with_pending(lua, |pending| {
-        pending.push(solium_wm_protocol::Command::Configure((
-            section.to_owned(),
-            options,
-        )));
+        pending.push(solium_wm_protocol::Command::Configure(
+            solium_wm_protocol::Configure {
+                section: section.to_owned(),
+                settings: options,
+            },
+        ));
     })
 }
 
@@ -237,10 +239,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (id, values): (u64, mlua::Table)| {
             let fields = solium_json::Json::object_from_lua(&values)?;
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::FrameValues((
-                    id,
-                    to_wire::object(&fields),
-                )));
+                pending.push(solium_wm_protocol::Command::FrameValues(
+                    solium_wm_protocol::FrameValues {
+                        id,
+                        values: to_wire::object(&fields),
+                    },
+                ));
             })
         })?,
     )?;

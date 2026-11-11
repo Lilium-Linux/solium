@@ -41,16 +41,17 @@ pub fn reaches_past_the_lock(command: &Command) -> bool {
         | C::Close(_)
         | C::Quit => true,
         // Declaring the workspaces moves windows between them.
-        C::Configure((section, _)) => section == "workspaces",
+        C::Configure(configure) => configure.section == "workspaces",
         // `sol.act`'s verbs on windows and workspaces; `apps.launch` is a
         // spawn, and `folder` opens one. `notifications.invoke` brings the
         // sender's window forward, and a tray item's actions reach into its
         // application.
-        C::Act((_, action, ..)) => {
+        C::Act(act) => {
+            let action = &act.action;
             action.starts_with("windows.")
                 || action.starts_with("workspaces.")
                 || action.starts_with("tray.")
-                || action == "notifications.invoke"
+                || action.as_str() == "notifications.invoke"
         }
         C::Keep(_)
         | C::Listen(_)

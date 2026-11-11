@@ -1991,12 +1991,14 @@ fn every_key_a_section_accepts_is_one_the_compositor_reads() {
 #[test]
 fn a_tray_action_is_refused_from_a_binding_at_the_lock() {
     let reaches = |action: &str| {
-        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Act((
-            0,
-            action.to_owned(),
-            "null".to_owned(),
-            solium_wm_protocol::FocusCause::Binding,
-        )))
+        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Act(
+            solium_wm_protocol::Act {
+                attempt: 0,
+                action: action.to_owned(),
+                data: "null".to_owned(),
+                cause: solium_wm_protocol::FocusCause::Binding,
+            },
+        ))
     };
     assert!(reaches("tray.activate"));
     assert!(reaches("tray.open_menu"));

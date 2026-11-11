@@ -101,7 +101,10 @@ impl Link {
         link.send(&Message::Hello(wire::Hello {
             version: wire::VERSION.to_owned(),
             debug: crate::dev::debug_mode(),
-            keeps,
+            keeps: keeps
+                .into_iter()
+                .map(|(name, document)| wire::Kept { name, document })
+                .collect(),
         }))
         .map_err(named)?;
         let answered = link
@@ -146,12 +149,15 @@ impl Link {
         loop {
             let read = self.reader.borrow_mut().next_message();
             match read {
-                Ok(Some(Message::Query((serial, query)))) => {
+                Ok(Some(Message::Query(wire::Asked { serial, query }))) => {
                     let reply = answers
                         .ask(query.clone())
                         .unwrap_or_else(|| unanswered(&query));
-                    frame::write(&mut &self.stream, &Message::Reply((serial, reply)))
-                        .context("could not be answered")?;
+                    frame::write(
+                        &mut &self.stream,
+                        &Message::Reply(wire::Replied { serial, reply }),
+                    )
+                    .context("could not be answered")?;
                 }
                 Ok(Some(other)) => return Ok(Some(other)),
                 Ok(None) => {

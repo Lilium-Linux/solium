@@ -69,11 +69,17 @@ fn node_to_lua(
             for (index, item) in table.list.iter().enumerate() {
                 read.set(index + 1, node_to_lua(nodes, *item, depth + 1, lua)?)?;
             }
-            for (key, item) in &table.numbered {
-                read.set(*key, node_to_lua(nodes, *item, depth + 1, lua)?)?;
+            for numbered in &table.numbered {
+                read.set(
+                    numbered.key,
+                    node_to_lua(nodes, numbered.node, depth + 1, lua)?,
+                )?;
             }
-            for (name, item) in &table.fields {
-                read.set(name.as_str(), node_to_lua(nodes, *item, depth + 1, lua)?)?;
+            for field in &table.fields {
+                read.set(
+                    field.name.as_str(),
+                    node_to_lua(nodes, field.node, depth + 1, lua)?,
+                )?;
             }
             Value::Table(read)
         }
@@ -204,11 +210,14 @@ pub fn wire_doc_of(value: &Value) -> mlua::Result<solium_wm_protocol::Doc> {
 
 /// Named Lua values as one table's document: a deform's params.
 pub fn wire_doc_of_fields(fields: &[(String, Value)]) -> mlua::Result<solium_wm_protocol::Doc> {
-    use solium_wm_protocol::{DocNode, DocTable};
+    use solium_wm_protocol::{DocField, DocNode, DocTable};
     let mut nodes = vec![DocNode::Nil];
     let mut named = Vec::new();
     for (name, value) in fields {
-        named.push((name.clone(), wire_node(value, 1, &mut nodes)?));
+        named.push(DocField {
+            name: name.clone(),
+            node: wire_node(value, 1, &mut nodes)?,
+        });
     }
     nodes[0] = DocNode::Table(DocTable {
         list: Vec::new(),
@@ -241,7 +250,7 @@ fn wire_node(
     depth: usize,
     nodes: &mut Vec<solium_wm_protocol::DocNode>,
 ) -> mlua::Result<u32> {
-    use solium_wm_protocol::{DocNode, DocTable};
+    use solium_wm_protocol::{DocField, DocNode, DocNumbered, DocTable};
     let at = u32::try_from(nodes.len())
         .map_err(|_| mlua::Error::runtime("a settings document of more than 2^32 values"))?;
     let node = match value {
@@ -286,12 +295,16 @@ fn wire_node(
                 next += 1;
             }
             for (key, item) in numbered {
-                read.numbered
-                    .push((key, wire_node(&item, depth + 1, nodes)?));
+                read.numbered.push(DocNumbered {
+                    key,
+                    node: wire_node(&item, depth + 1, nodes)?,
+                });
             }
             for (name, item) in fields {
-                read.fields
-                    .push((name, wire_node(&item, depth + 1, nodes)?));
+                read.fields.push(DocField {
+                    name,
+                    node: wire_node(&item, depth + 1, nodes)?,
+                });
             }
             nodes[at as usize] = DocNode::Table(read);
             return Ok(at);

@@ -34,12 +34,13 @@ fn doc_at(nodes: &[wire::DocNode], at: u32, depth: usize) -> Result<crate::scrip
             for item in &table.list {
                 read.list.push(doc_at(nodes, *item, depth + 1)?);
             }
-            for (name, item) in &table.fields {
+            for field in &table.fields {
                 read.fields
-                    .insert(name.clone(), doc_at(nodes, *item, depth + 1)?);
+                    .insert(field.name.clone(), doc_at(nodes, field.node, depth + 1)?);
             }
-            for (key, item) in &table.numbered {
-                read.numbered.insert(*key, doc_at(nodes, *item, depth + 1)?);
+            for numbered in &table.numbered {
+                read.numbered
+                    .insert(numbered.key, doc_at(nodes, numbered.node, depth + 1)?);
             }
             Doc::Table(read)
         }
@@ -66,19 +67,20 @@ pub(crate) use solium_wm_protocol::lock::reaches_past_the_lock;
 /// it. One that cannot be applied is named in the log and left out.
 pub(crate) fn commands_of(command: wire::Command) -> Vec<crate::script::Command> {
     match command {
-        wire::Command::Configure((section, nodes)) => {
-            match doc(&nodes).and_then(|options| configure(&section, &options)) {
-                Ok(commands) => commands,
-                Err(why) => {
-                    tracing::warn!(
-                        section,
-                        why,
-                        "a settings section that cannot be read; left as it was"
-                    );
-                    Vec::new()
-                }
+        wire::Command::Configure(wire::Configure {
+            section,
+            settings: nodes,
+        }) => match doc(&nodes).and_then(|options| configure(&section, &options)) {
+            Ok(commands) => commands,
+            Err(why) => {
+                tracing::warn!(
+                    section,
+                    why,
+                    "a settings section that cannot be read; left as it was"
+                );
+                Vec::new()
             }
-        }
+        },
         command => vec![match runtime(command) {
             Ok(command) => command,
             Err(why) => {
@@ -101,13 +103,19 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
         W::ToggleMaximize(id) => Command::ToggleMaximize { id },
         W::Minimize(id) => Command::Minimize { id },
         W::Unminimize(id) => Command::Unminimize { id },
-        W::ShowMinimized((id, shown)) => Command::ShowMinimized { id, shown },
-        W::KeepAbove((id, on)) => Command::KeepAbove { id, on },
-        W::DragHold((id, held)) => Command::DragHold { id, held },
-        W::ResizeHold((id, held)) => Command::ResizeHold { id, held },
-        W::DragGrip((id, along, by)) => Command::DragGrip { id, along, by },
-        W::Click((x, y)) => Command::Click { x, y },
-        W::Power((monitor, on)) => Command::Power { monitor, on },
+        W::ShowMinimized(wire::WindowFlag { id, on: shown }) => {
+            Command::ShowMinimized { id, shown }
+        }
+        W::KeepAbove(wire::KeepAbove { id, on }) => Command::KeepAbove { id, on },
+        W::DragHold(wire::WindowFlag { id, on: held }) => Command::DragHold { id, held },
+        W::ResizeHold(wire::WindowFlag { id, on: held }) => Command::ResizeHold { id, held },
+        W::DragGrip(grip) => Command::DragGrip {
+            id: grip.id,
+            along: (grip.share_x, grip.share_y),
+            by: (grip.dx, grip.dy),
+        },
+        W::Click(wire::Point { x, y }) => Command::Click { x, y },
+        W::Power(wire::Power { monitor, on }) => Command::Power { monitor, on },
         W::Decoration(name) => Command::Decoration { name },
         W::SurfaceGone(name) => Command::SurfaceGone(name),
         W::Spawn(mut argv) => {
@@ -128,7 +136,7 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             matrix: present.matrix.map(matrix).transpose()?,
             deform: present.deform.map(deform).transpose()?,
             z: present.z,
-            pivot: present.pivot,
+            pivot: (present.pivot.x, present.pivot.y),
             animation: animation(&present.motion)?,
             channels: channels(&present.channels, &present.motion)?,
         },
@@ -141,11 +149,15 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             channels: channels(&present.channels, &present.motion)?,
             deform: present.deform.map(deform).transpose()?,
         },
-        W::Clear((id, motion)) => Command::Clear {
+        W::Clear(wire::Clear { id, motion }) => Command::Clear {
             id,
             animation: animation(&motion)?,
         },
-        W::Group((name, selection, motion)) => Command::Group {
+        W::Group(wire::Group {
+            name,
+            selection,
+            motion,
+        }) => Command::Group {
             name,
             selection: selection.map(|selection| crate::script::Selection {
                 windows: selection.windows,
@@ -155,7 +167,11 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             }),
             animation: animation(&motion)?,
         },
-        W::PresentGroup((name, shift, motion)) => Command::PresentGroup {
+        W::PresentGroup(wire::PresentGroup {
+            name,
+            shift,
+            motion,
+        }) => Command::PresentGroup {
             name,
             to: crate::group::Shift {
                 dx: shift.dx,
@@ -165,7 +181,7 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             },
             animation: animation(&motion)?,
         },
-        W::ClearGroup((name, motion)) => Command::ClearGroup {
+        W::ClearGroup(wire::ClearGroup { name, motion }) => Command::ClearGroup {
             name,
             animation: animation(&motion)?,
         },
@@ -178,24 +194,30 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             cramped: place.cramped,
             moved: place.moved,
         },
-        W::Focus((id, cause, to)) => Command::Focus {
+        W::Focus(wire::Focus {
+            id,
+            cause,
+            warp: to,
+        }) => Command::Focus {
             id,
             source: focus_source(cause),
             warp: to.map(warp).transpose()?,
         },
         W::Warp(to) => Command::Warp(warp(to)?),
-        W::Touch((slot, action)) => Command::Touch {
+        W::Touch(wire::TouchClaim { slot, action }) => Command::Touch {
             slot,
             action: match action {
                 wire::TouchAction::Capture => crate::script::TouchAction::Capture,
                 wire::TouchAction::Move(id) => crate::script::TouchAction::Move(id),
-                wire::TouchAction::Resize((id, edges)) => crate::script::TouchAction::Resize(
-                    id,
-                    resize_edge(&edges).ok_or_else(|| format!("`{edges}` is not an edge"))?,
-                ),
+                wire::TouchAction::Resize(wire::TouchResize { id, edges }) => {
+                    crate::script::TouchAction::Resize(
+                        id,
+                        resize_edge(&edges).ok_or_else(|| format!("`{edges}` is not an edge"))?,
+                    )
+                }
             },
         },
-        W::Press((id, press, cause)) => Command::Press {
+        W::Press(wire::PressOn { id, press, cause }) => Command::Press {
             id,
             press: match press {
                 wire::Press::Button(button) => crate::script::Press::Button(button),
@@ -208,14 +230,19 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             },
             source: focus_source(cause),
         },
-        W::Act((attempt, action, data, cause)) => Command::Act {
+        W::Act(wire::Act {
+            attempt,
+            action,
+            data,
+            cause,
+        }) => Command::Act {
             attempt,
             action,
             data: json(&data)?,
             source: focus_source(cause),
         },
         W::PaneValues(values) => Command::PaneValues(object(&values)?),
-        W::FrameValues((id, values)) => Command::FrameValues {
+        W::FrameValues(wire::FrameValues { id, values }) => Command::FrameValues {
             id,
             fields: object(&values)?,
         },
@@ -234,7 +261,11 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             id: run.id,
             argv: run.argv,
             cwd: run.cwd,
-            env: run.env,
+            env: run
+                .env
+                .into_iter()
+                .map(|change| (change.name, change.value))
+                .collect(),
             timeout: duration(run.timeout_ms)?,
             max_output: usize::try_from(run.max_output).unwrap_or(usize::MAX),
             lines: run.lines,
@@ -262,7 +293,10 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             shown: watch.shown,
         },
         W::WatchCancel(id) => Command::WatchCancel(id),
-        W::Store((name, text)) => Command::StoreSave {
+        W::Store(wire::Store {
+            name,
+            content: text,
+        }) => Command::StoreSave {
             name,
             value: json(&text)?,
         },
@@ -278,7 +312,11 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
                     "critical" => Urgency::Critical,
                     other => return Err(format!("`{other}` is not an urgency")),
                 },
-                actions: notify.actions,
+                actions: notify
+                    .actions
+                    .into_iter()
+                    .map(|action| (action.key, action.label))
+                    .collect(),
                 token: notify.token,
                 expire_timeout: notify.expire_timeout,
             })
@@ -309,7 +347,11 @@ fn flag(options: &crate::script::Doc) -> Result<bool, String> {
 /// Why a settings section is refused, if it is: what `solium --check`
 /// reports of a configuration's sections.
 pub(crate) fn refusal(command: &wire::Command) -> Option<String> {
-    let wire::Command::Configure((section, nodes)) = command else {
+    let wire::Command::Configure(wire::Configure {
+        section,
+        settings: nodes,
+    }) = command
+    else {
         return None;
     };
     doc(nodes)
@@ -433,7 +475,7 @@ fn curve(easing: &wire::Easing) -> crate::present::Curve {
         wire::Easing::OutBack => Curve::OutBack,
         wire::Easing::InOutQuad => Curve::InOutQuad,
         wire::Easing::InOutCubic => Curve::InOutCubic,
-        wire::Easing::Bezier((x1, y1, x2, y2)) => Curve::Bezier {
+        wire::Easing::Bezier(wire::Bezier { x1, y1, x2, y2 }) => Curve::Bezier {
             x1: *x1,
             y1: *y1,
             x2: *x2,
@@ -507,7 +549,7 @@ fn declaration(surface: wire::Surface) -> Result<crate::scripted::Declaration, S
             wire::Placement::EveryMonitor => On::EveryMonitor,
             wire::Placement::Primary => On::Primary,
             wire::Placement::Monitor(name) => On::Monitor(name),
-            wire::Placement::Rect((x, y, w, h)) => {
+            wire::Placement::Rect(wire::PixelRect { x, y, w, h }) => {
                 On::Rect(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()))
             }
         },
@@ -525,7 +567,7 @@ fn declaration(surface: wire::Surface) -> Result<crate::scripted::Declaration, S
                 .outside_click
                 .named
                 .into_iter()
-                .map(|(name, policy)| (name, outside(policy)))
+                .map(|named| (named.name, outside(named.outside)))
                 .collect(),
         },
         keyboard: match surface.keyboard {
@@ -559,7 +601,7 @@ fn matrix(matrix: wire::Matrix) -> Result<crate::mat4::Mat4, String> {
 /// A motion of its own for each property: every one named, those left out
 /// moving by the command's own motion.
 fn channels(
-    named: &[(String, wire::Motion)],
+    named: &[wire::Channel],
     motion: &wire::Motion,
 ) -> Result<Option<Box<crate::present::Channels<crate::script::AnimationSpec>>>, String> {
     if named.is_empty() {
@@ -568,15 +610,18 @@ fn channels(
     let of = |property: &str| -> Result<crate::script::AnimationSpec, String> {
         let own = named
             .iter()
-            .find(|(name, _)| name == property)
-            .map_or(motion, |(_, own)| own);
+            .find(|channel| channel.name == property)
+            .map_or(motion, |channel| &channel.motion);
         animation(own)
     };
-    if let Some((name, _)) = named
+    if let Some(channel) = named
         .iter()
-        .find(|(name, _)| !crate::script::PRESENT_MOTIONS.contains(&name.as_str()))
+        .find(|channel| !crate::script::PRESENT_MOTIONS.contains(&channel.name.as_str()))
     {
-        return Err(format!("`{name}` is not a property a present moves"));
+        return Err(format!(
+            "`{}` is not a property a present moves",
+            channel.name
+        ));
     }
     Ok(Some(Box::new(crate::present::Channels {
         x: of("x")?,
@@ -634,8 +679,10 @@ fn warp(warp: wire::Warp) -> Result<crate::script::Warp, String> {
     use crate::script::{Interrupt, WarpTo};
     Ok(crate::script::Warp {
         to: match warp.to {
-            wire::WarpTo::Point((x, y)) => WarpTo::Point { x, y },
-            wire::WarpTo::Window((id, x, y)) => WarpTo::Window { id, at: (x, y) },
+            wire::WarpTo::Point(wire::Point { x, y }) => WarpTo::Point { x, y },
+            wire::WarpTo::Window(wire::WindowSpot { id, x, y }) => {
+                WarpTo::Window { id, at: (x, y) }
+            }
         },
         motion: warp.motion.as_ref().map(animation).transpose()?,
         interrupt: match warp.interrupt {

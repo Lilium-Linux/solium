@@ -47,14 +47,14 @@ impl Mirror {
             Change::Stacking(order) => self.stacking = order,
             Change::Monitors(monitors) => self.monitors = monitors,
             Change::WorkArea(area) => self.work_area = Some(area),
-            Change::Cursor(at) => self.cursor = at,
+            Change::Cursor(at) => self.cursor = (at.x, at.y),
             Change::Keyboard(keyboard) => self.keyboard = Some(keyboard),
             Change::ShortcutsOwner(owner) => self.shortcuts_owner = owner,
             Change::TextField(field) => self.text_field = field,
             Change::Problems(problems) => self.problems = problems,
             Change::Locked(locked) => self.locked = locked,
-            Change::Service((name, view)) => {
-                self.services.insert(name, view);
+            Change::Service(view) => {
+                self.services.insert(view.name, view.document);
             }
         }
     }

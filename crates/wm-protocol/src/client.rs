@@ -26,7 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::frame::{self, FrameError};
-use crate::{Answer, Batch, Command, Hello, HelloAnswer, Message, Query, Reloaded, Reply};
+use crate::{Answer, Asked, Batch, Command, Hello, HelloAnswer, Message, Query, Reloaded, Reply};
 
 /// Who answers a question only the compositor can: the compositor, from
 /// what it knows of the desktop; and, at a window manager's end, whatever
@@ -282,10 +282,10 @@ impl Client {
     pub fn query(&self, query: Query) -> Result<Reply, ClientError> {
         let serial = self.queries.get() + 1;
         self.queries.set(serial);
-        self.send(&Message::Query((serial, query)))?;
+        self.send(&Message::Query(Asked { serial, query }))?;
         loop {
             match self.receive()? {
-                Message::Reply((answered, reply)) if answered == serial => return Ok(reply),
+                Message::Reply(replied) if replied.serial == serial => return Ok(replied.reply),
                 other => self.waiting.borrow_mut().push_back(other),
             }
         }
@@ -316,7 +316,18 @@ mod tests {
 
     use super::{Client, ClientError, Heard, compatible};
     use crate::frame::{self, Reader};
-    use crate::{Batch, Command, Event, Hello, Message, Query, Reloaded, Reply};
+    use crate::{
+        Asked, Batch, Command, Event, Hello, Message, Query, Reloaded, Replied, Reply, WindowAt,
+    };
+
+    /// The point every question here asks about.
+    fn at() -> WindowAt {
+        WindowAt {
+            x: 10.0,
+            y: 20.0,
+            passing: None,
+        }
+    }
 
     /// The compositor's end, played by the test.
     struct Compositor {
@@ -461,14 +472,18 @@ mod tests {
         let (mut compositor, client) = pair();
         compositor.say(&batch(2, Event::Relayout));
         compositor.say(&batch(3, Event::Closed(9)));
-        compositor.say(&Message::Reply((1, Reply::Window(Some(5)))));
-        let reply = client
-            .query(Query::WindowAt((10.0, 20.0, None)))
-            .expect("a reply");
+        compositor.say(&Message::Reply(Replied {
+            serial: 1,
+            reply: Reply::Window(Some(5)),
+        }));
+        let reply = client.query(Query::WindowAt(at())).expect("a reply");
         assert_eq!(reply, Reply::Window(Some(5)));
         assert_eq!(
             compositor.hear(),
-            Message::Query((1, Query::WindowAt((10.0, 20.0, None))))
+            Message::Query(Asked {
+                serial: 1,
+                query: Query::WindowAt(at()),
+            })
         );
         for serial in [2, 3] {
             let Ok(Heard::Batch(heard)) = client.next() else {

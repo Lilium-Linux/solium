@@ -9,7 +9,7 @@
 /// While an answer is owed, no later batch is waited for at all. The window
 /// manager may also `submit` commands of its own whenever it likes.
 interface messages {
-    use types.{rect, size, window, monitor, keyboard, text-field, problem, touch-event, doc, style};
+    use types.{rect, point, size, window, monitor, keyboard, text-field, problem, touch-event, doc, kept, style};
     use commands.{command, focus-cause, motion};
 
     /// The first message, from the compositor: the protocol it speaks,
@@ -27,7 +27,7 @@ interface messages {
         /// What the window manager this one takes the place of kept, by
         /// name, as its `keep` commands last said: nothing for the first
         /// of a session.
-        keeps: list<tuple<string, doc>>,
+        keeps: list<kept>,
     }
 
     /// The window manager's reply to `hello`: the protocol it was built
@@ -38,6 +38,12 @@ interface messages {
         version: string,
         /// Applied before the first frame is drawn.
         commands: list<command>,
+    }
+
+    /// A view of a session service: its name, and the document of its rows.
+    record service-view {
+        name: string,
+        document: doc,
     }
 
     /// What changed since the last batch. A window or monitor is sent whole
@@ -55,7 +61,7 @@ interface messages {
         /// leave.
         work-area(rect),
         /// Where the pointer is.
-        cursor(tuple<f64, f64>),
+        cursor(point),
         /// The keyboard: its layouts, the live one, the locks.
         keyboard(keyboard),
         /// The window holding the compositor's shortcuts, as a virtual
@@ -71,17 +77,23 @@ interface messages {
         /// A view of a session service, or of the installed applications:
         /// `notifications`, `audio`, `tray`, `media` and `apps`, each a
         /// document of the rows the service has.
-        service(tuple<string, doc>),
+        service(service-view),
     }
 
+
+    /// A line a run wrote: the run's id, and the line without its newline.
+    record run-line {
+        id: u64,
+        line: list<u8>,
+    }
 
     /// A program's output, a line at a time, and how it ended.
     variant run-heard {
         /// A line it wrote to its standard output: the run's id and the
         /// line, without its newline.
-        stdout(tuple<u64, list<u8>>),
+        stdout(run-line),
         /// A line it wrote to its standard error.
-        stderr(tuple<u64, list<u8>>),
+        stderr(run-line),
         /// It ended.
         done(run-ended),
     }
@@ -106,17 +118,38 @@ interface messages {
         error: option<string>,
     }
 
+    /// How a `file-read` ended: its id, and the file's bytes or why it could
+    /// not be read.
+    record read-ended {
+        id: u64,
+        outcome: result-bytes,
+    }
+
+    /// How a `file-write` ended: its id, and why it failed, if it did.
+    record write-ended {
+        id: u64,
+        error: option<string>,
+    }
+
+    /// What a watch saw: its id, what happened, and the path as the `watch`
+    /// command wrote it.
+    record watch-heard {
+        id: u64,
+        change: file-change,
+        path: string,
+    }
+
     /// What a file read, write or watch came to.
     variant file-heard {
         /// A `file-read` finished: its id, and the file's bytes or why it
         /// could not be read.
-        read(tuple<u64, result-bytes>),
+        read(read-ended),
         /// A `file-write` that asked for a report finished: its id, and why
         /// it failed, if it did.
-        wrote(tuple<u64, option<string>>),
+        wrote(write-ended),
         /// A watched file changed: the watch's id, what happened, and the
         /// path as the `watch` command wrote it.
-        watched(tuple<u64, file-change, string>),
+        watched(watch-heard),
         /// A watch ended on its own: its directory is gone.
         watch-ended(u64),
     }
@@ -135,6 +168,74 @@ interface messages {
         ok: bool,
         /// Why not, when it was not.
         reason: option<string>,
+    }
+
+    /// A window entering or leaving fullscreen or maximised.
+    record window-change {
+        id: u64,
+        entering: bool,
+    }
+
+    /// The keyboard moving to a window: what moved it, and whether it came
+    /// from another window or none.
+    record focus-moved {
+        id: u64,
+        cause: focus-cause,
+        changed: bool,
+    }
+
+    /// A window asking to be brought forward, and why: `launch` or
+    /// `request`.
+    record activation {
+        id: u64,
+        why: string,
+    }
+
+    /// The size a window's application took of its own, frame included.
+    record window-size {
+        id: u64,
+        size: size,
+    }
+
+    /// The action chosen on a notification the window manager sent: the
+    /// notification's token, and the action's key.
+    record notify-chosen {
+        token: u64,
+        key: string,
+    }
+
+    /// An action a window's frame sent: its name, and its data as JSON text.
+    record frame-action {
+        id: u64,
+        action: string,
+        data: string,
+    }
+
+    /// An action a scene sent: the surface's name, the action's name, and
+    /// its data as JSON text.
+    record surface-action {
+        surface: string,
+        action: string,
+        data: string,
+    }
+
+    /// A timer that fell due, and whether that was its last time.
+    record timer-due {
+        id: u64,
+        last: bool,
+    }
+
+    /// Where a dragged window was let go.
+    record dropped {
+        id: u64,
+        x: f64,
+        y: f64,
+    }
+
+    /// How far the wheel turned, on each axis.
+    record scrolled {
+        dx: f64,
+        dy: f64,
     }
 
     /// Something that happened, in the order it happened. A window manager
@@ -159,19 +260,19 @@ interface messages {
         /// A window went fullscreen, or left it: its id, and whether it is
         /// entering. Told once the change is made. The answer's `motion`
         /// is how its picture moves there.
-        fullscreen(tuple<u64, bool>),
+        fullscreen(window-change),
         /// A window was maximised, or restored: its id, and whether it is
         /// entering. Told and answered as `fullscreen` is.
-        maximize(tuple<u64, bool>),
+        maximize(window-change),
         /// A pointer or finger press at this point while the window
         /// manager holds input (`grab`).
-        click(tuple<f64, f64>),
+        click(point),
         /// A finger did something. Its down is told before it is delivered,
         /// so the answer can take it with the `touch` command.
         touch(touch-event),
         /// The keyboard moved to a window: its id, what moved it, and
         /// whether it came from another window or none.
-        focused(tuple<u64, focus-cause, bool>),
+        focused(focus-moved),
         /// The live keyboard layout, Caps Lock or Num Lock changed: which,
         /// as `layout`, `caps` or `num`.
         keyboard-changed(string),
@@ -185,7 +286,7 @@ interface messages {
         /// A window asked to be brought forward: its id, and why, `launch`
         /// when an application already running answered a launch with a
         /// window it had, `request` for anything else.
-        activated(tuple<u64, string>),
+        activated(activation),
         /// A window's title, or its application's name, changed: the
         /// window's id. Its row has them.
         renamed(u64),
@@ -195,7 +296,7 @@ interface messages {
         /// answered a `place`, or a fullscreen or a maximise, or has had
         /// long enough to (the setting `resize.patience`); until then the
         /// window is drawn in the rectangle it was given.
-        sized(tuple<u64, size>),
+        sized(window-size),
         /// An edge of a window is being dragged by the window's own
         /// resize. An answer that is `handled` moves a seam of a layout;
         /// otherwise the compositor resizes the window itself.
@@ -229,7 +330,7 @@ interface messages {
         /// An action of a notification the window manager sent with
         /// `notify` was chosen: its token, and the action's key. Sent
         /// without being listened to.
-        notify-action(tuple<u64, string>),
+        notify-action(notify-chosen),
         /// A window was minimized.
         minimized(u64),
         /// A minimized window is shown again.
@@ -244,10 +345,10 @@ interface messages {
         restored,
         /// A window's frame sent an action: the window's id, the action's
         /// name, and its data as JSON text.
-        frame-action(tuple<u64, string, string>),
+        frame-action(frame-action),
         /// A scene sent an action: the surface's name, the action's name,
         /// and its data as JSON text.
-        surface-action(tuple<string, string, string>),
+        surface-action(surface-action),
         /// What became of actions the window manager sent with `act`.
         /// Sent without being listened to.
         attempts-settled(list<settled>),
@@ -257,7 +358,7 @@ interface messages {
         /// Timers the window manager set with `timer` fell due: each one's
         /// id, and whether it was its last time. Sent without being
         /// listened to.
-        timers(list<tuple<u64, bool>>),
+        timers(list<timer-due>),
         /// What the window manager's `file-read`, `file-write` and `watch`
         /// commands came to. Sent without being listened to.
         files(list<file-heard>),
@@ -269,11 +370,11 @@ interface messages {
         /// A window's resize by the pointer or a finger began or ended.
         resizing(pointer-move),
         /// A dragged window was let go: its id, and where.
-        dropped(tuple<u64, f64, f64>),
+        dropped(dropped),
         /// The wheel turned with the drag modifier held: by how much, on
         /// each axis. An answer that is `handled` keeps it from the window
         /// under the pointer.
-        scrolled(tuple<f64, f64>),
+        scrolled(scrolled),
         /// It is time to save: answered with a `store` for each store that
         /// changed since the last, and a `keep` for each kept document
         /// that did.
@@ -351,16 +452,29 @@ interface messages {
         failed(string),
     }
 
+    /// A point to look under, passing over the window named.
+    record window-at {
+        x: f64,
+        y: f64,
+        passing: option<u64>,
+    }
+
+    /// A store to read: its name, and at most how many bytes of it.
+    record store-read {
+        name: string,
+        max: u64,
+    }
+
     /// A question only the compositor can answer, asked by a window
     /// manager in the middle of a batch, and answered before anything else.
     variant query {
         /// The topmost window drawn at a point, as the pointer finds it,
         /// passing over the one named.
-        window-at(tuple<f64, f64, option<u64>>),
+        window-at(window-at),
         /// A store's saved document, read from its file, at most the bytes
         /// given. The compositor keeps the files: one that cannot be used
         /// is set aside as `<name>.json.broken`, and none is the answer.
-        store(tuple<string, u64>),
+        store(store-read),
         /// Every window frame style there is, from the folders the
         /// compositor looks in: sorted, bundles first, each name once, as
         /// the compositor would resolve it.
@@ -377,6 +491,18 @@ interface messages {
         styles(list<style>),
     }
 
+    /// A question the window manager asks, and the serial its reply names.
+    record asked {
+        serial: u64,
+        query: query,
+    }
+
+    /// The answer to the query of that serial.
+    record replied {
+        serial: u64,
+        reply: reply,
+    }
+
     /// One frame on the socket.
     variant message {
         /// From the compositor, first.
@@ -391,9 +517,9 @@ interface messages {
         /// asked for by no batch, applied in the order they come.
         submit(list<command>),
         /// From the window manager: a question, and its serial.
-        query(tuple<u64, query>),
+        query(asked),
         /// From the compositor: the answer to the query of that serial.
-        reply(tuple<u64, reply>),
+        reply(replied),
         /// From the compositor: the configuration at this path is to be
         /// loaded again (the user asked for a reload, or it changed on
         /// disk). Answered with `reloaded`.

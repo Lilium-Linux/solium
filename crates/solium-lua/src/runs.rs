@@ -165,7 +165,10 @@ pub fn run_read(lua: &Lua, argv: &Table, options: Option<&Table>) -> mlua::Resul
             id,
             argv,
             cwd,
-            env,
+            env: env
+                .into_iter()
+                .map(|(name, value)| solium_wm_protocol::EnvChange { name, value })
+                .collect(),
             timeout_ms: to_wire::millis(timeout),
             max_output: u64::try_from(max_output).unwrap_or(u64::MAX),
             lines: wants_lines,

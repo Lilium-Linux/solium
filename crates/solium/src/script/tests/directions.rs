@@ -1995,11 +1995,13 @@ fn sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach() {
         "no id and nothing focused presses nothing"
     );
     assert!(
-        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Press((
-            1,
-            solium_wm_protocol::Press::Button(0x110),
-            solium_wm_protocol::FocusCause::Binding,
-        ))),
+        crate::wm::convert::reaches_past_the_lock(&solium_wm_protocol::Command::Press(
+            solium_wm_protocol::PressOn {
+                id: 1,
+                press: solium_wm_protocol::Press::Button(0x110),
+                cause: solium_wm_protocol::FocusCause::Binding,
+            }
+        )),
         "a press reaches past the lock, so a binding at the lock cannot make one"
     );
 }
@@ -2068,17 +2070,17 @@ fn sol_minimize_names_the_focused_window_when_given_none_and_reaches_past_the_lo
     );
     use solium_wm_protocol::Command as W;
     let act = |action: &str| {
-        W::Act((
-            1,
-            action.to_owned(),
-            "null".to_owned(),
-            solium_wm_protocol::FocusCause::Script,
-        ))
+        W::Act(solium_wm_protocol::Act {
+            attempt: 1,
+            action: action.to_owned(),
+            data: "null".to_owned(),
+            cause: solium_wm_protocol::FocusCause::Script,
+        })
     };
     for command in [
         W::Minimize(3),
         W::Unminimize(3),
-        W::ShowMinimized((3, true)),
+        W::ShowMinimized(solium_wm_protocol::WindowFlag { id: 3, on: true }),
         act("windows.minimize"),
         act("windows.unminimize"),
     ] {

@@ -109,7 +109,10 @@ impl Told {
         }
         if self.cursor != Some(snapshot.cursor) {
             self.cursor = Some(snapshot.cursor);
-            changes.push(Change::Cursor(snapshot.cursor));
+            changes.push(Change::Cursor(wire::Point {
+                x: snapshot.cursor.0,
+                y: snapshot.cursor.1,
+            }));
         }
         let keyboard = convert::keyboard(&snapshot.keyboard);
         if self.keyboard.as_ref() != Some(&keyboard) {
@@ -173,7 +176,10 @@ impl Told {
     fn service(&mut self, name: &'static str, view: wire::Doc, changes: &mut Vec<Change>) {
         if self.services.get(name) != Some(&view) {
             self.services.insert(name, view.clone());
-            changes.push(Change::Service((name.to_owned(), view)));
+            changes.push(Change::Service(wire::ServiceView {
+                name: name.to_owned(),
+                document: view,
+            }));
         }
     }
 }
@@ -271,7 +277,7 @@ mod tests {
         let apps_told = |changes: &[Change]| {
             changes
                 .iter()
-                .filter(|change| matches!(change, Change::Service((name, _)) if name == "apps"))
+                .filter(|change| matches!(change, Change::Service(view) if view.name == "apps"))
                 .count()
         };
         let mut desk = snapshot(&[(1, "a")]);

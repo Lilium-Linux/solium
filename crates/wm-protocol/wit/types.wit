@@ -1,4 +1,4 @@
-package solium:wm@0.1.0;
+package solium:wm@0.2.0;
 
 /// What a window manager is told about the desktop: plain data, no handles.
 /// A window, a monitor and the rest are rows the compositor sends whole
@@ -8,6 +8,9 @@ package solium:wm@0.1.0;
 interface types {
     /// A rectangle in the compositor's logical space.
     record rect { x: f64, y: f64, w: f64, h: f64 }
+
+    /// A point of the desktop, in logical pixels.
+    record point { x: f64, y: f64 }
 
     /// A size in logical pixels.
     record size { w: s32, h: s32 }
@@ -217,21 +220,42 @@ interface types {
         other(string),
     }
 
+    /// A value of a table under a name: the name, and the value's index among
+    /// the document's nodes.
+    record doc-field {
+        name: string,
+        node: u32,
+    }
+
+    /// A value of a table under a whole number that is not part of its list:
+    /// the number, and the value's index among the document's nodes.
+    record doc-numbered {
+        key: s64,
+        node: u32,
+    }
+
     /// A table: its list part, its named keys and its numbered keys, each
     /// value an index into the document's nodes.
     record doc-table {
         /// The values at 1, 2, 3 and so on, in order.
         %list: list<u32>,
         /// The values under names.
-        fields: list<tuple<string, u32>>,
+        fields: list<doc-field>,
         /// The values under whole numbers that are not part of the list.
-        numbered: list<tuple<s64, u32>>,
+        numbered: list<doc-numbered>,
     }
 
     /// A document: a tree of tables, numbers, text and booleans, as a
     /// settings section and a kept table are. Its nodes, the first the
     /// root.
     type doc = list<doc-node>;
+
+    /// A document the compositor holds for the window manager under a name
+    /// (`keep`), and hands to the one started in its place (`hello`).
+    record kept {
+        name: string,
+        document: doc,
+    }
 
     /// What a window frame style is: a folder of QML and its parts, or a
     /// single QML file.

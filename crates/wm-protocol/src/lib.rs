@@ -72,8 +72,9 @@ mod tests {
     }
 
     use crate::{
-        Answer, Batch, Change, Command, DocNode, DocTable, Easing, Event, FocusCause, Hello, Input,
-        Message, Monitor, Motion, Parentage, Place, Rect, Spring, Window, Wire,
+        Answer, Batch, Change, Command, Configure, DocField, DocNode, DocNumbered, DocTable,
+        Easing, Event, Focus, FocusCause, Hello, Input, Kept, Message, Monitor, Motion, Parentage,
+        Place, Point, Rect, Spring, TimerDue, Window, WindowChange, Wire,
     };
 
     fn window(id: u64) -> Window {
@@ -127,18 +128,21 @@ mod tests {
             Message::Hello(Hello {
                 version: crate::VERSION.to_owned(),
                 debug: true,
-                keeps: vec![(
-                    "workspaces".to_owned(),
-                    vec![
+                keeps: vec![Kept {
+                    name: "workspaces".to_owned(),
+                    document: vec![
                         DocNode::Table(DocTable {
                             list: vec![1],
-                            fields: vec![("showing".to_owned(), 2)],
-                            numbered: vec![(7, 1)],
+                            fields: vec![DocField {
+                                name: "showing".to_owned(),
+                                node: 2,
+                            }],
+                            numbered: vec![DocNumbered { key: 7, node: 1 }],
                         }),
                         DocNode::Text("2".to_owned()),
                         DocNode::Integer(-3),
                     ],
-                )],
+                }],
             }),
             Message::Batch(Batch {
                 serial: u64::MAX,
@@ -167,14 +171,17 @@ mod tests {
                         transform: "normal".to_owned(),
                         off: false,
                     }]),
-                    Change::Cursor((1.5, -2.0)),
+                    Change::Cursor(Point { x: 1.5, y: -2.0 }),
                     Change::TextField(None),
                 ],
                 events: vec![
                     Event::Startup,
                     Event::Opened(1),
-                    Event::Fullscreen((1, true)),
-                    Event::Timers(vec![(4, false)]),
+                    Event::Fullscreen(WindowChange {
+                        id: 1,
+                        entering: true,
+                    }),
+                    Event::Timers(vec![TimerDue { id: 4, last: false }]),
                 ],
             }),
             Message::Answer(Answer {
@@ -204,8 +211,15 @@ mod tests {
                         cramped: false,
                         moved: false,
                     }),
-                    Command::Focus((1, FocusCause::Open, None)),
-                    Command::Configure(("idle".to_owned(), vec![DocNode::Nil])),
+                    Command::Focus(Focus {
+                        id: 1,
+                        cause: FocusCause::Open,
+                        warp: None,
+                    }),
+                    Command::Configure(Configure {
+                        section: "idle".to_owned(),
+                        settings: vec![DocNode::Nil],
+                    }),
                     Command::LockNow,
                 ],
                 motion: Some(Motion {
@@ -247,6 +261,6 @@ mod tests {
 
     #[test]
     fn the_version_is_the_wit_packages() {
-        assert_eq!(crate::VERSION, "0.1.0");
+        assert_eq!(crate::VERSION, "0.2.0");
     }
 }

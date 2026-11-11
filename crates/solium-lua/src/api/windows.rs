@@ -191,12 +191,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         clippy::cast_possible_truncation,
                         reason = "a rect from a script is screen-sized"
                     )]
-                    Some(rect) => wire::Placement::Rect((
-                        rect.x.round() as i32,
-                        rect.y.round() as i32,
-                        (rect.w.round() as i32).max(1),
-                        (rect.h.round() as i32).max(1),
-                    )),
+                    Some(rect) => wire::Placement::Rect(wire::PixelRect {
+                        x: rect.x.round() as i32,
+                        y: rect.y.round() as i32,
+                        w: (rect.w.round() as i32).max(1),
+                        h: (rect.h.round() as i32).max(1),
+                    }),
                     None => wire::Placement::EveryMonitor,
                 },
                 _ => wire::Placement::EveryMonitor,
@@ -267,7 +267,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                     }
                     wire::OutsideClick {
                         default,
-                        named: named.into_iter().collect(),
+                        named: named
+                            .into_iter()
+                            .map(|(name, outside)| wire::OutsideNamed { name, outside })
+                            .collect(),
                     }
                 }
                 _ => {
@@ -343,7 +346,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             // window in your hand, which is why dropping one onto another
             // never swapped anything. Answered by the compositor, which
             // finds a window as the pointer does.
-            match ask(lua, solium_wm_protocol::Query::WindowAt((x, y, skip))) {
+            match ask(
+                lua,
+                solium_wm_protocol::Query::WindowAt(solium_wm_protocol::WindowAt {
+                    x,
+                    y,
+                    passing: skip,
+                }),
+            ) {
                 Some(solium_wm_protocol::Reply::Window(id)) => Ok(id),
                 _ => Ok(None),
             }
@@ -362,7 +372,11 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 Some(options) => match options.get::<Value>("warp")? {
                     Value::Nil | Value::Boolean(false) => None,
                     Value::Boolean(true) => Some(solium_wm_protocol::Warp {
-                        to: solium_wm_protocol::WarpTo::Window((id, CENTRE.0, CENTRE.1)),
+                        to: solium_wm_protocol::WarpTo::Window(solium_wm_protocol::WindowSpot {
+                            id,
+                            x: CENTRE.0,
+                            y: CENTRE.1,
+                        }),
                         motion: None,
                         interrupt: solium_wm_protocol::Interrupt::Pointer,
                     }),
@@ -370,7 +384,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         let (at, motion, interrupt) = warp_options(Some(&warp), "sol.focus")?;
                         let (x, y) = at.unwrap_or(CENTRE);
                         Some(solium_wm_protocol::Warp {
-                            to: solium_wm_protocol::WarpTo::Window((id, x, y)),
+                            to: solium_wm_protocol::WarpTo::Window(
+                                solium_wm_protocol::WindowSpot { id, x, y },
+                            ),
                             motion,
                             interrupt,
                         })
@@ -386,7 +402,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             with_pending(lua, |pending| {
                 let cause = pending.source;
-                pending.push(solium_wm_protocol::Command::Focus((id, cause, warp)));
+                pending.push(solium_wm_protocol::Command::Focus(
+                    solium_wm_protocol::Focus { id, cause, warp },
+                ));
             })
         })?,
     )?;
@@ -464,10 +482,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "show_minimized",
         lua.create_function(|lua, (id, shown): (u64, Option<bool>)| {
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::ShowMinimized((
-                    id,
-                    shown.unwrap_or(true),
-                )));
+                pending.push(solium_wm_protocol::Command::ShowMinimized(
+                    solium_wm_protocol::WindowFlag {
+                        id,
+                        on: shown.unwrap_or(true),
+                    },
+                ));
             })
         })?,
     )?;
@@ -498,7 +518,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 return Ok(());
             };
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::KeepAbove((id, on)));
+                pending.push(solium_wm_protocol::Command::KeepAbove(
+                    solium_wm_protocol::KeepAbove { id, on },
+                ));
             })
         })?,
     )?;
@@ -524,7 +546,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "drag_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::DragHold((id, held)));
+                pending.push(solium_wm_protocol::Command::DragHold(
+                    solium_wm_protocol::WindowFlag { id, on: held },
+                ));
             })
         })?,
     )?;
@@ -551,7 +575,15 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 ));
             }
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::DragGrip((id, along, by)));
+                pending.push(solium_wm_protocol::Command::DragGrip(
+                    solium_wm_protocol::DragGrip {
+                        id,
+                        share_x: along.0,
+                        share_y: along.1,
+                        dx: by.0,
+                        dy: by.1,
+                    },
+                ));
             })
         })?,
     )?;
@@ -566,7 +598,9 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         "resize_hold",
         lua.create_function(|lua, (id, held): (u64, bool)| {
             with_pending(lua, |pending| {
-                pending.push(solium_wm_protocol::Command::ResizeHold((id, held)));
+                pending.push(solium_wm_protocol::Command::ResizeHold(
+                    solium_wm_protocol::WindowFlag { id, on: held },
+                ));
             })
         })?,
     )?;
@@ -734,12 +768,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let attempt = ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 with_pending(lua, |pending| {
                     let cause = pending.source;
-                    pending.push(solium_wm_protocol::Command::Act((
+                    pending.push(solium_wm_protocol::Command::Act(solium_wm_protocol::Act {
                         attempt,
                         action,
-                        data.render(),
+                        data: data.render(),
                         cause,
-                    )));
+                    }));
                 })?;
                 if let Some(done) = done {
                     let attempts: Table = lua.globals().get::<Table>("sol")?.get("_attempts")?;

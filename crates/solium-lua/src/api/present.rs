@@ -45,7 +45,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         matrix: matrix.map(to_wire::matrix),
                         deform,
                         z,
-                        pivot,
+                        pivot: solium_wm_protocol::Pivot {
+                            x: pivot.0,
+                            y: pivot.1,
+                        },
                         motion: to_wire::motion(animation),
                         channels,
                     },
@@ -92,10 +95,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, id: u64| {
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.push(solium_wm_protocol::Command::Clear((
-                    id,
-                    to_wire::motion(animation),
-                )));
+                pending.push(solium_wm_protocol::Command::Clear(
+                    solium_wm_protocol::Clear {
+                        id,
+                        motion: to_wire::motion(animation),
+                    },
+                ));
             })
         })?,
     )?;
@@ -131,11 +136,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
-                pending.push(solium_wm_protocol::Command::Group((
-                    name.clone(),
-                    selection.clone(),
-                    to_wire::motion(animation),
-                )));
+                pending.push(solium_wm_protocol::Command::Group(
+                    solium_wm_protocol::Group {
+                        name: name.clone(),
+                        selection: selection.clone(),
+                        motion: to_wire::motion(animation),
+                    },
+                ));
             })
         })?,
     )?;
@@ -156,11 +163,13 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                 let (duration, easing) = motion_from(motion.as_ref())?;
                 with_pending(lua, |pending| {
                     let animation = pending.animation.with(duration, easing);
-                    pending.push(solium_wm_protocol::Command::PresentGroup((
-                        name.clone(),
-                        to,
-                        to_wire::motion(animation),
-                    )));
+                    pending.push(solium_wm_protocol::Command::PresentGroup(
+                        solium_wm_protocol::PresentGroup {
+                            name: name.clone(),
+                            shift: to,
+                            motion: to_wire::motion(animation),
+                        },
+                    ));
                 })
             },
         )?,
@@ -172,10 +181,12 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
             let (duration, easing) = motion_from(motion.as_ref())?;
             with_pending(lua, |pending| {
                 let animation = pending.animation.with(duration, easing);
-                pending.push(solium_wm_protocol::Command::ClearGroup((
-                    name.clone(),
-                    to_wire::motion(animation),
-                )));
+                pending.push(solium_wm_protocol::Command::ClearGroup(
+                    solium_wm_protocol::ClearGroup {
+                        name: name.clone(),
+                        motion: to_wire::motion(animation),
+                    },
+                ));
             })
         })?,
     )?;
@@ -217,7 +228,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         mlua::Error::runtime(format!("sol.warp: {id} is no window"))
                     })?;
                     let (x, y) = at.unwrap_or(CENTRE);
-                    solium_wm_protocol::WarpTo::Window((id, x, y))
+                    solium_wm_protocol::WarpTo::Window(solium_wm_protocol::WindowSpot { id, x, y })
                 }
                 Value::Table(point) => {
                     if at.is_some() {
@@ -230,7 +241,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         point.get::<Option<f64>>("y")?,
                     ) {
                         (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
-                            solium_wm_protocol::WarpTo::Point((x, y))
+                            solium_wm_protocol::WarpTo::Point(solium_wm_protocol::Point { x, y })
                         }
                         _ => {
                             return Err(mlua::Error::runtime(

@@ -190,21 +190,39 @@ fn a_question_is_answered_from_the_desktop_its_batch_was_sent_with() {
     scripts.relayout(drawn_over_the_point(7));
     scripts.relayout(empty_snapshot());
     assert_eq!((hand.batch(), hand.batch()), (1, 2));
-    let under = || wire::Query::WindowAt((50.0, 40.0, None));
+    let under = || {
+        wire::Query::WindowAt(wire::WindowAt {
+            x: 50.0,
+            y: 40.0,
+            passing: None,
+        })
+    };
 
-    hand.write(&Message::Query((1, under())));
+    hand.write(&Message::Query(wire::Asked {
+        serial: 1,
+        query: under(),
+    }));
     scripts.hear_ready();
     assert_eq!(
         hand.read(),
-        Message::Reply((1, wire::Reply::Window(Some(7)))),
+        Message::Reply(wire::Replied {
+            serial: 1,
+            reply: wire::Reply::Window(Some(7)),
+        }),
         "asked while handling the first batch"
     );
     hand.answer(1, false, Vec::new());
-    hand.write(&Message::Query((2, under())));
+    hand.write(&Message::Query(wire::Asked {
+        serial: 2,
+        query: under(),
+    }));
     scripts.hear_ready();
     assert_eq!(
         hand.read(),
-        Message::Reply((2, wire::Reply::Window(None))),
+        Message::Reply(wire::Replied {
+            serial: 2,
+            reply: wire::Reply::Window(None),
+        }),
         "asked while handling the second"
     );
 }
@@ -287,7 +305,10 @@ fn a_window_manager_that_says_nothing_with_a_batch_waiting_has_stopped() {
     assert!(!scripts.down(), "three seconds have not passed");
 
     // It asks something two seconds in: it is there, and slow.
-    hand.write(&Message::Query((1, wire::Query::Styles)));
+    hand.write(&Message::Query(wire::Asked {
+        serial: 1,
+        query: wire::Query::Styles,
+    }));
     scripts.hear_ready();
     let asked = Instant::now();
     scripts.stalled(after + Duration::from_secs(3));
@@ -368,7 +389,7 @@ fn an_event_nobody_listens_to_is_not_sent() {
         [
             wire::Event::Closed(7),
             wire::Event::Key("super+t".to_owned()),
-            wire::Event::Timers(vec![(4, true)]),
+            wire::Event::Timers(vec![wire::TimerDue { id: 4, last: true }]),
         ]
     );
 }

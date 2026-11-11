@@ -5,7 +5,15 @@
 /// compositor draws every frame of it. Nothing here is drawn, timed or
 /// animated by the window manager itself.
 interface commands {
-    use types.{rect, insets, touch-event, doc};
+    use types.{rect, point, insets, touch-event, doc, kept};
+
+    /// A cubic bezier's two control points, as CSS has them.
+    record bezier {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+    }
 
     /// How a motion moves: by name, a cubic bezier, or a spring.
     variant easing {
@@ -20,7 +28,7 @@ interface commands {
         /// Slow, fast, slow.
         in-out-cubic,
         /// A cubic bezier through `(x1, y1)` and `(x2, y2)`, as CSS has it.
-        bezier(tuple<f64, f64, f64, f64>),
+        bezier(bezier),
         /// A spring, which takes as long as it takes and carries the speed
         /// of the motion it interrupts.
         spring(spring),
@@ -87,6 +95,19 @@ interface commands {
         on-reload: option<string>,
     }
 
+    /// A point of a rectangle, as shares of its width and height.
+    record pivot {
+        x: f32,
+        y: f32,
+    }
+
+    /// A motion of its own for one channel of a present, by the channel's
+    /// name.
+    record channel {
+        name: string,
+        motion: motion,
+    }
+
     /// Where a window is drawn, which need not be where it is: a transform.
     /// The window keeps its place and its application is told nothing, so
     /// `clear` puts it back exactly. Input follows where it is drawn.
@@ -107,12 +128,12 @@ interface commands {
         z: f32,
         /// The point the matrix turns about, as shares of the rectangle's
         /// width and height, which may lie outside it.
-        pivot: tuple<f32, f32>,
+        pivot: pivot,
         /// How it gets there from where it is drawn now.
         motion: motion,
         /// A motion of its own for each of `x`, `y`, `size`, `opacity` and
         /// `client_opacity`, those not named moving by `motion`.
-        channels: list<tuple<string, motion>>,
+        channels: list<channel>,
     }
 
     /// A present that starts somewhere else and comes to where the window
@@ -126,7 +147,7 @@ interface commands {
         opacity: option<f32>,
         client-opacity: option<f32>,
         motion: motion,
-        channels: list<tuple<string, motion>>,
+        channels: list<channel>,
         deform: option<deform>,
     }
 
@@ -150,13 +171,21 @@ interface commands {
         matrix: matrix,
     }
 
+    /// A place in a window: its id, and where in it, as shares of its width
+    /// and height.
+    record window-spot {
+        id: u64,
+        x: f64,
+        y: f64,
+    }
+
     /// Where the pointer is sent.
     variant warp-to {
         /// A point.
-        point(tuple<f64, f64>),
+        point(point),
         /// A window: its id, and where in it, as shares of its width and
         /// height.
-        window(tuple<u64, f64, f64>),
+        window(window-spot),
     }
 
     /// Where the mouse carries on from when it moves before a warp's
@@ -204,6 +233,12 @@ interface commands {
         script,
     }
 
+    /// A window to resize by a finger, and the edge or corner it is held by.
+    record touch-resize {
+        id: u64,
+        edges: string,
+    }
+
     /// A finger the window manager takes for itself, or hands a window.
     variant touch-action {
         /// The finger is the window manager's: its events go on coming,
@@ -214,7 +249,7 @@ interface commands {
         /// The window resized from an edge or corner, by its name: one of
         /// `top`, `bottom`, `left`, `right`, `top_left`, `top_right`,
         /// `bottom_left` and `bottom_right`.
-        resize(tuple<u64, string>),
+        resize(touch-resize),
     }
 
     /// A press sent to a window: a button, or keys by name.
@@ -292,6 +327,13 @@ interface commands {
         notes: list<string>,
     }
 
+    /// A change to a run's environment: a name and its value, or none to
+    /// take the name out.
+    record env-change {
+        name: string,
+        value: option<string>,
+    }
+
     /// A program run for its output.
     record run {
         /// An id of the window manager's choosing, which the `runs` event
@@ -303,7 +345,7 @@ interface commands {
         cwd: option<string>,
         /// Its environment's changes: a name and its value, or none to
         /// take the name out.
-        env: list<tuple<string, option<string>>>,
+        env: list<env-change>,
         /// How long it may run, in milliseconds, before it is stopped.
         timeout-ms: f64,
         /// How many bytes of each of its outputs are kept.
@@ -325,23 +367,37 @@ interface commands {
     /// The layer a scene surface is drawn in.
     enum layer { background, bottom, top, overlay }
 
+    /// A rectangle in whole logical pixels.
+    record pixel-rect {
+        x: s32,
+        y: s32,
+        w: s32,
+        h: s32,
+    }
+
     /// Where a scene surface is: on every monitor, the primary one, one by
     /// name, or a rectangle `x`, `y`, `w`, `h`.
     variant placement {
         every-monitor,
         primary,
         monitor(string),
-        rect(tuple<s32, s32, s32, s32>),
+        rect(pixel-rect),
     }
 
     /// What a press outside a surface's grab does: swallowed, or passed on.
     enum outside { swallow, pass }
 
+    /// What a press over one scene surface, by its name, does.
+    record outside-named {
+        name: string,
+        outside: outside,
+    }
+
     /// What a press outside a surface that holds input does: by default,
     /// and over each scene surface named.
     record outside-click {
         default: outside,
-        named: list<tuple<string, outside>>,
+        named: list<outside-named>,
     }
 
     /// Which keys a surface holding the keyboard gets: all but the bound
@@ -400,6 +456,12 @@ interface commands {
         period-ms: option<f64>,
     }
 
+    /// An action a notification offers: its key and its label.
+    record notify-action {
+        key: string,
+        label: string,
+    }
+
     /// A notification of the window manager's own.
     record notify {
         /// A token of the window manager's choosing, which `notify-action`
@@ -412,10 +474,115 @@ interface commands {
         /// `low`, `normal` or `critical`.
         urgency: string,
         /// Its actions: each one's key and its label.
-        actions: list<tuple<string, string>>,
+        actions: list<notify-action>,
         /// Milliseconds it is shown for; -1 is the default, 0 until it is
         /// dismissed.
         expire-timeout: s32,
+    }
+
+    /// A settings section, by its name, as a document.
+    record configure {
+        section: string,
+        settings: doc,
+    }
+
+    /// A window and the motion it goes by.
+    record clear {
+        id: u64,
+        motion: motion,
+    }
+
+    /// A named selection; none takes the name away. The motion is how a
+    /// member that joins or leaves gets there.
+    record group {
+        name: string,
+        selection: option<selection>,
+        motion: motion,
+    }
+
+    /// What a group is moved by, and how.
+    record present-group {
+        name: string,
+        shift: shift,
+        motion: motion,
+    }
+
+    /// A group and the motion it goes back by.
+    record clear-group {
+        name: string,
+        motion: motion,
+    }
+
+    /// The window to give the keyboard, why, and where the pointer is taken
+    /// with it.
+    record focus {
+        id: u64,
+        cause: focus-cause,
+        warp: option<warp>,
+    }
+
+    /// A finger, by its slot, and what is done with it.
+    record touch-claim {
+        slot: s32,
+        action: touch-action,
+    }
+
+    /// What is pressed on a window, and what the press counts as.
+    record press-on {
+        id: u64,
+        press: press,
+        cause: focus-cause,
+    }
+
+    /// A window and a yes or no about it.
+    record window-flag {
+        id: u64,
+        on: bool,
+    }
+
+    /// Where the pointer holds a dragged window: as shares of its frame's
+    /// width and height, and pixels further.
+    record drag-grip {
+        id: u64,
+        share-x: f64,
+        share-y: f64,
+        dx: f64,
+        dy: f64,
+    }
+
+    /// Whether a window is kept above the others; none turns it round.
+    record keep-above {
+        id: u64,
+        on: option<bool>,
+    }
+
+    /// A scene's action sent by the window manager: an attempt's id of its
+    /// choosing, the action's name, its data as JSON text, and what a focus
+    /// it causes counts as.
+    record act {
+        attempt: u64,
+        action: string,
+        data: string,
+        cause: focus-cause,
+    }
+
+    /// Values one window's frame reads, as a JSON object.
+    record frame-values {
+        id: u64,
+        values: string,
+    }
+
+    /// A monitor's display, by its name, or every monitor's with none, and
+    /// whether it is on.
+    record power {
+        monitor: option<string>,
+        on: bool,
+    }
+
+    /// A store's content to save, as JSON text, by its name.
+    record store {
+        name: string,
+        content: string,
     }
 
     /// One thing asked of the compositor.
@@ -423,11 +590,11 @@ interface commands {
         /// A settings section, as a document: `idle`, `input`, `effects`,
         /// `monitors` and the rest, each read as the configuration
         /// reference documents it.
-        configure(tuple<string, doc>),
+        configure(configure),
         /// A document for the compositor to hold under this name, and hand
         /// back in `hello` to the window manager started in this one's
         /// place.
-        keep(tuple<string, doc>),
+        keep(kept),
         /// The events the window manager listens to, each by its name in
         /// `event`: all of them, each time the list changes. No other is
         /// sent, but for those that answer what the window manager itself
@@ -451,62 +618,62 @@ interface commands {
         present-from(present-from),
         /// Let a presented window go back to where it lives, by this
         /// motion.
-        clear(tuple<u64, motion>),
+        clear(clear),
         /// Name a selection of windows, surfaces and monitors, so one
         /// transform can carry them together; none takes the name away.
         /// The motion is how a member that joins or leaves gets there.
-        group(tuple<string, option<selection>, motion>),
+        group(group),
         /// Move, fade or turn a group as one.
-        present-group(tuple<string, shift, motion>),
+        present-group(present-group),
         /// Let a group go back to where its members are.
-        clear-group(tuple<string, motion>),
+        clear-group(clear-group),
         /// Put a window where it lives.
         place(place),
         /// Let a window go from its tile: a layout no longer arranges it.
         unplace(u64),
         /// Give a window the keyboard, saying why, and take the pointer to
         /// it when a warp is given.
-        focus(tuple<u64, focus-cause, option<warp>>),
+        focus(focus),
         /// Take the pointer to a window or a point.
         warp(warp),
         /// Take the finger of this slot, whose down is the event being
         /// answered.
-        touch(tuple<s32, touch-action>),
+        touch(touch-claim),
         /// Have a press at this point heard as a `click` event.
-        click(tuple<f64, f64>),
+        click(point),
         /// Press a button or keys on a window and let go, as a device
         /// would: its application hears it, and no binding fires.
-        press(tuple<u64, press, focus-cause>),
+        press(press-on),
         /// Make a window fullscreen, or give it back its place.
         toggle-fullscreen(u64),
         /// Maximise a window, or give it back its place.
         toggle-maximize(u64),
         /// Hold a window that is being dragged where it is, or let it go
         /// on.
-        drag-hold(tuple<u64, bool>),
+        drag-hold(window-flag),
         /// Say where the pointer holds a window that is being dragged: as
         /// shares of its frame's width and height, and pixels further.
-        drag-grip(tuple<u64, tuple<f64, f64>, tuple<f64, f64>>),
+        drag-grip(drag-grip),
         /// Keep a window that is being resized as it is, or let the resize
         /// go on.
-        resize-hold(tuple<u64, bool>),
+        resize-hold(window-flag),
         /// Minimize a window.
         minimize(u64),
         /// Show a minimized window again.
         unminimize(u64),
         /// Draw a minimized window anyway, where a present puts it, or
         /// stop: what an overview does to show one as a thumbnail.
-        show-minimized(tuple<u64, bool>),
+        show-minimized(window-flag),
         /// Keep a window above every window that is not, stop, or, with
         /// none, turn it round.
-        keep-above(tuple<u64, option<bool>>),
+        keep-above(keep-above),
         /// Ask a window to close. A request: its application may refuse.
         close(u64),
         /// An action of a scene's, its data as JSON text: what the scene
         /// sends with `Solium.send`. The first number is an attempt's id
         /// of the window manager's choosing, which `attempts-settled`
         /// names.
-        act(tuple<u64, string, string, focus-cause>),
+        act(act),
 
         /// The window frame style every window is drawn in, by its name;
         /// the name `none` draws no frame, and no name is the default
@@ -515,14 +682,14 @@ interface commands {
         /// Values every pane style's frames read, as a JSON object.
         pane-values(string),
         /// Values one window's frame reads, as a JSON object.
-        frame-values(tuple<u64, string>),
+        frame-values(frame-values),
         /// Put a scene on the desktop, or change one that is there.
         surface(surface),
         /// Take a scene away, by its name.
         surface-gone(string),
         /// Turn a monitor's display on or off, by its name; with none,
         /// every monitor's.
-        power(tuple<option<string>, bool>),
+        power(power),
 
         /// Start a program that opens a window: the program and its
         /// arguments.
@@ -544,7 +711,7 @@ interface commands {
         /// Stop watching, by the watch's id.
         watch-cancel(u64),
         /// A store's content to save, as JSON text, by its name.
-        store(tuple<string, string>),
+        store(store),
         /// Show a notification of the window manager's own.
         notify(notify),
 

@@ -16,7 +16,7 @@ pub fn easing(curve: Curve) -> wire::Easing {
         Curve::OutBack => wire::Easing::OutBack,
         Curve::InOutQuad => wire::Easing::InOutQuad,
         Curve::InOutCubic => wire::Easing::InOutCubic,
-        Curve::Bezier { x1, y1, x2, y2 } => wire::Easing::Bezier((x1, y1, x2, y2)),
+        Curve::Bezier { x1, y1, x2, y2 } => wire::Easing::Bezier(wire::Bezier { x1, y1, x2, y2 }),
         Curve::Spring(spring) => wire::Easing::Spring(wire::Spring {
             stiffness: spring.stiffness,
             damping: spring.damping,
