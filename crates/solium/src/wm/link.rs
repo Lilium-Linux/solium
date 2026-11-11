@@ -218,16 +218,23 @@ impl Link {
     #[cfg(not(test))]
     fn open(config: &Path, shipped_only: bool, chosen: &Chosen) -> Result<Self> {
         let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
-        use std::os::unix::process::CommandExt as _;
+        // Started as every program the compositor starts is
+        // (`launch::command`): with the environment Solium was started
+        // with, holding no descriptor of the compositor's but its three,
+        // and leading a session of its own. So a signal to the
+        // compositor's group (a logout, `timeout`) does not end it before
+        // the compositor has asked for its stores one last time: it goes
+        // when the compositor says goodbye, or when the socket closes with
+        // it.
         let (program, mut command) = match chosen.command.as_deref() {
             Some([program, arguments @ ..]) if !shipped_only => {
-                let mut command = std::process::Command::new(program);
+                let mut command = crate::launch::command(program);
                 command.args(arguments);
                 (std::path::PathBuf::from(program), command)
             }
             _ => {
                 let program = program().map_err(|why| anyhow!(why))?;
-                let mut command = std::process::Command::new(&program);
+                let mut command = crate::launch::command(&program);
                 command.arg(config).arg(crate::assets::lua());
                 // Where the user's own Lua is, unless none of it is to be
                 // read.
@@ -244,11 +251,6 @@ impl Link {
             .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
                 theirs,
             )))
-            // A group of its own, so a signal to the compositor's group (a
-            // logout, `timeout`) does not end it before the compositor has
-            // asked for its stores one last time: it goes when the compositor
-            // says goodbye, or when the socket closes with it.
-            .process_group(0)
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
         tracing::info!(
