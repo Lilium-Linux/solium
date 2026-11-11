@@ -1183,11 +1183,25 @@ socket as its standard input, and the two speak the protocol in
   XDG_CONFIG_HOME=/tmp/try timeout -s TERM 20 ./target/debug/solium
   ```
 
-- **To see what was late**, `RUST_LOG=info,solium::wm=debug` logs each answer
-  the compositor did not wait for, with how long it took. The log line
-  `window manager started pid=… program=…` names the process, which is how a
-  script ends one to watch it being started again: by that PID, never by
-  name.
+- **How the window manager did** is one line at the end of every session's
+  log, and each time a window manager is replaced:
+
+  ```text
+  window manager: 1424 batches answered: half within 48 us, 99 in 100 within
+  320 us, the slowest 1.1 ms; 0 came after the compositor had gone on; most
+  were surface-action 1379 (50 us each), save-stores 12 (216 us each), …
+  ```
+
+  Each time is from the batch being sent to its answer being read, so it
+  includes the window manager's own work, and each is rounded up to the top
+  of its bucket, a fifth at most. An event that is most of the batches and
+  is told every frame is a round trip every frame:
+  `RUST_LOG=info,solium::state::hosted=debug` logs each scene's action with
+  the scene that sent it, and `solium::wm=debug` each answer the compositor
+  did not wait for, with how long it took.
+- The log line `window manager started pid=… program=…` names the process,
+  which is how a script ends one to watch it being started again: by that
+  PID, never by name.
 - **A new event, command or type** goes in the WIT with its comment. The Rust
   types are generated from it when `solium-wm-protocol` is built, and the
   protocol reference page from its comments.

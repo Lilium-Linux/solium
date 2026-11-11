@@ -219,8 +219,9 @@ ends, waits a second for the window manager to exit, and then stops it.
 A window manager that is slow never holds a frame.
 
 - The compositor waits **one frame** for an answer: `wm.ask_ms`, 4 ms, which
-  is a frame at 260 Hz. A round trip takes about 20 microseconds, so an answer
-  that is late is a window manager that is busy or stuck.
+  is a frame at 260 Hz. The socket itself takes about 20 microseconds there
+  and back, so how long an answer takes is how long the window manager works
+  on it, and one that is late is a window manager that is busy or stuck.
 - When the answer is late the compositor goes on, and does what it would do
   with no window manager:
 
@@ -411,5 +412,10 @@ command = ["/path/to/solium/target/debug/examples/tiny_wm"]
   ```
 
   with `/tmp/try/solium/wm.toml` naming it.
-- `RUST_LOG=solium::wm=debug` logs each answer that came late and how long it
-  took.
+- Every session's log ends with one line on how the window manager did: how
+  many batches it answered, the time half of the answers and 99 in 100 came
+  within, the slowest, how many came after the compositor had gone on, and
+  which events there were most of. A window manager that handles a batch in
+  tens of microseconds costs a frame nothing.
+- `RUST_LOG=info,solium::wm=debug` logs each answer that came late and how
+  long it took.
