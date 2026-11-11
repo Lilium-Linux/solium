@@ -10,11 +10,12 @@ ones whose rectangles changed. Nothing is drawn by this program: every part of
 the picture is a terminal window, put there by Solium.
 
 It is here to show that a window manager is an ordinary program in any
-language. It links nothing of Solium's. It reads the protocol's WIT files,
-writes its own C# types from them, and talks to the compositor over the socket
-it is started with. [Writing a window manager](../../docs/window-managers.md)
-describes that conversation; this is one, start to finish, in about a
-thousand lines of C#, seven hundred of them the window manager itself.
+language. It links nothing of Solium's. Its types are the ones protobuf's
+generator for C# writes from the protocol's `.proto` file, and it talks to
+the compositor over the socket it is started with, through the small package
+in [`sdk/csharp`](../../sdk/csharp/README.md). [Writing a window
+manager](../../docs/window-managers.md) describes that conversation; this is
+one, in about seven hundred lines of C#.
 
 The name is the tradition it joins: the shadow-art film for *Bad Apple!!* has
 been played on oscilloscopes, in spreadsheets and in file managers. The film
@@ -39,9 +40,10 @@ cd examples/bad-apple
 dotnet build -c Release -o bin
 ```
 
-The build first runs `gen/wit2cs.py`, which writes `obj/Protocol.g.cs` from
-`crates/wm-protocol/wit/`: every record, variant and enum of the protocol as a
-C# type that can read and write itself.
+The build takes in `sdk/csharp/Solium.Wm`, whose own build has protobuf's
+generator write every record, variant and enum of the protocol as a C# type,
+from `crates/wm-protocol/proto/solium_wm.proto`. It needs two packages from
+NuGet, which `dotnet` fetches: `Google.Protobuf` and `Grpc.Tools`.
 
 ## Make a film
 
@@ -112,13 +114,10 @@ A panel in the corner says how it is going:
 
 | File | What is in it |
 |---|---|
-| `src/Program.cs` | The window manager: the handshake, and the batches it answers, a frame of the film among them twenty-four times a second. |
-| `src/Connection.cs` | The socket and the frames on it: a length, then a message. |
-| `src/Wire.cs` | The encoding of each kind of value. |
+| `src/Program.cs` | The window manager: what it asks for, and the batches it answers, a frame of the film among them twenty-four times a second. |
 | `src/Film.cs` | Reading a film. |
 | `Stats.qml` | The panel: a scene the compositor draws, with the rows it is handed. |
 | `terminals.sh` | Opens the terminals of one theme. |
-| `gen/wit2cs.py` | Writes the protocol's C# types from the WIT. |
 | `frames.py` | Turns a video into a film. |
 
 What it uses of the protocol:

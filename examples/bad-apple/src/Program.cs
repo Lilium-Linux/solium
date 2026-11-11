@@ -42,8 +42,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Solium.Wm;
 
-namespace Solium.Wm;
+namespace BadApple;
 
 public static class Program
 {
@@ -57,16 +58,7 @@ public static class Program
             return 2;
         }
         var film = Film.Load(arguments[0]);
-        try
-        {
-            using var solium = Connection.FromStandardInput();
-            return new Player(solium, film, arguments.Skip(1).ToList()).Run();
-        }
-        catch (Exception error) when (error is System.Net.Sockets.SocketException or IOException)
-        {
-            Console.Error.WriteLine($"bad-apple: {error.Message}");
-            return 1;
-        }
+        return new Player(film, arguments.Skip(1).ToList()).Run();
     }
 }
 
@@ -83,7 +75,7 @@ internal sealed class Terminal
     public bool Open = true;
 }
 
-internal sealed class Player
+internal sealed class Player : WindowManager
 {
     /// <summary>The application ids of the terminals of each theme.</summary>
     private const string Light = "bad-apple-light";
@@ -116,15 +108,13 @@ internal sealed class Player
     private const double Arranged = 500;
     private const double Faded = 300;
 
-    private readonly Connection _solium;
     private readonly Film _film;
     private readonly List<string> _open;
 
-    // What it has been told of the desktop: the monitors and the windows,
-    // and of those, the terminals of each theme, in the order they opened:
-    // the one that opened nth of its theme is the film's nth of that colour.
-    private List<Monitor> _monitors = new();
-    private readonly Dictionary<ulong, Window> _windows = new();
+    // The terminals of each theme, in the order they opened: the one that
+    // opened nth of its theme is the film's nth of that colour. The
+    // monitors and the windows themselves are `Desktop`'s, which the
+    // package keeps as the compositor tells them.
     private readonly List<Terminal> _light = new();
     private readonly List<Terminal> _dark = new();
 
@@ -147,9 +137,8 @@ internal sealed class Player
     private bool _played;
     private readonly Queue<(double At, TimeSpan Used)> _used = new();
 
-    public Player(Connection solium, Film film, List<string> open)
+    public Player(Film film, List<string> open)
     {
-        _solium = solium;
         _film = film;
         _open = open;
     }
@@ -159,140 +148,89 @@ internal sealed class Player
     /// a reload: which keys are its own, which events it wants to hear,
     /// that every window is drawn with a plain border, and its timers.
     /// </summary>
-    private List<Command> Setup()
+    protected override IEnumerable<Command> Setup()
     {
-        Binding Key(string combo, string note) => new() { Combo = combo, Note = note };
         var commands = new List<Command>
         {
-            new Command.Declare
-            {
-                Value = new Declarations
-                {
-                    Bindings =
-                    {
-                        Key("escape", "end the session"),
-                        Key("space", "pause, and go on"),
-                        Key("r", "the rows, and the film from the beginning"),
-                    },
-                },
-            },
+            Commands.Bind(
+                ("escape", "end the session"),
+                ("space", "pause, and go on"),
+                ("r", "the rows, and the film from the beginning")),
             // `renamed` for the terminals' titles: a shell names its window
             // as it prints its prompt, and no other event says so.
-            new Command.Listen { Value = { "opened", "closed", "monitors-changed", "renamed" } },
+            Commands.Listen("opened", "closed", "monitors-changed", "renamed"),
             // The frame every window wears: a border and no titlebar, so
             // a terminal a cell wide still has room for its prompt.
-            new Command.Decoration { Value = "border" },
+            new Command { Decoration = new OptionalString { Value = "border" } },
             // A setting, as any window manager sets one: a section's name
-            // and a document of its keys. Nobody touches a key while a
-            // film plays: the session is not locked, and the screens are
-            // not turned off, for want of one. Nought is never.
-            new Command.Configure { Value = ("idle", Section(("lock_after", 0L), ("screens_off_after", 0L))) },
-            Every(Measure, MeasuredMs),
+            // and its keys. Nobody touches a key while a film plays: the
+            // session is not locked, and the screens are not turned off,
+            // for want of one. Nought is never.
+            Commands.Configure("idle", new { lock_after = 0, screens_off_after = 0 }),
+            // `timer`: woken every so often, by the clock the compositor's
+            // animations run on.
+            Commands.Every(Measure, MeasuredMs),
         };
         if (_playing && !_paused)
         {
-            commands.Add(Every(Frame, 1000 / _film.FramesASecond));
+            commands.Add(Commands.Every(Frame, 1000 / _film.FramesASecond));
         }
         return commands;
     }
 
-    /// <summary>`timer`: woken every so often, by the clock the compositor's animations run on.</summary>
-    private static Command Every(ulong id, double ms) => new Command.Timer
-    {
-        Value = new Timer { Id = id, AfterMs = ms, PeriodMs = ms },
-    };
-
     /// <summary>
-    /// A settings document of plain values. A document is a tree,
-    /// flattened: the first node is the root, and a table names its
-    /// children by where they are in the list.
+    /// A change, before `Desktop` takes it, so what a window was is still
+    /// there to compare with.
     /// </summary>
-    private static List<DocNode> Section(params (string Key, object Value)[] keys)
+    protected override void Changing(Change change)
     {
-        var root = new DocTable();
-        var nodes = new List<DocNode> { new DocNode.Table { Value = root } };
-        foreach (var (key, value) in keys)
+        switch (change.KindCase)
         {
-            root.Fields.Add((key, (uint)nodes.Count));
-            nodes.Add(value switch
-            {
-                string text => new DocNode.Text { Value = text },
-                long number => new DocNode.Integer { Value = number },
-                bool flag => new DocNode.Boolean { Value = flag },
-                _ => throw new ArgumentException($"{key} is not a value a document carries here"),
-            });
-        }
-        return nodes;
-    }
-
-    public int Run()
-    {
-        // The compositor speaks first. A protocol of another version is
-        // another protocol: say so, and go.
-        if (_solium.Receive(TimeSpan.FromSeconds(10)) is not Message.Hello hello)
-        {
-            return 1;
-        }
-        if (!Speaks(hello.Value.Version))
-        {
-            _solium.Send(new Message.Goodbye
-            {
-                Value = $"this window manager speaks the protocol {Protocol.Version}, " +
-                        $"the compositor {hello.Value.Version}",
-            });
-            return 1;
-        }
-        _solium.Send(new Message.HelloAnswer
-        {
-            Value = new HelloAnswer { Version = Protocol.Version, Commands = Setup() },
-        });
-
-        // From here it only answers: everything it does is its answer to
-        // something the compositor told it.
-        while (true)
-        {
-            switch (_solium.Receive(TimeSpan.FromMinutes(1)))
-            {
-                case Message.Batch batch:
-                    _solium.Send(new Message.Answer { Value = Handle(batch.Value) });
-                    break;
-                case Message.Reload:
-                    // Nothing of its own to read again: it says what it
-                    // said at the start.
-                    _solium.Send(new Message.Reloaded
-                    {
-                        Value = new Reloaded.Loaded { Value = new Answer { Commands = Setup() } },
-                    });
-                    break;
-                case Message.Goodbye:
-                    return 0;
-            }
+            case Change.KindOneofCase.Window:
+                // A window's row can come before the window has opened,
+                // and it is not this program's to place until it has. A
+                // shell that has just printed its prompt is something to
+                // see: the wait starts again.
+                if (change.Window.Title == Ready
+                    && !(Desktop.Windows.TryGetValue(change.Window.Id, out var before) && before.Title == Ready))
+                {
+                    _settled = 0;
+                }
+                break;
+            case Change.KindOneofCase.WindowGone:
+                foreach (var (terminal, _, _) in Everyone().Where(each => each.Terminal.Id == change.WindowGone))
+                {
+                    terminal.Open = false;
+                }
+                break;
         }
     }
 
-    /// <summary>The same major version, and before 1.0 the same minor one.</summary>
-    private static bool Speaks(string theirs)
+    /// <summary>One batch: what happened, with the desktop as it was then.</summary>
+    protected override void Handle(Batch batch, Answer answer)
     {
-        var ours = Protocol.Version.Split('.');
-        var other = theirs.Split('.');
-        if (other.Length < 2 || ours[0] != other[0])
-        {
-            return false;
-        }
-        return ours[0] != "0" || ours[1] == other[1];
-    }
-
-    /// <summary>One batch: what changed first, then what happened.</summary>
-    private Answer Handle(Batch batch)
-    {
-        var answer = new Answer { Serial = batch.Serial };
         _now = batch.At;
-        foreach (var change in batch.Changes)
+        foreach (var each in batch.Events)
         {
-            switch (change)
+            switch (each.KindCase)
             {
-                case Change.Monitors monitors:
-                    _monitors = monitors.Value;
+                case Event.KindOneofCase.Startup:
+                    // The terminals of each theme, as many as the film
+                    // needs. Run and left to themselves: a window manager
+                    // starts nothing itself, and each window they open is
+                    // told as an `opened`.
+                    foreach (var (which, count) in new[] { ("light", _film.Light), ("dark", _film.Dark) })
+                    {
+                        answer.Commands.Add(new Command
+                        {
+                            RunDetached = new StringList
+                            {
+                                Items = { _open.Append(which).Append(count.ToString()) },
+                            },
+                        });
+                    }
+                    break;
+                case Event.KindOneofCase.MonitorsChanged:
                     // Everything is somewhere else on another screen: the
                     // rows now, and the film's frame when the next is
                     // shown.
@@ -301,45 +239,7 @@ internal sealed class Player
                         Arrange(0, answer.Commands);
                     }
                     break;
-                case Change.Window window:
-                    // Kept, and no more: a window's row can come before the
-                    // window has opened, and it is not this program's to
-                    // place until it has. A shell that has just printed its
-                    // prompt is something to see: the wait starts again.
-                    if (window.Value.Title == Ready
-                        && !(_windows.TryGetValue(window.Value.Id, out var before) && before.Title == Ready))
-                    {
-                        _settled = 0;
-                    }
-                    _windows[window.Value.Id] = window.Value;
-                    break;
-                case Change.WindowGone gone:
-                    _windows.Remove(gone.Value);
-                    foreach (var (terminal, _, _) in Everyone().Where(each => each.Terminal.Id == gone.Value))
-                    {
-                        terminal.Open = false;
-                    }
-                    break;
-            }
-        }
-        foreach (var each in batch.Events)
-        {
-            switch (each)
-            {
-                case Event.Startup:
-                    // The terminals of each theme, as many as the film
-                    // needs. Run and left to themselves: a window manager
-                    // starts nothing itself, and each window they open is
-                    // told as an `opened`.
-                    foreach (var (which, count) in new[] { ("light", _film.Light), ("dark", _film.Dark) })
-                    {
-                        answer.Commands.Add(new Command.RunDetached
-                        {
-                            Value = _open.Append(which).Append(count.ToString()).ToList(),
-                        });
-                    }
-                    break;
-                case Event.Opened opened when _windows.TryGetValue(opened.Value, out var window):
+                case Event.KindOneofCase.Opened when Desktop.Windows.TryGetValue(each.Opened, out var window):
                     // Placed in the answer to its opening, which is where a
                     // window manager places a window. The compositor glides
                     // it to its place in the rows from where it opened.
@@ -349,51 +249,50 @@ internal sealed class Player
                     {
                         break;
                     }
-                    var terminal = new Terminal { Id = opened.Value };
+                    var terminal = new Terminal { Id = each.Opened };
                     theme.Add(terminal);
                     answer.Handled = true;
-                    Put(terminal, Standing(light, theme.Count - 1), Arranged, new Easing.OutCubic(), answer.Commands);
+                    Put(terminal, Standing(light, theme.Count - 1), Arranged, Ease.OutCubic, answer.Commands);
                     _settled = 0;
                     break;
-                case Event.Timers timers:
-                    foreach (var (id, _) in timers.Value)
+                case Event.KindOneofCase.Timers:
+                    foreach (var due in each.Timers.Items)
                     {
-                        if (id == Frame)
+                        if (due.Id == Frame)
                         {
                             Play(answer.Commands);
                         }
-                        else if (id == Measure)
+                        else if (due.Id == Measure)
                         {
                             Say(answer.Commands);
                             Gather(answer.Commands);
                         }
                     }
                     break;
-                case Event.Key key:
+                case Event.KindOneofCase.Key:
                     answer.Handled = true;
-                    Pressed(key.Value, answer.Commands);
+                    Pressed(each.Key, answer.Commands);
                     break;
             }
         }
-        return answer;
     }
 
-    private void Pressed(string combo, List<Command> commands)
+    private void Pressed(string combo, ICollection<Command> commands)
     {
         switch (combo)
         {
             case "escape":
-                commands.Add(new Command.Quit());
+                commands.Add(Commands.Quit());
                 break;
             case "space" when _playing && _paused:
                 // On from where it stopped.
                 _paused = false;
                 _played = false;
-                commands.Add(Every(Frame, 1000 / _film.FramesASecond));
+                commands.Add(Commands.Every(Frame, 1000 / _film.FramesASecond));
                 break;
             case "space" when _playing:
                 _paused = true;
-                commands.Add(new Command.TimerCancel { Value = Frame });
+                commands.Add(Commands.CancelTimer(Frame));
                 break;
             case "r" when _playing:
                 Stand(commands);
@@ -403,7 +302,7 @@ internal sealed class Player
 
     /// <summary>Whether the shell in a terminal has printed its prompt, which its title says.</summary>
     private bool IsReady(Terminal terminal) =>
-        _windows.TryGetValue(terminal.Id, out var window) && window.Title == Ready;
+        Desktop.Windows.TryGetValue(terminal.Id, out var window) && window.Title == Ready;
 
     /// <summary>Every terminal, with its theme and which of that theme it is.</summary>
     private IEnumerable<(Terminal Terminal, bool Light, int Nth)> Everyone() =>
@@ -418,7 +317,7 @@ internal sealed class Player
     /// is said of a terminal that is there already.
     /// </summary>
     private void Put(Terminal terminal, (int X, int Y, int W, int H) at, double ms, Easing easing,
-        List<Command> commands)
+        ICollection<Command> commands)
     {
         if (terminal.At == at || !terminal.Open)
         {
@@ -426,13 +325,13 @@ internal sealed class Player
         }
         terminal.At = at;
         _moved++;
-        commands.Add(new Command.Place
+        commands.Add(new Command
         {
-            Value = new Place
+            Place = new Place
             {
                 Id = terminal.Id,
                 Rect = new Rect { X = at.X, Y = at.Y, W = at.W, H = at.H },
-                Motion = new Motion { DurationMs = ms, Easing = easing },
+                Motion = Commands.Motion(ms, easing),
                 // Cut to its rectangle: a terminal still drawn larger
                 // does not lie over its neighbours.
                 Tile = true,
@@ -446,19 +345,25 @@ internal sealed class Player
     /// a window, open and where it was, with no opacity, and `clear` takes
     /// that away again. Nothing is said of one that is already as wanted.
     /// </summary>
-    private static void Show(Terminal terminal, bool shown, double ms, List<Command> commands)
+    private static void Show(Terminal terminal, bool shown, double ms, ICollection<Command> commands)
     {
         if (terminal.Shown == shown || !terminal.Open)
         {
             return;
         }
         terminal.Shown = shown;
-        var motion = new Motion { DurationMs = ms, Easing = new Easing.Linear() };
+        var motion = Commands.Motion(ms);
         commands.Add(shown
-            ? new Command.Clear { Value = (terminal.Id, motion) }
-            : new Command.Present
+            ? new Command { Clear = new Clear { Id = terminal.Id, Motion = motion } }
+            : new Command
             {
-                Value = new Present { Id = terminal.Id, Opacity = 0f, Pivot = (0.5f, 0.5f), Motion = motion },
+                Present = new Present
+                {
+                    Id = terminal.Id,
+                    Opacity = 0f,
+                    Pivot = new Pivot { X = 0.5f, Y = 0.5f },
+                    Motion = motion,
+                },
             });
     }
 
@@ -498,7 +403,7 @@ internal sealed class Player
     /// prompt, and they have stood so a while, begin: the film's timer is
     /// set, and each time it falls due is a frame.
     /// </summary>
-    private void Gather(List<Command> commands)
+    private void Gather(ICollection<Command> commands)
     {
         if (_playing || _light.Count < _film.Light || _dark.Count < _film.Dark
             || !Everyone().All(each => !each.Terminal.Open || IsReady(each.Terminal)))
@@ -513,7 +418,7 @@ internal sealed class Player
         _paused = false;
         _played = false;
         _shown = -1;
-        commands.Add(Every(Frame, 1000 / _film.FramesASecond));
+        commands.Add(Commands.Every(Frame, 1000 / _film.FramesASecond));
         // For whoever puts the film's sound to a recording of this.
         Console.Error.WriteLine($"bad-apple: the film began at {DateTime.UtcNow:O}");
     }
@@ -523,11 +428,11 @@ internal sealed class Player
     /// So it is when the film ends and when it is asked for from the
     /// beginning, and the film begins from here (`Gather`).
     /// </summary>
-    private void Stand(List<Command> commands)
+    private void Stand(ICollection<Command> commands)
     {
         if (!_paused)
         {
-            commands.Add(new Command.TimerCancel { Value = Frame });
+            commands.Add(Commands.CancelTimer(Frame));
         }
         _playing = false;
         _paused = false;
@@ -536,17 +441,17 @@ internal sealed class Player
     }
 
     /// <summary>Every terminal to its place in the rows, and drawn.</summary>
-    private void Arrange(double ms, List<Command> commands)
+    private void Arrange(double ms, ICollection<Command> commands)
     {
         foreach (var (terminal, light, nth) in Everyone())
         {
-            Put(terminal, Standing(light, nth), ms, new Easing.OutCubic(), commands);
+            Put(terminal, Standing(light, nth), ms, Ease.OutCubic, commands);
             Show(terminal, true, Math.Min(ms, Faded), commands);
         }
     }
 
     /// <summary>The film's timer fell due: the next frame.</summary>
-    private void Play(List<Command> commands)
+    private void Play(ICollection<Command> commands)
     {
         if (!_playing || _paused)
         {
@@ -578,7 +483,7 @@ internal sealed class Player
     /// into the film's `first` frame, the terminals take their time
     /// instead, and those it has no use for fade.
     /// </summary>
-    private void Lay(List<Terminal> terminals, Box[] boxes, bool first, List<Command> commands)
+    private void Lay(List<Terminal> terminals, Box[] boxes, bool first, ICollection<Command> commands)
     {
         var wanted = new Box?[terminals.Count];
         foreach (var box in boxes)
@@ -596,11 +501,11 @@ internal sealed class Player
             var at = Span(rectangle.X, rectangle.Y, rectangle.W, rectangle.H, _film.Columns, _film.Rows);
             if (first)
             {
-                Put(terminal, at, Arranged, new Easing.OutCubic(), commands);
+                Put(terminal, at, Arranged, Ease.OutCubic, commands);
                 continue;
             }
             Show(terminal, true, 0, commands);
-            Put(terminal, at, 0, new Easing.Linear(), commands);
+            Put(terminal, at, 0, Ease.Linear, commands);
         }
     }
 
@@ -611,9 +516,9 @@ internal sealed class Player
     /// clock, which every batch carries: a timer that fell due late is
     /// not taken for half a second.
     /// </summary>
-    private void Say(List<Command> commands)
+    private void Say(ICollection<Command> commands)
     {
-        if (_monitors.Count == 0)
+        if (Desktop.Monitors.Count == 0)
         {
             return;
         }
@@ -648,14 +553,17 @@ internal sealed class Player
         _frames = _moved = 0;
 
         var whole = Whole();
-        commands.Add(new Command.Surface
+        commands.Add(new Command
         {
-            Value = new Surface
+            Surface = new Surface
             {
                 Name = "bad-apple",
                 Scene = Path.Combine(AppContext.BaseDirectory, "Stats.qml"),
                 Layer = Layer.Overlay,
-                On = new Placement.Rect { Value = ((int)whole.X + 10, (int)whole.Y + 10, 180, 128) },
+                On = new Placement
+                {
+                    Rect = new PixelRect { X = (int)whole.X + 10, Y = (int)whole.Y + 10, W = 180, H = 128 },
+                },
                 Properties = JsonSerializer.Serialize(new { rows }),
                 OutsideClick = new OutsideClick { Default = Outside.Pass },
                 Keyboard = KeyPolicy.ExceptClaimed,
@@ -667,8 +575,7 @@ internal sealed class Player
     /// <summary>The whole of the primary monitor.</summary>
     private Rect Whole()
     {
-        var monitor = _monitors.FirstOrDefault(monitor => monitor.Primary) ?? _monitors.FirstOrDefault();
-        return monitor?.Whole ?? new Rect { W = 1280, H = 720 };
+        return Desktop.Primary?.Whole ?? new Rect { W = 1280, H = 720 };
     }
 
     /// <summary>The part of it the film is shown in: as large as fits, in the film's own shape, in the middle.</summary>

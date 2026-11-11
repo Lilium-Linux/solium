@@ -323,7 +323,7 @@ project. The default configuration is one configuration of the compositor.
 |---|---|
 | Configure the desktop | [Configuration guide](docs/ricing.md), [modes](docs/modes.md), [decorations](docs/decorations.md) |
 | Write a shell or effect | [Shell hosting and integration](docs/shell-boundary.md), [effects](crates/solium/effects/README.md) |
-| Write a window manager | [Writing a window manager](docs/window-managers.md), the examples in [Rust](crates/wm-protocol/examples/tiny_wm.rs) and [C#](examples/bad-apple/README.md) |
+| Write a window manager | [Writing a window manager](docs/window-managers.md), the examples in [Rust](crates/wm-protocol/examples/tiny_wm.rs) and [C#](sdk/csharp/README.md) |
 | Understand support and plans | [Status](docs/status.md), [known limitations](docs/gaps.md), [roadmap](docs/roadmap.md) |
 | Develop Solium | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [development tools](dev/README.md) |
 | Report a problem | [Issue tracker](https://github.com/Lilium-Linux/solium/issues), [security policy](SECURITY.md) |

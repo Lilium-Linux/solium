@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 
-namespace Solium.Wm;
+namespace BadApple;
 
 /// <summary>
 /// One rectangle of a frame, in cells of the film's grid, and which

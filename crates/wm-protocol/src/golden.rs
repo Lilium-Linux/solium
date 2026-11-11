@@ -313,6 +313,22 @@ fn the_proto_file_is_the_one_the_wit_generates() {
     );
 }
 
+/// The package for C# says the protocol's version in its handshake, and a
+/// compositor refuses one that says another: it is the WIT's.
+#[test]
+fn the_package_for_c_sharp_says_the_protocols_version() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../sdk/csharp/Solium.Wm/Protocol.cs"
+    );
+    let package = std::fs::read_to_string(path).expect("sdk/csharp/Solium.Wm/Protocol.cs");
+    assert!(
+        package.contains(&format!("Version = \"{}\";", crate::VERSION)),
+        "sdk/csharp/Solium.Wm/Protocol.cs does not say the protocol is {}",
+        crate::VERSION
+    );
+}
+
 /// A newer peer adds fields. One this version does not know is passed
 /// over, whatever kind it is, and the rest is read.
 #[test]

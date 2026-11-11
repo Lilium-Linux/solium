@@ -47,8 +47,11 @@ docs/superpowers/
 # code on every build, so they are never committed; see book.toml.
 docs/generated/
 
-# What `dotnet build` writes for the C# window manager in examples/bad-apple,
-# its generated protocol types among them, and the films made for it.
+# What `dotnet build` writes for the C# package in sdk/csharp, the
+# protocol's generated types among them, and for the window manager in
+# examples/bad-apple that is built on it; and the films made for that one.
 examples/bad-apple/bin/
 examples/bad-apple/obj/
+sdk/csharp/*/bin/
+sdk/csharp/*/obj/
 *.frames
