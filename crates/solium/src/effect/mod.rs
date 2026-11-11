@@ -1,4 +1,9 @@
 #![expect(unsafe_code, reason = "the calls into effect::gl")]
+#![expect(
+    clippy::disallowed_types,
+    reason = "an effect's Lua runs here, in its sandbox, and nowhere else in the compositor: \
+              `clippy.toml` denies it everywhere but this module"
+)]
 
 //! Effects as user folders: the host, the sandbox, the programs, the
 //! executor, the rules and the transitions. \[16\] §2; the spec §6.
@@ -13,8 +18,10 @@ pub(crate) mod fade;
 pub(crate) mod geometry;
 pub(crate) mod gl;
 pub(crate) mod host;
+pub(crate) mod lua_doc;
 pub(crate) mod mask;
 pub(crate) mod memo;
+pub(crate) mod param;
 pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod rules;
@@ -22,7 +29,7 @@ pub(crate) mod run;
 pub(crate) mod sandbox;
 pub(crate) mod settings;
 pub(crate) mod store;
-pub(crate) mod tree;
+pub(crate) use param::param_value;
 pub(crate) mod watch;
 pub(crate) mod xray;
 

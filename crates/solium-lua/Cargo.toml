@@ -1,0 +1,25 @@
+[package]
+name = "solium-lua"
+description = "Solium's Lua window manager: the `sol` API, run against the window manager protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
+solium-animation = { path = "../animation" }
+solium-effects = { path = "../effects" }
+solium-json = { path = "../json", features = ["lua"] }
+solium-layout = { path = "../layout" }
+solium-wm-protocol = { path = "../wm-protocol" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Key names for `sol.press`, checked and spelled as xkb spells them.
+xkbcommon = { version = "0.8", default-features = false }

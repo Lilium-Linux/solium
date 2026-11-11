@@ -513,8 +513,14 @@ pub(crate) struct Solium {
     /// device met since start. See `input::devices` (#157).
     pub(crate) input: crate::input::devices::Registry,
 
-    /// The Lua runtime. Modes live in here, not in the compositor.
+    /// The window manager. Modes live in there, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
+    /// What keeps the window manager's socket in the event loop, from the
+    /// backend that has one: [`Self::watch_wm`].
+    pub(crate) wm_watch: Option<crate::wm::Watch>,
+    /// When the window manager last stopped and was started again, for
+    /// `wm.restarts`: [`Self::restart_wm`].
+    pub(crate) wm_restarts: crate::wm::Restarts,
 
     /// The active mode's name, as a script last reported it with `sol.status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
@@ -575,6 +581,10 @@ pub(crate) struct Solium {
     /// Lua once all of it is applied (Ruling 15).
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
     pub(crate) settled_attempts: Vec<crate::script::Settled>,
+    /// The windows whose applications took a size of their own since the
+    /// window manager was last told, each with the size, frame included
+    /// (`Self::tell_sized`).
+    pub(crate) took_sizes: Vec<(u64, (i32, i32))>,
     /// The actions `sol.act` was asked for that the compositor does not know,
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
@@ -1225,7 +1235,6 @@ struct Gesture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Memory {
     pub(crate) windows: usize,
-    pub(crate) lua_kb: usize,
     /// Every held memo's bytes (`effect::memo::Memos::held_bytes`).
     pub(crate) memos_kb: u64,
 }
@@ -1440,6 +1449,7 @@ impl Solium {
             touch_time: 0,
             touch_events: Vec::new(),
             settled_attempts: Vec::new(),
+            took_sizes: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
             unknown_in_workspaces: std::collections::HashSet::new(),
             telling_attempts: false,
@@ -1568,6 +1578,8 @@ impl Solium {
             profile: Profile::from_env(),
             input: crate::input::devices::Registry::default(),
             scripts: None,
+            wm_watch: None,
+            wm_restarts: crate::wm::Restarts::default(),
             status: String::new(),
             script_grab: false,
             keys_forwarded: std::collections::HashSet::new(),
@@ -2433,12 +2445,14 @@ impl Solium {
                 pane.set_shrinking(None);
             }
         }
-        // And one a fullscreen or maximise change is holding at its new
-        // rectangle is let go once its client answers, or has had long enough
-        // to. Until then the frames keep coming, or a client that never
-        // answers would be held until something else drew one.
+        // And one a placement, or a fullscreen or maximise change, is
+        // holding at its new rectangle is let go once its client answers, or
+        // has had long enough to. Until then the frames keep coming, or a
+        // client that never answers would be held until something else drew
+        // one.
         // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
         animating |= self.settle_answering(now);
+        self.tell_sized();
         // And a glide that has landed with its client's picture still held
         // against the edges it pinned, until `resize.patience` lets it go
         // (#233): that frame has to be drawn too.
@@ -2557,16 +2571,13 @@ impl Solium {
     }
 
     /// What `memory_report` counts that the compositor holds itself: the
-    /// windows, the Lua heap and the held memos (Ruling F30: outside the
-    /// pool's free-list budget, so counted here, as `memos_kb`).
+    /// windows and the held memos (Ruling F30: outside the pool's free-list
+    /// budget, so counted here, as `memos_kb`). The window manager's Lua is
+    /// a process of its own, with a resident size of its own.
     /// `tests::real_client::a_held_memo_is_in_the_memory_report`.
     pub(crate) fn memory(&self) -> Memory {
         Memory {
             windows: self.panes.len(),
-            lua_kb: self
-                .scripts
-                .as_ref()
-                .map_or(0, |scripts| scripts.used_memory() / 1024),
             memos_kb: self.memos.held_bytes() / 1024,
         }
     }
@@ -2575,8 +2586,8 @@ impl Solium {
     ///
     /// Enabled with `SOLIUM_MEMDIAG=1`. A leak hunt needs to know *which*
     /// number is growing: resident memory alone cannot tell a forgotten
-    /// decoration from a Lua heap that never shrinks from an allocator that
-    /// simply keeps what it has.
+    /// decoration from an allocator that simply keeps what it has. A Lua
+    /// heap that never shrinks is the window manager's, in its own process.
     ///
     /// **`decorations` is no longer among them, and not because it was
     /// redundant.** It counted `Decorations::frames`, and its whole value was
@@ -2619,7 +2630,6 @@ impl Solium {
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
             windows = memory.windows,
-            lua_kb = memory.lua_kb,
             memos_kb = memory.memos_kb,
             rss_kb,
             "MEMDIAG"

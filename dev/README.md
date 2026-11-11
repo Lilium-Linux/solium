@@ -1156,6 +1156,66 @@ Curves live in `crates/animation`, which depends on nothing so it keeps building
 for the browser. Add one there and it is available to scripts by name
 (`sol.animate{ easing = "spring" }`) and to the preview at once.
 
+## The window manager
+
+The window manager is a program of its own. In a session the compositor
+starts `solium-lua`, or the program `~/.config/solium/wm.toml` names, with a
+socket as its standard input, and the two speak the protocol in
+`crates/wm-protocol/wit/` ([docs/window-managers.md](../docs/window-managers.md)).
+
+- **`cargo build` before the command-line tests.** `crates/solium/tests/cli.rs`
+  runs the compositor as a process, which starts `target/debug/solium-lua`
+  and, for one test, `target/debug/examples/tiny_wm`. Only a build of the
+  whole workspace puts them there (`cargo build --workspace --all-targets`,
+  which the gate and CI run first); `cargo test -p solium` alone does not.
+- **The unit tests start no process.** They run the Lua window manager on a
+  thread, over a socket pair (`wm/link.rs`), so every test of the
+  configuration still crosses the protocol. `Hand` in the same file is a
+  window manager played by the test itself, a message at a time, for the
+  timing tests in `script/tests/waits.rs`; `Scripts::played` runs any other
+  one on a thread, as `script/tests/rust_wm.rs` runs the example.
+- **To try another window manager nested**, give the run a configuration
+  directory of its own with a `wm.toml` in it:
+
+  ```sh
+  mkdir -p /tmp/try/solium
+  echo 'command = ["'"$PWD"'/target/debug/examples/tiny_wm"]' > /tmp/try/solium/wm.toml
+  XDG_CONFIG_HOME=/tmp/try timeout -s TERM 20 ./target/debug/solium
+  ```
+
+- **How the window manager did** is one line at the end of every session's
+  log, and each time a window manager is replaced:
+
+  ```text
+  window manager: 1424 batches answered: half within 48 us, 99 in 100 within
+  320 us, the slowest 1.1 ms; 0 came after the compositor had gone on; most
+  were surface-action 1379 (50 us each), save-stores 12 (216 us each), …
+  ```
+
+  Each time is from the batch being sent to its answer being read, so it
+  includes the window manager's own work, and each is rounded up to the top
+  of its bucket, a fifth at most. An event that is most of the batches and
+  is told every frame is a round trip every frame:
+  `RUST_LOG=info,solium::state::hosted=debug` logs each scene's action with
+  the scene that sent it, and `solium::wm=debug` each answer the compositor
+  did not wait for, with how long it took.
+- The log line `window manager started pid=… program=…` names the process,
+  which is how a script ends one to watch it being started again: by that
+  PID, never by name.
+- **A new event, command or type** goes in the WIT with its comment, **at the
+  end** of its record, variant or enum. A field's place is its number on the
+  wire, and a window manager built before must still read what it is sent:
+  nothing is put in the middle, moved or taken out. The Rust types are
+  generated from the WIT when `solium-wm-protocol` is built, the protocol
+  reference page from its comments, and `proto/solium_wm.proto` beside them.
+  That file is checked in, and the test
+  `the_proto_file_is_the_one_the_wit_generates` fails until it is the
+  generated one: run it with `SOLIUM_WRITE_PROTO=1`, and read the diff. A
+  number that changed there is a break.
+- **The encoding is held to protobuf's own.** `crates/wm-protocol/proto/golden/`
+  has messages in protobuf's text format and the bytes `protoc` makes of
+  them; `make.sh` there makes them again when a message they hold changes.
+
 ## Running a shell inside Solium
 
 A shell is hosted in the compositor's own QML engine, as configuration — see

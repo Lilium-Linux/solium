@@ -4,7 +4,8 @@
 #
 # Builds a release binary in the build container, copies it, the
 # solium-session script the login screen starts, the solium-auth helper the
-# lock screen checks a password with (#281), and the shipped QML and Lua into a
+# lock screen checks a password with (#281), the solium-lua window manager it
+# starts, and the shipped QML and Lua into a
 # prefix (~/.local by default), and writes a session file for the display
 # manager. The systemd user units Solium starts and its portal choice (#146) go
 # into the user's configuration directory. It never uses sudo: the session file
@@ -33,14 +34,14 @@ usage: dev/install.sh [options]
 
   --prefix DIR        where to install (default: \$HOME/.local)
                         DIR/bin/{solium,solium-session},
-                        DIR/libexec/solium-auth,
+                        DIR/libexec/{solium-auth,solium-lua},
                         DIR/share/solium/{qml,lua,effects,solium.desktop,solium.pam}
                         and into \$XDG_CONFIG_HOME (default: \$HOME/.config):
                         systemd/user/solium-{session,autostart}.target
                         and xdg-desktop-portal/lilium-portals.conf
                       /usr and /usr/local are system prefixes, all of it
                         under DIR but the PAM file: bin/{solium,solium-session},
-                        libexec/solium-auth, share/solium/{qml,lua,effects},
+                        libexec/{solium-auth,solium-lua}, share/solium/{qml,lua,effects},
                         share/wayland-sessions/solium.desktop,
                         lib/systemd/user/solium-{session,autostart}.target
                         and share/xdg-desktop-portal/lilium-portals.conf,
@@ -158,6 +159,8 @@ wrapper="$dest/bin/solium-session"
 # What the lock screen checks a password with (#281): started by solium, from
 # <prefix>/libexec beside <prefix>/bin (auth.rs's `candidates`).
 helper="$dest/libexec/solium-auth"
+# The window manager it starts, found the same way (assets.rs's `helpers`).
+wm="$dest/libexec/solium-lua"
 share="$dest/share/solium"
 session_file="$session_dir/solium.desktop"
 # PAM's service file, which PAM reads only from /etc/pam.d (or the
@@ -235,6 +238,7 @@ esac
 # checkout's: the check after installing asserts it.
 built="$root/target/install/release/solium"
 built_helper="$root/target/install/release/solium-auth"
+built_wm="$root/target/install/release/solium-lua"
 
 # Processes of this user running the binary at $1. /proc/<pid>/exe is how
 # fuser answers the same question; a binary replaced while it runs reads
@@ -280,7 +284,7 @@ if [[ $uninstall -eq 1 ]]; then
         rm -f "$manifest"
         removed+=("$manifest")
     fi
-    for path in "$bin" "$wrapper" "$helper"; do
+    for path in "$bin" "$wrapper" "$helper" "$wm"; do
         if [[ -e "$path" ]]; then
             rm -f "$path"
             removed+=("$path")
@@ -349,6 +353,7 @@ if [[ $build -eq 1 ]]; then
 fi
 [[ -x "$built" ]] || die "no release build at $built; run without --no-build"
 [[ -x "$built_helper" ]] || die "no release build at $built_helper; run without --no-build"
+[[ -x "$built_wm" ]] || die "no release build at $built_wm; run without --no-build"
 
 # Again, now that the build is over: a session may have started from the old
 # install while it ran. dev/install-check.sh starts one from inside a stand-in
@@ -361,6 +366,7 @@ mkdir -p "$dest/bin" "$dest/libexec" "$share" 2>/dev/null \
 install -m755 "$built" "$bin"
 install -m755 "$source_wrapper" "$wrapper"
 install -m755 "$built_helper" "$helper"
+install -m755 "$built_wm" "$wm"
 # Copied, not linked, so a later `git checkout` cannot change a running
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
@@ -506,6 +512,13 @@ $expected. $not_checked"
         die "the installed binary found its solium-auth at '${found_helper:-nowhere}', not \
 $helper. $not_checked"
     fi
+    # And the window manager it starts, found the same way.
+    found_wm="$(sed -n 's/^  solium-lua  \(\/.*\)$/\1/p' "$check_log" | head -1)"
+    if [[ -z "$found_wm" || "$(realpath -m "$found_wm")" != "$(realpath "$wm")" ]]; then
+        cat "$check_log" >&2
+        die "the installed binary found its solium-lua at '${found_wm:-nowhere}', not \
+$wm. $not_checked"
+    fi
     checked="$(grep -m1 '^  ok:' "$check_log" || true)"
     # What the portals lack, which --check says and does not fail on (#378):
     # without it a program asking to share the screen finds none, and says
@@ -598,6 +611,7 @@ Installed Solium into $dest
   binary        $bin
   started by    $wrapper
   lock helper   $helper
+  window manager $wm
   PAM service   $staged_pam
   QML, Lua and effects   $share/qml, $share/lua, $share/effects
   default configuration  $share/default-config${config_note_user:+

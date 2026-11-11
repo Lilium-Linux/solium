@@ -106,6 +106,24 @@ pub(crate) fn close_on_exec_above_stdio() -> std::io::Result<()> {
     }
 }
 
+/// Whether a program can be found on `PATH`, for `solium --check`'s
+/// account of what the session can start.
+///
+/// A plain lookup rather than a spawn: asking costs nothing, and finding out by
+/// running it means finding out *after* something has already failed. A desktop
+/// cannot assume any particular terminal or editor is installed, and a script
+/// that picks the first one that *is* beats one that silently does nothing on a
+/// machine set up differently from the author's.
+pub(crate) fn which(program: &str) -> bool {
+    if program.contains('/') {
+        return std::path::Path::new(program).is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     //! The tests that start a compositor run a child process: this test binary

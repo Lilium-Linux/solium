@@ -1,7 +1,7 @@
 //! Effect rules (\[16\] §1): which effect goes in which slot of which part,
 //! for which windows or surfaces. Pure: nothing here draws or binds.
 //!
-//! A rule is read whole from a [`Tree`], its list part and its named keys
+//! A rule is read whole from a [`Doc`], its list part and its named keys
 //! together, and a broken one is refused with its number, its key and, for a
 //! part or a slot, what was probably meant (Ruling 13).
 //! `tests::an_unknown_part_is_refused_with_its_rule_number_and_a_suggestion`.
@@ -16,7 +16,7 @@
 use solium_effects::spec::Value;
 use solium_effects::stage::Reads;
 
-use crate::effect::tree::Tree;
+use crate::script::{Doc, DocTable};
 
 /// A string match: exact, `*`, or a prefix ending in `*`; no Lua patterns,
 /// which could not be evaluated per frame in Rust (Ruling 13).
@@ -423,7 +423,7 @@ impl Part {
 /// Parse a list of rules. Every error is collected, each with its rule number
 /// (counting from 1, as Lua does) and its key.
 /// `tests::a_broken_rule_is_refused_at_its_key`.
-pub(crate) fn parse(rules: &Tree) -> Result<Vec<Rule>, Vec<RuleError>> {
+pub(crate) fn parse(rules: &Doc) -> Result<Vec<Rule>, Vec<RuleError>> {
     let mut read = Vec::new();
     let mut errors = Vec::new();
     for (index, each) in rules.list().iter().enumerate() {
@@ -447,8 +447,8 @@ type Refused = (&'static str, String);
 
 /// One rule, or the key it is refused at and why.
 /// `tests::a_broken_rule_is_refused_at_its_key`.
-fn rule(each: &Tree) -> Result<Rule, Refused> {
-    let Tree::Table { list, fields } = each else {
+fn rule(each: &Doc) -> Result<Rule, Refused> {
+    let Doc::Table(DocTable { list, fields, .. }) = each else {
         return Err((
             "rule",
             "a rule is a table: { match = …, part = …, slot = …, effect = … }".to_owned(),
@@ -482,12 +482,12 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
     let needs = |key: &'static str, what: &str| (key, format!("a rule needs `{key}`: {what}"));
     let part = match each.field("part") {
         None => return Err(needs("part", PART_LIST)),
-        Some(Tree::Text(text)) => Part::parse(text).map_err(|message| ("part", message))?,
+        Some(Doc::Text(text)) => Part::parse(text).map_err(|message| ("part", message))?,
         Some(_) => return Err(("part", format!("`part` is a word: {PART_LIST}"))),
     };
     let slot = match each.field("slot") {
         None => return Err(needs("slot", "behind, front or replace")),
-        Some(Tree::Text(text)) => match text.as_str() {
+        Some(Doc::Text(text)) => match text.as_str() {
             "behind" => Slot::Behind,
             "front" => Slot::Front,
             "replace" => Slot::Replace,
@@ -533,10 +533,10 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
     };
     let mask = match each.field("mask") {
         None => MaskKind::Shape,
-        Some(Tree::Text(text)) if text == "shape" => MaskKind::Shape,
-        Some(Tree::Text(text)) if text == "alpha" => MaskKind::Alpha,
-        Some(Tree::Text(text)) if text == "region" => MaskKind::Region,
-        Some(Tree::Text(text)) => {
+        Some(Doc::Text(text)) if text == "shape" => MaskKind::Shape,
+        Some(Doc::Text(text)) if text == "alpha" => MaskKind::Alpha,
+        Some(Doc::Text(text)) if text == "region" => MaskKind::Region,
+        Some(Doc::Text(text)) => {
             return Err((
                 "mask",
                 format!(
@@ -563,14 +563,14 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
     // configurable). `tests::rules_read_memo_and_cut`.
     let memo = match each.field("memo") {
         None => true,
-        Some(Tree::Bool(memo)) => *memo,
+        Some(Doc::Bool(memo)) => *memo,
         Some(_) => return Err(("memo", "`memo` is true or false".to_owned())),
     };
     let cut = match each.field("cut") {
         None => CutChoice::Below,
-        Some(Tree::Text(text)) if text == "below" => CutChoice::Below,
-        Some(Tree::Text(text)) if text == "background" => CutChoice::Background,
-        Some(Tree::Text(text)) => {
+        Some(Doc::Text(text)) if text == "below" => CutChoice::Below,
+        Some(Doc::Text(text)) if text == "background" => CutChoice::Background,
+        Some(Doc::Text(text)) => {
             return Err((
                 "cut",
                 format!(
@@ -602,11 +602,11 @@ fn rule(each: &Tree) -> Result<Rule, Refused> {
 
 /// `fade`: `{ duration = <ms>, easing = "<curve>" }`, the curve `outCubic`
 /// when not given; `false` is none. `tests::rules_read_fade`.
-fn read_fade(fade: &Tree) -> Result<Option<Fade>, String> {
+fn read_fade(fade: &Doc) -> Result<Option<Fade>, String> {
     const SHAPE: &str = "`fade` is { duration = <ms>, easing = \"<curve>\" }, or false";
     let fields = match fade {
-        Tree::Bool(false) => return Ok(None),
-        Tree::Table { list, fields } if list.is_empty() => fields,
+        Doc::Bool(false) => return Ok(None),
+        Doc::Table(DocTable { list, fields, .. }) if list.is_empty() => fields,
         _ => return Err(SHAPE.to_owned()),
     };
     if let Some(key) = fields.keys().find(|key| !FADE_KEYS.contains(&key.as_str())) {
@@ -617,9 +617,9 @@ fn read_fade(fade: &Tree) -> Result<Option<Fade>, String> {
     }
     let ms = match fields.get("duration") {
         None => return Err(format!("`fade` needs `duration`: {SHAPE}")),
-        Some(Tree::Number(number)) => *number,
+        Some(Doc::Num(number)) => *number,
         #[expect(clippy::cast_precision_loss, reason = "milliseconds, far below 2^52")]
-        Some(Tree::Int(int)) => *int as f64,
+        Some(Doc::Int(int)) => *int as f64,
         Some(_) => f64::NAN,
     };
     if !(0.0..=FADE_MAX_MS).contains(&ms) {
@@ -629,7 +629,7 @@ fn read_fade(fade: &Tree) -> Result<Option<Fade>, String> {
     }
     let curve = match fields.get("easing") {
         None => solium_animation::Curve::OutCubic,
-        Some(Tree::Text(name)) => solium_animation::Curve::from_name(name).ok_or_else(|| {
+        Some(Doc::Text(name)) => solium_animation::Curve::from_name(name).ok_or_else(|| {
             let names: Vec<&str> = solium_animation::Curve::all()
                 .iter()
                 .map(|(name, _)| *name)
@@ -650,11 +650,11 @@ fn read_fade(fade: &Tree) -> Result<Option<Fade>, String> {
 
 /// `match`: `"*"`, or a table of the keys the part's family has.
 /// `tests::every_match_key_is_read_for_its_family`.
-fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
+fn read_match(matched: &Doc, part: &Part) -> Result<Match, String> {
     let fields = match matched {
-        Tree::Text(text) if text == "*" => return Ok(Match::default()),
-        Tree::Table { list, fields } if list.is_empty() => fields,
-        Tree::Table { .. } => {
+        Doc::Text(text) if text == "*" => return Ok(Match::default()),
+        Doc::Table(DocTable { list, fields, .. }) if list.is_empty() => fields,
+        Doc::Table(_) => {
             return Err("`match` takes named keys, such as { app_id = \"mpv\" }".to_owned());
         }
         _ => return Err("`match` is \"*\" or a table such as { app_id = \"mpv\" }".to_owned()),
@@ -681,7 +681,7 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
         }
         if let "focused" | "fullscreen" | "maximized" | "client_side" | "blur_region" = key.as_str()
         {
-            let Tree::Bool(yes) = value else {
+            let Doc::Bool(yes) = value else {
                 return Err(format!("`{key}` is true or false"));
             };
             match key.as_str() {
@@ -697,7 +697,7 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
             read.values = read_values(value)?;
             continue;
         }
-        let Tree::Text(text) = value else {
+        let Doc::Text(text) = value else {
             return Err(format!(
                 "`{key}` is a word: exact, \"*\", or a prefix ending in `*`"
             ));
@@ -723,9 +723,9 @@ fn read_match(matched: &Tree, part: &Part) -> Result<Match, String> {
 /// `values`: a table of named keys, each a boolean, a number or a word,
 /// which the window's own values must have.
 /// `tests::a_values_match_reads_its_keys_and_refuses_what_it_cannot_compare`.
-fn read_values(value: &Tree) -> Result<Vec<(String, crate::json::Json)>, String> {
+fn read_values(value: &Doc) -> Result<Vec<(String, crate::json::Json)>, String> {
     const SHAPE: &str = "`values` is a table of named keys, such as { snapped = true }";
-    let Tree::Table { list, fields } = value else {
+    let Doc::Table(DocTable { list, fields, .. }) = value else {
         return Err(SHAPE.to_owned());
     };
     if !list.is_empty() {
@@ -735,15 +735,15 @@ fn read_values(value: &Tree) -> Result<Vec<(String, crate::json::Json)>, String>
         .iter()
         .map(|(key, value)| {
             let value = match value {
-                Tree::Bool(yes) => crate::json::Json::Bool(*yes),
+                Doc::Bool(yes) => crate::json::Json::Bool(*yes),
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "a value handed from Lua, which is an f64 there too"
                 )]
-                Tree::Int(int) => crate::json::Json::Number(*int as f64),
-                Tree::Number(number) => crate::json::Json::Number(*number),
-                Tree::Text(text) => crate::json::Json::Text(text.clone()),
-                Tree::Table { .. } => {
+                Doc::Int(int) => crate::json::Json::Number(*int as f64),
+                Doc::Num(number) => crate::json::Json::Number(*number),
+                Doc::Text(text) => crate::json::Json::Text(text.clone()),
+                Doc::Table(_) | Doc::Nil | Doc::Other(_) => {
                     return Err(format!(
                         "`values.{key}` is true or false, a number or a word"
                     ));
@@ -756,20 +756,20 @@ fn read_values(value: &Tree) -> Result<Vec<(String, crate::json::Json)>, String>
 
 /// `effect`: `false`, a name, a link, or a chain of links; and the `source`
 /// its first link gave. `tests::a_list_of_tables_is_a_chain_in_order`.
-fn read_fill(effect: &Tree) -> Result<(Fill, Option<Source>), Refused> {
+fn read_fill(effect: &Doc) -> Result<(Fill, Option<Source>), Refused> {
     let refused = |message: &str| ("effect", message.to_owned());
     match effect {
-        Tree::Bool(false) => Ok((Fill::Off, None)),
-        Tree::Text(_) => {
+        Doc::Bool(false) => Ok((Fill::Off, None)),
+        Doc::Text(_) => {
             let (link, _) = read_link(effect, true)?;
             Ok((Fill::Chain(vec![link]), None))
         }
-        Tree::Table { list, fields } => match list.first() {
-            Some(Tree::Text(_)) => {
+        Doc::Table(DocTable { list, fields, .. }) => match list.first() {
+            Some(Doc::Text(_)) => {
                 let (link, source) = read_link(effect, true)?;
                 Ok((Fill::Chain(vec![link]), source))
             }
-            Some(Tree::Table { .. }) => {
+            Some(Doc::Table(_)) => {
                 if !fields.is_empty() {
                     return Err(refused(
                         "a chain's params go in its links: { { \"blur\", passes = 3 }, { \"tint\" } }",
@@ -789,7 +789,9 @@ fn read_fill(effect: &Tree) -> Result<(Fill, Option<Source>), Refused> {
             )),
             _ => Err(refused(NO_EFFECT)),
         },
-        Tree::Bool(true) | Tree::Number(_) | Tree::Int(_) => Err(refused(NO_EFFECT)),
+        Doc::Bool(true) | Doc::Num(_) | Doc::Int(_) | Doc::Nil | Doc::Other(_) => {
+            Err(refused(NO_EFFECT))
+        }
     }
 }
 
@@ -797,13 +799,13 @@ fn read_fill(effect: &Tree) -> Result<(Fill, Option<Source>), Refused> {
 /// are its params, its `reach` and `bleed`, and (in a first link) `source`.
 /// `tests::a_mixed_table_keeps_its_params_beside_the_name`,
 /// `tests::a_links_reach_and_bleed_override_the_files`.
-fn read_link(link: &Tree, first: bool) -> Result<(Link, Option<Source>), Refused> {
+fn read_link(link: &Doc, first: bool) -> Result<(Link, Option<Source>), Refused> {
     let refused = |message: String| ("effect", message);
     let (name, fields) = match link {
-        Tree::Text(name) => (name, None),
-        Tree::Table { list, fields } => match list.as_slice() {
-            [Tree::Text(name)] => (name, Some(fields)),
-            [Tree::Text(_), ..] => {
+        Doc::Text(name) => (name, None),
+        Doc::Table(DocTable { list, fields, .. }) => match list.as_slice() {
+            [Doc::Text(name)] => (name, Some(fields)),
+            [Doc::Text(_), ..] => {
                 return Err(refused(
                     "a link is one effect's name and its params; a chain is a list of links: { { \"blur\" }, { \"tint\" } }"
                         .to_owned(),
@@ -830,9 +832,9 @@ fn read_link(link: &Tree, first: bool) -> Result<(Link, Option<Source>), Refused
             "source" => source = Some(read_source(value)?),
             "reach" | "bleed" => {
                 let pixels = match value {
-                    Tree::Number(number) => Some(*number),
+                    Doc::Num(number) => Some(*number),
                     #[expect(clippy::cast_precision_loss, reason = "a number of pixels")]
-                    Tree::Int(int) => Some(*int as f64),
+                    Doc::Int(int) => Some(*int as f64),
                     _ => None,
                 };
                 let Some(pixels) = pixels.filter(|pixels| *pixels >= 0.0) else {
@@ -844,7 +846,7 @@ fn read_link(link: &Tree, first: bool) -> Result<(Link, Option<Source>), Refused
                     read.extents.bleed = Some(pixels);
                 }
             }
-            _ => match value.value() {
+            _ => match crate::effect::param_value(value) {
                 Some(value) => read.params.push((key.clone(), value)),
                 None => {
                     return Err(refused(format!(
@@ -859,9 +861,9 @@ fn read_link(link: &Tree, first: bool) -> Result<(Link, Option<Source>), Refused
 
 /// `source`: what the chain's first input is rebound to.
 /// `tests::the_rest_of_a_rule_is_read_as_written`.
-fn read_source(source: &Tree) -> Result<Source, Refused> {
+fn read_source(source: &Doc) -> Result<Source, Refused> {
     match source {
-        Tree::Text(text) => match text.as_str() {
+        Doc::Text(text) => match text.as_str() {
             "xray" => Ok(Source::Xray),
             "live" => Ok(Source::Live),
             "auto" => Ok(Source::Auto),
@@ -1205,13 +1207,15 @@ mod tests {
     use solium_effects::spec::Value;
 
     use super::{Fill, Glob, Link, MaskKind, Part, Slot, Source, parse};
-    use crate::effect::tree::Tree;
+    use crate::script::Doc;
 
     /// Rules from Lua source, read the way `sol.effects` reads them.
-    fn rules(lua: &str) -> Tree {
+    fn rules(lua: &str) -> Doc {
         let state = mlua::Lua::new();
         let value: mlua::Value = state.load(lua).eval().expect("the test's Lua");
-        Tree::from_lua(&value).expect("readable").expect("a value")
+        crate::effect::lua_doc::doc_of_plain(&value)
+            .expect("readable")
+            .expect("a value")
     }
 
     /// **`mask = "region"` and `blur_region` are read** (#78): for a

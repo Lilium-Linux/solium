@@ -809,6 +809,19 @@ impl XwmHandler for Solium {
     /// wrong place and nothing in the log at all.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
         self.refresh_inhibitors();
+        // An X11 window's title and its class are properties too: told as
+        // an xdg window's are, to a window manager that listens.
+        if matches!(property, WmWindowProperty::Title | WmWindowProperty::Class) {
+            let element = self
+                .space
+                .elements()
+                .find(|element| element.x11_surface() == Some(&window))
+                .cloned();
+            if let Some(element) = element {
+                self.tell_renamed(&element);
+            }
+            return;
+        }
         // A third, since #115: `WM_NORMAL_HINTS` is where an X11 client says
         // how small and how large it can be, and it says so with a property
         // rather than a commit. Told to the layouts as an xdg client's commit

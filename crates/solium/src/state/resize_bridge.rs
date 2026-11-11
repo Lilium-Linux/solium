@@ -373,12 +373,37 @@ impl Solium {
                 crate::resizing::Settle::Done => {}
                 crate::resizing::Settle::Adopt(taken) => {
                     self.land_on(&held.window, held.pane, &held.hold, taken);
+                    // And the window manager is told, once this pass's
+                    // holds are settled: the size the window has now is
+                    // not the one it gave it.
+                    if let Some(outer) = self.pane_outer_of(held.pane) {
+                        self.took_sizes
+                            .push((held.pane.get(), (outer.size.w, outer.size.h)));
+                    }
                 }
             }
         }
         kept.append(&mut self.answering);
         self.answering = kept;
         waiting
+    }
+
+    /// Stop holding a pane until its client answers: its layout has let
+    /// it go, and a window nothing places is the size its client drew.
+    pub(super) fn let_go_of_answer(&mut self, pane: crate::pane::PaneId) {
+        self.answering.retain(|held| held.pane != pane);
+    }
+
+    /// A window has committed, which may be the answer a hold in
+    /// [`Self::answering`] is waiting for: settled now rather than at the
+    /// end of the pass, so that what its client answered is the window's
+    /// size from the commit on.
+    /// `a_client_that_rounds_its_size_does_not_move_the_seam`.
+    pub(crate) fn settle_answer_of(&mut self, window: &Window) {
+        if self.answering.iter().any(|held| &held.window == window) {
+            let now = self.clock.now();
+            self.settle_answering(now);
+        }
     }
 
     /// The hold governing this pane, whichever path put it there.

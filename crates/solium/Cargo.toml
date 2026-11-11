@@ -20,9 +20,13 @@ solium-animation = { path = "../animation" }
 # arm of an enum in `present.rs`. See crates/effects.
 solium-effects = { path = "../effects" }
 
+solium-json = { path = "../json", features = ["lua"] }
 # The window arrangements, as a crate so the same code that arranges real
 # windows arranges the boxes in the preview. See crates/layout.
 solium-layout = { path = "../layout" }
+# The window manager protocol: what the compositor says to whichever window
+# manager it started, and hears from it.
+solium-wm-protocol = { path = "../wm-protocol" }
 
 # The lock screen's password check (#281): the protocol the `solium-auth`
 # helper speaks and the zeroised `Secret`, both sides of which live there so
@@ -60,6 +64,14 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
+
+# `wm.toml`, which says which window manager is started (`src/wm/chosen.rs`):
+# read before any window manager runs, so it cannot be the window manager's
+# own configuration, and TOML because that is what a small file of this kind
+# is expected to be. Only the parser: no serde, no writer. Already in the
+# lockfile, with everything it pulls in, through `pipewire`'s build scripts;
+# MIT OR Apache-2.0.
+toml = { version = "1.2", default-features = false, features = ["std", "parse"] }
 
 # XCursor themes: finding one on the icon search path, following what it
 # inherits, and parsing the files. Smithay ships no loader of its own, so this
@@ -128,6 +140,11 @@ cc = "1"
 pkg-config = "0.3"
 
 [dev-dependencies]
+# The Lua window manager, which a session runs as a program of its own
+# (`solium-lua`). The tests run it on a thread instead, over a socket pair,
+# so each of them crosses the protocol without starting a process: the only
+# place this crate links it.
+solium-lua = { path = "../solium-lua" }
 # A real Wayland client, for `state::tests::scale_resend`. `Window` only
 # wraps a real `ToplevelSurface`, and nothing fabricates one except a client
 # actually asking for one over the wire -- `wl-probe` (see its own

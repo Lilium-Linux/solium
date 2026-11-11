@@ -1,0 +1,93 @@
+# Commands of every shape: records in records, a variant's cases with and
+# without a value, lists packed and not, values present and zero, a negative
+# number, bytes, and text that is not ASCII.
+submit {
+  items {
+    place {
+      id: 7
+      rect { x: 1.5 y: -2 w: 800 h: 600 }
+      motion { duration_ms: 180 easing { out_cubic {} } }
+      tile: true
+      inside { w: 10 h: 10 }
+    }
+  }
+  items {
+    present {
+      id: 7
+      opacity: 0
+      matrix { items: 1 items: 0 items: 0 items: 1 }
+      z: 0.5
+      pivot { x: 0.5 y: 0.5 }
+      motion { easing { bezier { x1: 0.25 y1: 0.1 x2: 0.25 y2: 1 } } }
+      channels { name: "x" motion { duration_ms: 90 easing { linear {} } } }
+    }
+  }
+  items {
+    focus {
+      id: 7
+      cause: FOCUS_CAUSE_CLICK
+      warp {
+        to { window { id: 7 x: 0.5 y: 0.5 } }
+        interrupt: INTERRUPT_PICTURE
+      }
+    }
+  }
+  items { touch { slot: -1 action { resize { id: 7 edges: "top_left" } } } }
+  items {
+    press {
+      id: 7
+      press { keys { items: "ctrl" items: "c" } }
+      cause: FOCUS_CAUSE_SCRIPT
+    }
+  }
+  items { decoration {} }
+  items { decoration { value: "" } }
+  items { lock_peek { value: 2.5 } }
+  items { keep_above { id: 7 on: false } }
+  items { spawn { items: "foot" items: "--title=π" } }
+  items { file_write { id: 3 path: "/tmp/x" data: "\000\001\377" report: true } }
+  items {
+    run {
+      id: 1
+      argv: "ls"
+      env { name: "A" value: "" }
+      env { name: "B" }
+      timeout_ms: 1000
+      max_output: 65536
+      lines: true
+    }
+  }
+  items {
+    surface {
+      name: "bar"
+      scene: "Bar.qml"
+      layer: LAYER_TOP
+      on { rect { x: -5 w: 100 h: 30 } }
+      properties: "{}"
+      reserve { top: 30 }
+      outside_click {
+        default: OUTSIDE_PASS
+        named { name: "menu" outside: OUTSIDE_SWALLOW }
+      }
+      keyboard: KEY_POLICY_NO_BINDINGS
+    }
+  }
+  items {
+    configure {
+      section: "idle"
+      settings {
+        table {
+          list: 0
+          list: 3
+          fields { name: "after" node: 1 }
+          numbered { key: -7 node: 2 }
+        }
+      }
+      settings { integer: -3 }
+      settings { nil {} }
+      settings { number: 0.5 }
+      settings { boolean: false }
+      settings { text: "" }
+    }
+  }
+}

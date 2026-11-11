@@ -39,7 +39,7 @@
 //! a seam stops at the floors on either side of it. Each of those sentences is
 //! a test in `floor_tests`.
 
-use crate::{Floors, Minimum, Rect, Settings};
+use crate::{Floors, Minimum, Rect, Settings, plain::Plain};
 
 /// How far under the minimum a tile may come out and still count as at it.
 ///
@@ -315,6 +315,106 @@ impl Tiling {
     #[must_use]
     pub fn contains(&self, id: u64) -> bool {
         self.leaf(id).is_some()
+    }
+
+    /// The tree as plain data: where its root is, its nodes in the places
+    /// they hold, and each window's floor. [`Self::from_plain`] reads it
+    /// back as the same tree, split for split.
+    #[must_use]
+    pub fn to_plain(&self) -> Plain {
+        Plain::List(vec![
+            self.root.map_or(Plain::Int(-1), Plain::place),
+            Plain::List(
+                self.nodes
+                    .iter()
+                    .map(|node| {
+                        Plain::List(match node {
+                            None => Vec::new(),
+                            Some(Node::Window { id }) => vec![Plain::window(*id)],
+                            Some(Node::Split {
+                                axis,
+                                ratio,
+                                children: [first, second],
+                            }) => vec![
+                                Plain::Int(match axis {
+                                    Axis::Vertical => 0,
+                                    Axis::Horizontal => 1,
+                                }),
+                                Plain::Num(*ratio),
+                                Plain::place(*first),
+                                Plain::place(*second),
+                            ],
+                        })
+                    })
+                    .collect(),
+            ),
+            crate::plain::of_floors(&self.floors),
+        ])
+    }
+
+    /// The tree [`Self::to_plain`] made `plain` from, or `None` when it is
+    /// not a tree: a branch into a place that holds nothing, a node reached
+    /// twice, a node nothing reaches, a ratio that is not a number.
+    #[must_use]
+    pub fn from_plain(plain: &Plain) -> Option<Self> {
+        let [root, nodes, floors] = plain.as_list()? else {
+            return None;
+        };
+        let nodes = nodes
+            .as_list()?
+            .iter()
+            .map(|node| {
+                Some(match node.as_list()? {
+                    [] => None,
+                    [id] => Some(Node::Window {
+                        id: id.as_window()?,
+                    }),
+                    [axis, ratio, first, second] => Some(Node::Split {
+                        axis: match axis.as_int()? {
+                            0 => Axis::Vertical,
+                            1 => Axis::Horizontal,
+                            _ => return None,
+                        },
+                        ratio: ratio.as_num()?,
+                        children: [first.as_place()?, second.as_place()?],
+                    }),
+                    _ => return None,
+                })
+            })
+            .collect::<Option<Vec<Option<Node>>>>()?;
+        let root = match root.as_int()? {
+            -1 => None,
+            _ => Some(root.as_place()?),
+        };
+        let tree = Self {
+            nodes,
+            root,
+            floors: crate::plain::floors(floors)?,
+        };
+        tree.sound().then_some(tree)
+    }
+
+    /// Whether this is a tree: every node the root leads to is there and is
+    /// led to once, and no node is left that nothing leads to.
+    fn sound(&self) -> bool {
+        let mut reached = vec![false; self.nodes.len()];
+        let mut ahead: Vec<usize> = self.root.into_iter().collect();
+        while let Some(at) = ahead.pop() {
+            let (Some(Some(node)), Some(reached)) = (self.nodes.get(at), reached.get_mut(at))
+            else {
+                return false;
+            };
+            if std::mem::replace(reached, true) {
+                return false;
+            }
+            if let Node::Split { children, .. } = node {
+                ahead.extend(children);
+            }
+        }
+        self.nodes
+            .iter()
+            .zip(reached)
+            .all(|(node, reached)| node.is_none() || reached)
     }
 
     /// Every window in the tree, in insertion-independent tree order.

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::effect::tree::Tree;
+use crate::script::{Doc, DocTable};
 
 /// `startup.first_frame`: whether the first frame is held, the longest it
 /// is (spec §8.3's cap, 2 s by default), and whether a reload arms the
@@ -37,15 +37,15 @@ const MAX_MS: i64 = 10_000;
 /// The keys `startup.first_frame` takes.
 const KEYS: [&str; 3] = ["hold", "max_ms", "on_reload"];
 
-/// `startup.first_frame`, read and checked through `Tree`'s own shape: each
+/// `startup.first_frame`, read and checked through `Doc`'s own shape: each
 /// key refused by name outside its type or bounds, a whole `max_ms` Lua
 /// holds as a float (`1e3`) read, and an unknown key named with the nearest
 /// known one.
 /// `tests::startup_first_frame_is_read_and_checked`.
-pub(crate) fn parse(tree: &Tree) -> Result<FirstFrame, String> {
+pub(crate) fn parse(tree: &Doc) -> Result<FirstFrame, String> {
     let shape =
         || "`startup.first_frame` is a table: { hold = true, max_ms = 2000, on_reload = false }";
-    let Tree::Table { list, fields } = tree else {
+    let Doc::Table(DocTable { list, fields, .. }) = tree else {
         return Err(shape().to_owned());
     };
     if !list.is_empty() {
@@ -54,9 +54,9 @@ pub(crate) fn parse(tree: &Tree) -> Result<FirstFrame, String> {
     let mut config = FirstFrame::default();
     for (key, value) in fields {
         match (key.as_str(), value) {
-            ("hold", Tree::Bool(hold)) => config.hold = *hold,
-            ("on_reload", Tree::Bool(on)) => config.on_reload = *on,
-            ("max_ms", Tree::Int(ms)) if (0..=MAX_MS).contains(ms) => {
+            ("hold", Doc::Bool(hold)) => config.hold = *hold,
+            ("on_reload", Doc::Bool(on)) => config.on_reload = *on,
+            ("max_ms", Doc::Int(ms)) if (0..=MAX_MS).contains(ms) => {
                 config.max_ms = ms.unsigned_abs();
             }
             #[expect(
@@ -64,7 +64,7 @@ pub(crate) fn parse(tree: &Tree) -> Result<FirstFrame, String> {
                 clippy::cast_sign_loss,
                 reason = "whole and within 0 to 10000, checked first, so exact"
             )]
-            ("max_ms", Tree::Number(ms)) if ms.fract() == 0.0 && (0.0..=10_000.0).contains(ms) => {
+            ("max_ms", Doc::Num(ms)) if ms.fract() == 0.0 && (0.0..=10_000.0).contains(ms) => {
                 config.max_ms = *ms as u64;
             }
             ("max_ms", _) => {
@@ -92,38 +92,30 @@ pub(crate) fn parse(tree: &Tree) -> Result<FirstFrame, String> {
 /// number in it that is not finite kept, so `max_ms = 1/0` is refused
 /// rather than read as the default; any other key refused by name, with
 /// the nearest one. `script::tests::sol_startup_reaches_the_compositor`.
-pub(crate) fn startup(options: &mlua::Table) -> mlua::Result<Result<FirstFrame, String>> {
+pub(crate) fn startup(options: &Doc) -> Result<FirstFrame, String> {
     let mut read = Ok(FirstFrame::default());
-    for pair in options.pairs::<mlua::Value, mlua::Value>() {
-        let (key, value) = pair?;
-        let key = match key {
-            mlua::Value::String(key) => key.to_str()?.to_owned(),
-            _ => return Ok(Err("`startup` takes named keys: first_frame".to_owned())),
-        };
+    let Doc::Table(table) = options else {
+        return read;
+    };
+    if !table.list.is_empty() || !table.numbered.is_empty() {
+        return Err("`startup` takes named keys: first_frame".to_owned());
+    }
+    for (key, value) in &table.fields {
         if key != "first_frame" {
-            let meant = solium_effects::spec::nearest(&key, &["first_frame"])
+            let meant = solium_effects::spec::nearest(key, &["first_frame"])
                 .map(|meant| format!("; did you mean `{meant}`?"))
                 .unwrap_or_default();
-            return Ok(Err(format!(
-                "`{key}` is not a startup key: first_frame{meant}"
-            )));
+            return Err(format!("`{key}` is not a startup key: first_frame{meant}"));
         }
-        let mut tree = Tree::from_lua(&value)?;
-        if let (mlua::Value::Table(inner), Some(Tree::Table { fields, .. })) = (&value, &mut tree) {
-            for pair in inner.pairs::<mlua::Value, mlua::Value>() {
-                if let (mlua::Value::String(name), mlua::Value::Number(number)) = pair?
-                    && !number.is_finite()
-                {
-                    fields.insert(name.to_str()?.to_owned(), Tree::Number(number));
-                }
+        read = match value.plain() {
+            Some(mut tree) => {
+                tree.keep_non_finite_fields(value);
+                parse(&tree)
             }
-        }
-        read = match tree {
-            Some(tree) => parse(&tree),
-            None => parse(&Tree::Bool(false)),
+            None => parse(&Doc::Bool(false)),
         };
     }
-    Ok(read)
+    read
 }
 
 /// When the hold began, how many passes it has held, whether it is over for
@@ -375,7 +367,7 @@ mod tests {
     /// **`startup.first_frame` is read and checked.**
     #[test]
     fn startup_first_frame_is_read_and_checked() {
-        let tree = |lua: &str| crate::effect::tree::tests::tree(lua).expect("a table");
+        let tree = |lua: &str| crate::script::doc::tests::plain(lua).expect("a table");
         assert_eq!(
             super::parse(&tree("{ hold = false, max_ms = 500, on_reload = true }")),
             Ok(FirstFrame {

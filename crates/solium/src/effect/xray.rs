@@ -20,8 +20,8 @@ use std::time::Duration;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::output::Output;
 
-use crate::effect::tree::Tree;
 use crate::render::Stacked;
+use crate::script::{Doc, DocTable};
 use crate::scripted::Layer;
 use crate::stack::Band;
 use crate::state::Solium;
@@ -111,7 +111,7 @@ impl Default for XrayConfig {
 /// The keys `effects.xray` takes.
 const KEYS: [&str; 5] = ["layers", "scale", "keep_ms", "straddle", "warped"];
 
-/// `effects.xray`, read and checked through `Tree`'s own shape (a table's
+/// `effects.xray`, read and checked through `Doc`'s own shape (a table's
 /// named keys, a list of words): each key refused by name outside its words
 /// or bounds, a number that is not finite included (`settings::tree_of`
 /// keeps it), an integer scale read as a number, a whole `keep_ms` Lua holds
@@ -120,8 +120,8 @@ const KEYS: [&str; 5] = ["layers", "scale", "keep_ms", "straddle", "warped"];
 /// `tests::xray_layers_and_scale_are_read_and_checked`,
 /// `tests::xray_keep_straddle_and_warped_are_read_and_checked`,
 /// `tests::effects_xray_refuses_what_is_not_its_shape`.
-pub(crate) fn parse(tree: &Tree) -> Result<XrayConfig, String> {
-    let Tree::Table { list, fields } = tree else {
+pub(crate) fn parse(tree: &Doc) -> Result<XrayConfig, String> {
+    let Doc::Table(DocTable { list, fields, .. }) = tree else {
         return Err(
             "`effects.xray` is a table: { layers = { \"background\" }, scale = 1 }".to_owned(),
         );
@@ -138,12 +138,12 @@ pub(crate) fn parse(tree: &Tree) -> Result<XrayConfig, String> {
             "layers" => config.layers = layers(value)?,
             "scale" => {
                 let scale = match value {
-                    Tree::Number(number) => *number,
+                    Doc::Num(number) => *number,
                     #[expect(
                         clippy::cast_precision_loss,
                         reason = "a scale of 0.25 to 1, as Lua's integer 1"
                     )]
-                    Tree::Int(int) => *int as f64,
+                    Doc::Int(int) => *int as f64,
                     _ => return Err("`effects.xray.scale` is a number".to_owned()),
                 };
                 if !(0.25..=1.0).contains(&scale) {
@@ -153,13 +153,13 @@ pub(crate) fn parse(tree: &Tree) -> Result<XrayConfig, String> {
             }
             "keep_ms" => {
                 config.keep_ms = match value {
-                    Tree::Int(ms) => u64::try_from(*ms).ok().filter(|ms| *ms <= 60_000),
+                    Doc::Int(ms) => u64::try_from(*ms).ok().filter(|ms| *ms <= 60_000),
                     #[expect(
                         clippy::cast_possible_truncation,
                         clippy::cast_sign_loss,
                         reason = "whole and within 0 to 60000, checked first, so exact"
                     )]
-                    Tree::Number(ms) if ms.fract() == 0.0 && (0.0..=60_000.0).contains(ms) => {
+                    Doc::Num(ms) if ms.fract() == 0.0 && (0.0..=60_000.0).contains(ms) => {
                         Some(*ms as u64)
                     }
                     _ => None,
@@ -170,15 +170,15 @@ pub(crate) fn parse(tree: &Tree) -> Result<XrayConfig, String> {
             }
             "straddle" => {
                 config.straddle = match value {
-                    Tree::Text(word) if word == "each" => Straddle::Each,
-                    Tree::Text(word) if word == "own" => Straddle::Own,
+                    Doc::Text(word) if word == "each" => Straddle::Each,
+                    Doc::Text(word) if word == "own" => Straddle::Own,
                     _ => return Err("`effects.xray.straddle` is each or own".to_owned()),
                 };
             }
             "warped" => {
                 config.warped = match value {
-                    Tree::Text(word) if word == "rest" => Warped::Rest,
-                    Tree::Text(word) if word == "drawn" => Warped::Drawn,
+                    Doc::Text(word) if word == "rest" => Warped::Rest,
+                    Doc::Text(word) if word == "drawn" => Warped::Drawn,
                     _ => return Err("`effects.xray.warped` is rest or drawn".to_owned()),
                 };
             }
@@ -202,17 +202,17 @@ pub(crate) fn parse(tree: &Tree) -> Result<XrayConfig, String> {
 /// says it), and `"bottom"` alone would hand a window the wallpaper anyway
 /// and a part on `bottom` nothing.
 /// `tests::effects_xray_refuses_what_is_not_its_shape`.
-fn layers(value: &Tree) -> Result<Vec<XrayLayer>, String> {
+fn layers(value: &Doc) -> Result<Vec<XrayLayer>, String> {
     let list = match value {
-        Tree::Table { list, fields } if fields.is_empty() => list,
+        Doc::Table(DocTable { list, fields, .. }) if fields.is_empty() => list,
         _ => return Err("`effects.xray.layers` is a list of words".to_owned()),
     };
     let layers: Vec<XrayLayer> = list
         .iter()
         .map(|word| match word {
-            Tree::Text(word) if word == "background" => Ok(XrayLayer::Background),
-            Tree::Text(word) if word == "bottom" => Ok(XrayLayer::Bottom),
-            Tree::Text(other) => Err(format!(
+            Doc::Text(word) if word == "background" => Ok(XrayLayer::Background),
+            Doc::Text(word) if word == "bottom" => Ok(XrayLayer::Bottom),
+            Doc::Text(other) => Err(format!(
                 "`{other}` is not an xray layer: background or bottom"
             )),
             _ => Err("`effects.xray.layers` is a list of words".to_owned()),
@@ -549,12 +549,12 @@ mod tests {
         );
     }
 
-    fn tree(lua: &str) -> crate::effect::tree::Tree {
-        crate::effect::tree::tests::tree(lua).expect("a table")
+    fn tree(lua: &str) -> crate::script::Doc {
+        crate::script::doc::tests::plain(lua).expect("a table")
     }
 
     /// **`layers` and `scale` are read and checked by name**; the shipped
-    /// `scale = 1` is a Lua integer (`Tree::Int`) and reads as 1.
+    /// `scale = 1` is a Lua integer (`Doc::Int`) and reads as 1.
     #[test]
     fn xray_layers_and_scale_are_read_and_checked() {
         assert_eq!(
@@ -626,14 +626,17 @@ mod tests {
     /// nothing), and a misspelt key with the nearest.
     #[test]
     fn effects_xray_refuses_what_is_not_its_shape() {
-        use crate::effect::tree::Tree;
+        use crate::script::{Doc, DocTable};
         assert_eq!(
             parse(&tree("{ keep_ms = 1e4 }")).map(|config| config.keep_ms),
             Ok(10_000)
         );
-        let not_finite = |key: &str, number: f64| Tree::Table {
-            list: Vec::new(),
-            fields: [(key.to_owned(), Tree::Number(number))].into(),
+        let not_finite = |key: &str, number: f64| {
+            Doc::Table(DocTable {
+                list: Vec::new(),
+                fields: [(key.to_owned(), Doc::Num(number))].into(),
+                ..DocTable::default()
+            })
         };
         for (tree, says) in [
             (

@@ -331,6 +331,7 @@ impl Solium {
             .collect();
 
         Snapshot {
+            now: self.clock.now(),
             windows,
             monitors,
             apps: std::rc::Rc::clone(&self.apps),

@@ -1,0 +1,534 @@
+/// What crosses the socket: one `message` per frame.
+///
+/// The compositor sends a `batch` of what changed and what happened; the
+/// window manager answers it with an `answer` naming the same serial, each
+/// batch once, in the order they came. The compositor waits for an answer
+/// for one frame (the setting `wm.ask-ms`), and then goes on without it: a
+/// bound key is not typed into the window under it, a new window is placed
+/// plainly, a notification is shown. The answer is applied when it comes.
+/// While an answer is owed, no later batch is waited for at all. The window
+/// manager may also `submit` commands of its own whenever it likes.
+interface messages {
+    use types.{rect, point, size, window, monitor, keyboard, text-field, problem, touch-event, doc, kept, style};
+    use commands.{command, focus-cause, motion};
+
+    /// The first message, from the compositor: the protocol it speaks,
+    /// whether the session runs in debug mode (`solium --debug-mode`), where
+    /// a window manager may offer what only belongs in a development
+    /// session, and everything the window manager kept before it was
+    /// restarted.
+    record hello {
+        /// The protocol's version, as `major.minor.patch`. A window manager
+        /// built for another major version, or before 1.0 another minor
+        /// one, says `goodbye`.
+        version: string,
+        /// Whether the session runs in debug mode.
+        debug: bool,
+        /// What the window manager this one takes the place of kept, by
+        /// name, as its `keep` commands last said: nothing for the first
+        /// of a session.
+        keeps: list<kept>,
+    }
+
+    /// The window manager's reply to `hello`: the protocol it was built
+    /// for, and the commands that configure the desktop before its first
+    /// frame (settings, bindings, the events it listens to).
+    record hello-answer {
+        /// The protocol's version the window manager was built for.
+        version: string,
+        /// Applied before the first frame is drawn.
+        commands: list<command>,
+    }
+
+    /// A view of a session service: its name, and the document of its rows.
+    record service-view {
+        name: string,
+        document: doc,
+    }
+
+    /// What changed since the last batch. A window or monitor is sent whole
+    /// when any of it changed; the window manager keeps the latest of each.
+    variant change {
+        /// A window that is new, or one any field of which changed.
+        window(window),
+        /// A window that is no more, by its id.
+        window-gone(u64),
+        /// The windows, top to bottom, when their order changed.
+        stacking(list<u64>),
+        /// Every monitor, when one came, went or changed.
+        monitors(list<monitor>),
+        /// The part of the monitor the pointer is on that bars and docks
+        /// leave.
+        work-area(rect),
+        /// Where the pointer is.
+        cursor(point),
+        /// The keyboard: its layouts, the live one, the locks.
+        keyboard(keyboard),
+        /// The window holding the compositor's shortcuts, as a virtual
+        /// machine or a remote desktop does; none when the bindings have
+        /// them.
+        shortcuts-owner(option<u64>),
+        /// The text field that has the keyboard; none when none has.
+        text-field(option<text-field>),
+        /// Every problem there is now.
+        problems(list<problem>),
+        /// Whether the session is locked.
+        locked(bool),
+        /// A view of a session service, or of the installed applications:
+        /// `notifications`, `audio`, `tray`, `media` and `apps`, each a
+        /// document of the rows the service has.
+        service(service-view),
+    }
+
+
+    /// A line a run wrote: the run's id, and the line without its newline.
+    record run-line {
+        id: u64,
+        line: list<u8>,
+    }
+
+    /// A program's output, a line at a time, and how it ended.
+    variant run-heard {
+        /// A line it wrote to its standard output: the run's id and the
+        /// line, without its newline.
+        stdout(run-line),
+        /// A line it wrote to its standard error.
+        stderr(run-line),
+        /// It ended.
+        done(run-ended),
+    }
+
+    /// How a program run with `run` ended.
+    record run-ended {
+        /// The run's id, as the `run` command gave it.
+        id: u64,
+        /// Its exit code, when it exited.
+        code: option<s32>,
+        /// The signal that ended it, when one did.
+        signal: option<s32>,
+        /// Whether it was stopped for running past its timeout.
+        timed-out: bool,
+        /// Whether it wrote more than was kept.
+        truncated: bool,
+        /// What it wrote to its standard output, up to the run's limit.
+        stdout: list<u8>,
+        /// What it wrote to its standard error, up to the run's limit.
+        stderr: list<u8>,
+        /// Why the program could not be run at all.
+        error: option<string>,
+    }
+
+    /// How a `file-read` ended: its id, and the file's bytes or why it could
+    /// not be read.
+    record read-ended {
+        id: u64,
+        outcome: result-bytes,
+    }
+
+    /// How a `file-write` ended: its id, and why it failed, if it did.
+    record write-ended {
+        id: u64,
+        error: option<string>,
+    }
+
+    /// What a watch saw: its id, what happened, and the path as the `watch`
+    /// command wrote it.
+    record watch-heard {
+        id: u64,
+        change: file-change,
+        path: string,
+    }
+
+    /// What a file read, write or watch came to.
+    variant file-heard {
+        /// A `file-read` finished: its id, and the file's bytes or why it
+        /// could not be read.
+        read(read-ended),
+        /// A `file-write` that asked for a report finished: its id, and why
+        /// it failed, if it did.
+        wrote(write-ended),
+        /// A watched file changed: the watch's id, what happened, and the
+        /// path as the `watch` command wrote it.
+        watched(watch-heard),
+        /// A watch ended on its own: its directory is gone.
+        watch-ended(u64),
+    }
+
+    /// Bytes, or why there are none.
+    variant result-bytes { ok(list<u8>), error(string) }
+
+    /// What happened to a watched file.
+    enum file-change { changed, created, removed }
+
+    /// What became of an action sent with `act`.
+    record settled {
+        /// The attempt's id, as the `act` command gave it.
+        attempt: u64,
+        /// Whether it was done.
+        ok: bool,
+        /// Why not, when it was not.
+        reason: option<string>,
+    }
+
+    /// A window entering or leaving fullscreen or maximised.
+    record window-change {
+        id: u64,
+        entering: bool,
+    }
+
+    /// The keyboard moving to a window: what moved it, and whether it came
+    /// from another window or none.
+    record focus-moved {
+        id: u64,
+        cause: focus-cause,
+        changed: bool,
+    }
+
+    /// A window asking to be brought forward, and why: `launch` or
+    /// `request`.
+    record activation {
+        id: u64,
+        why: string,
+    }
+
+    /// The size a window's application took of its own, frame included.
+    record window-size {
+        id: u64,
+        size: size,
+    }
+
+    /// The action chosen on a notification the window manager sent: the
+    /// notification's token, and the action's key.
+    record notify-chosen {
+        token: u64,
+        key: string,
+    }
+
+    /// An action a window's frame sent: its name, and its data as JSON text.
+    record frame-action {
+        id: u64,
+        action: string,
+        data: string,
+    }
+
+    /// An action a scene sent: the surface's name, the action's name, and
+    /// its data as JSON text.
+    record surface-action {
+        surface: string,
+        action: string,
+        data: string,
+    }
+
+    /// A timer that fell due, and whether that was its last time.
+    record timer-due {
+        id: u64,
+        last: bool,
+    }
+
+    /// Where a dragged window was let go.
+    record dropped {
+        id: u64,
+        x: f64,
+        y: f64,
+    }
+
+    /// How far the wheel turned, on each axis.
+    record scrolled {
+        dx: f64,
+        dy: f64,
+    }
+
+    /// Something that happened, in the order it happened. A window manager
+    /// is sent the ones it named in its `listen` command, and a few that
+    /// need no listening, which that command lists.
+    variant event {
+        /// The window manager's first moment: it has been started, or has
+        /// loaded again, and what it asked for in `hello-answer` or
+        /// `reloaded` is applied. The batch tells the desktop as that left
+        /// it: every window and monitor there is. Sent without being
+        /// listened to.
+        startup,
+        /// A key combination the window manager bound was pressed, named
+        /// as it wrote it in its `binding`. Sent without being listened
+        /// to. An answer that is `handled` keeps the key from the window
+        /// under it.
+        key(string),
+        /// A window's life began. An answer that is `handled` and places
+        /// it is where it opens; otherwise the compositor places it
+        /// plainly, centred and cascaded.
+        opened(u64),
+        /// A window went fullscreen, or left it: its id, and whether it is
+        /// entering. Told once the change is made. The answer's `motion`
+        /// is how its picture moves there.
+        fullscreen(window-change),
+        /// A window was maximised, or restored: its id, and whether it is
+        /// entering. Told and answered as `fullscreen` is.
+        maximize(window-change),
+        /// A pointer or finger press at this point while the window
+        /// manager holds input (`grab`).
+        click(point),
+        /// A finger did something. Its down is told before it is delivered,
+        /// so the answer can take it with the `touch` command.
+        touch(touch-event),
+        /// The keyboard moved to a window: its id, what moved it, and
+        /// whether it came from another window or none.
+        focused(focus-moved),
+        /// The live keyboard layout, Caps Lock or Num Lock changed: which,
+        /// as `layout`, `caps` or `num`.
+        keyboard-changed(string),
+        /// The session's lock changed: `locking`, `locked`, `unlocking` or
+        /// `unlocked`.
+        lock-changed(string),
+        /// The focused text field changed: `field` when one took the
+        /// keyboard, `caret` when its caret moved, `framed` when its
+        /// window started or stopped being drawn in a frame.
+        text-input(string),
+        /// A window asked to be brought forward: its id, and why, `launch`
+        /// when an application already running answered a launch with a
+        /// window it had, `request` for anything else.
+        activated(activation),
+        /// A window's title, or its application's name, changed: the
+        /// window's id. Its row has them.
+        renamed(u64),
+        /// A window's application drew it at a size of its own, not the
+        /// one it was given, and the window has taken that size: its id,
+        /// and the size, frame included. Told once the application has
+        /// answered a `place`, or a fullscreen or a maximise, or has had
+        /// long enough to (the setting `resize.patience`); until then the
+        /// window is drawn in the rectangle it was given.
+        sized(window-size),
+        /// An edge of a window is being dragged by the window's own
+        /// resize. An answer that is `handled` moves a seam of a layout;
+        /// otherwise the compositor resizes the window itself.
+        resized(resized),
+        /// The window is gone.
+        closed(u64),
+        /// A close was asked for and the window is going.
+        closing(u64),
+        /// A close the compositor asked for has played out, and the
+        /// window's application has just been asked to go.
+        close-landed(u64),
+        /// A window's application declined to close, and the window is
+        /// back.
+        refused(u64),
+        /// A notification arrived or was replaced, as JSON text. The
+        /// answer's `decision` says what becomes of it; with none, it is
+        /// shown and kept as the sender asked.
+        notification(string),
+        /// Something happened to a notification, as JSON text.
+        notifications(string),
+        /// Something changed in audio, as JSON text.
+        audio(string),
+        /// Something changed in the tray, as JSON text.
+        tray(string),
+        /// Something changed in media, as JSON text.
+        media(string),
+        /// Notifications the window manager sent with `notify` are gone,
+        /// by their tokens: nothing more is heard of them. Sent without
+        /// being listened to.
+        notify-forget(list<u64>),
+        /// An action of a notification the window manager sent with
+        /// `notify` was chosen: its token, and the action's key. Sent
+        /// without being listened to.
+        notify-action(notify-chosen),
+        /// A window was minimized.
+        minimized(u64),
+        /// A minimized window is shown again.
+        unminimized(u64),
+        /// The monitors came, went or changed size, or were announced at
+        /// startup or after a reload.
+        monitors-changed,
+        /// The problems changed: something broke, or a reload mended it.
+        problems-changed,
+        /// This window manager took the place of one that was running:
+        /// after a reload or a restart, never at the start of a session.
+        restored,
+        /// A window's frame sent an action: the window's id, the action's
+        /// name, and its data as JSON text.
+        frame-action(frame-action),
+        /// A scene sent an action: the surface's name, the action's name,
+        /// and its data as JSON text.
+        surface-action(surface-action),
+        /// What became of actions the window manager sent with `act`.
+        /// Sent without being listened to.
+        attempts-settled(list<settled>),
+        /// What programs the window manager ran with `run` wrote, and how
+        /// they ended. Sent without being listened to.
+        runs(list<run-heard>),
+        /// Timers the window manager set with `timer` fell due: each one's
+        /// id, and whether it was its last time. Sent without being
+        /// listened to.
+        timers(list<timer-due>),
+        /// What the window manager's `file-read`, `file-write` and `watch`
+        /// commands came to. Sent without being listened to.
+        files(list<file-heard>),
+        /// The windows the window manager arranges are to be arranged
+        /// again: something they stand in changed.
+        relayout,
+        /// A window is being moved by the pointer or a finger.
+        dragged(pointer-move),
+        /// A window's resize by the pointer or a finger began or ended.
+        resizing(pointer-move),
+        /// A dragged window was let go: its id, and where.
+        dropped(dropped),
+        /// The wheel turned with the drag modifier held: by how much, on
+        /// each axis. An answer that is `handled` keeps it from the window
+        /// under the pointer.
+        scrolled(scrolled),
+        /// It is time to save: answered with a `store` for each store that
+        /// changed since the last, and a `keep` for each kept document
+        /// that did.
+        save-stores,
+    }
+
+    /// A window's edge moved by its own resize.
+    record resized {
+        /// The window.
+        id: u64,
+        /// Where the dragged edge, or corner, now is.
+        x: f64,
+        y: f64,
+        /// Which vertical edge is dragged: `left` or `right`, if either.
+        horizontal: option<string>,
+        /// Which horizontal edge is dragged: `top` or `bottom`, if either.
+        vertical: option<string>,
+    }
+
+    /// A window being dragged or resized by the pointer.
+    record pointer-move {
+        /// The window.
+        id: u64,
+        /// `begin`, `move` or `end`.
+        phase: string,
+        /// Where the pointer is.
+        x: f64,
+        y: f64,
+    }
+
+    /// What the compositor tells the window manager at one moment: what
+    /// changed since the last batch, then what happened.
+    record batch {
+        /// Which batch this is: its answer names it.
+        serial: u64,
+        /// The compositor's clock at this batch, in milliseconds: the
+        /// clock its timers and its animations run on. Where it starts
+        /// means nothing; it only goes forward.
+        at: f64,
+        /// Applied to the window manager's picture of the desktop before
+        /// the events are handled.
+        changes: list<change>,
+        events: list<event>,
+    }
+
+    /// What the window manager made of a batch.
+    record answer {
+        /// The batch this answers.
+        serial: u64,
+        /// Whether it took the batch's key, press or scroll; one it did not
+        /// take goes to the client.
+        handled: bool,
+        /// Applied in order, all at once.
+        commands: list<command>,
+        /// The motion the compositor's own move answering the batch takes,
+        /// a fullscreen's or a maximise's, when the window manager set one.
+        motion: option<motion>,
+        /// A notification's fate, as JSON text, when the batch asked for
+        /// one: an object with `banner` and `keep`, each a boolean, each
+        /// left out taking the compositor's own rule.
+        decision: option<string>,
+    }
+
+    /// What a window manager made of a reload: the answer its configuration
+    /// gave as it loaded again, carrying what it kept, as `hello-answer`'s
+    /// commands are; or why it would not load, in which case the
+    /// configuration that was running goes on running.
+    variant reloaded {
+        /// It loaded. The answer's commands are applied as
+        /// `hello-answer`'s are, and must say again what the window
+        /// manager declares and listens to: what it said before the
+        /// reload is forgotten.
+        loaded(answer),
+        /// It did not, and why. Nothing changes.
+        failed(string),
+    }
+
+    /// A point to look under, passing over the window named.
+    record window-at {
+        x: f64,
+        y: f64,
+        passing: option<u64>,
+    }
+
+    /// A store to read: its name, and at most how many bytes of it.
+    record store-read {
+        name: string,
+        max: u64,
+    }
+
+    /// A question only the compositor can answer, asked by a window
+    /// manager in the middle of a batch, and answered before anything else.
+    variant query {
+        /// The topmost window drawn at a point, as the pointer finds it,
+        /// passing over the one named.
+        window-at(window-at),
+        /// A store's saved document, read from its file, at most the bytes
+        /// given. The compositor keeps the files: one that cannot be used
+        /// is set aside as `<name>.json.broken`, and none is the answer.
+        store(store-read),
+        /// Every window frame style there is, from the folders the
+        /// compositor looks in: sorted, bundles first, each name once, as
+        /// the compositor would resolve it.
+        styles,
+    }
+
+    /// The answer to a `query`, case for case.
+    variant reply {
+        /// The window at the point, if one is drawn there.
+        window(option<u64>),
+        /// The store's document as JSON text, or none.
+        store(option<string>),
+        /// The frame styles.
+        styles(list<style>),
+    }
+
+    /// A question the window manager asks, and the serial its reply names.
+    record asked {
+        serial: u64,
+        query: query,
+    }
+
+    /// The answer to the query of that serial.
+    record replied {
+        serial: u64,
+        reply: reply,
+    }
+
+    /// One frame on the socket.
+    variant message {
+        /// From the compositor, first.
+        hello(hello),
+        /// From the window manager, in answer to `hello`.
+        hello-answer(hello-answer),
+        /// From the compositor: what changed and what happened.
+        batch(batch),
+        /// From the window manager: what it made of a batch.
+        answer(answer),
+        /// From the window manager, at any time: commands of its own,
+        /// asked for by no batch, applied in the order they come.
+        submit(list<command>),
+        /// From the window manager: a question, and its serial.
+        query(asked),
+        /// From the compositor: the answer to the query of that serial.
+        reply(replied),
+        /// From the compositor: the configuration at this path is to be
+        /// loaded again (the user asked for a reload, or it changed on
+        /// disk). Answered with `reloaded`.
+        reload(string),
+        /// From the window manager, in answer to `reload`.
+        reloaded(reloaded),
+        /// Either side is closing the connection, and says why. A window
+        /// manager whose configuration would not load says why here, in
+        /// place of `hello-answer`.
+        goodbye(string),
+    }
+}

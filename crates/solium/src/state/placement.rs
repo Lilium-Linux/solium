@@ -462,6 +462,10 @@ impl Solium {
         // and `a_window_the_layout_moved_mid_close_comes_back_where_it_was_put`
         // asserts that rather than this paragraph asserting it.
         let leaving = self.panes.get(pane).is_some_and(Pane::leaving);
+        // The window, when this placement asks its application for a size
+        // it has not drawn: held at the rectangle below, once the slot is
+        // set.
+        let mut asked = None;
 
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
@@ -484,6 +488,9 @@ impl Solium {
             }
             if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
+                if window.geometry().size != client.size {
+                    asked = Some(window.clone());
+                }
             }
             // Placing is not focusing. It is still a raise -- see
             // `map_stacked` -- and `map_laid_out` is what keeps that raise from
@@ -520,6 +527,33 @@ impl Solium {
                 // `a_rescue_during_a_fade_keeps_the_let_go_it_is_waiting_on`.
                 Standing::Kept => held.move_tile(outer),
             }
+        }
+
+        // **And the rectangle is the window's from the next frame, whatever
+        // its application has drawn.** The slot set above is the one
+        // `sync_panes` writes over with the size the client last committed,
+        // on the first frame nothing holds it: so a window placed at a new
+        // size was its old size in its new place until its application
+        // answered -- from the frame after a placement of no length, and
+        // from the frame a glide landed on -- with a gap beside it, or over
+        // its neighbour. A drag has held its panes since #113 and a
+        // fullscreen change since #49; a placement holds its pane the same
+        // way, at the rectangle it was given, with the client's last picture
+        // fitted into it as `resize.fill` says, until the client answers or
+        // `resize.patience` after the move lands, when the client's own size
+        // wins (`Self::settle_answering`).
+        //
+        // **A tile only.** A window placed where it floats is the size its
+        // client committed, from the commit: a dialog that grows itself is
+        // drawn grown, and nothing holds it to the rectangle it was centred
+        // in. `a_dialog_a_layout_centres_is_not_held_in_its_rect`.
+        //
+        // Not while a drag is live: the drag's own holds are the truth for
+        // the panes its sweep moves, and they are told at its pace.
+        // `tests::real_client::fullscreen_glides::a_window_placed_at_a_new_size_is_drawn_there_until_its_client_answers`.
+        let tile = matches!(standing, Standing::Tile | Standing::Within(_));
+        if let Some(window) = asked.filter(|_| tile && self.resize_gesture.is_none()) {
+            self.hold_for_answer(pane, &window, now, now + animation.duration);
         }
 
         // **And the transform, unless this pane is leaving.**

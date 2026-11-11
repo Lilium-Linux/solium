@@ -298,8 +298,33 @@ impl Solium {
         handled
     }
 
-    /// Apply what a script asked for.
+    /// Apply what a script asked for, after whatever the window manager
+    /// answered before it that nobody was waiting for: answers are applied
+    /// in the order they came.
     pub(crate) fn apply(&mut self, outcome: Outcome) {
+        self.apply_late();
+        self.apply_answer(outcome);
+    }
+
+    /// Apply the window manager's answers that came with nobody waiting for
+    /// them ([`Scripts::late`]), oldest first.
+    pub(crate) fn apply_late(&mut self) {
+        while let Some(late) = self
+            .scripts
+            .as_mut()
+            .and_then(|scripts| scripts.late.pop_front())
+        {
+            // The answer to a window's fullscreen or maximise is applied as
+            // `Self::tell_change` applies one in time.
+            let telling = self.telling_change;
+            self.telling_change = telling || late.change;
+            self.apply_answer(late.outcome);
+            self.telling_change = telling;
+        }
+    }
+
+    /// Apply one answer.
+    fn apply_answer(&mut self, outcome: Outcome) {
         self.dispatching += 1;
         // Anything a script asked for changes what is on screen, and almost
         // all of it starts an animation. Damage-driven rendering only draws
@@ -565,12 +590,17 @@ impl Solium {
                     }
                 }
                 Command::Unplace { id } => {
-                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
-                        && let Some(pane) = self.panes.get_mut(pane)
-                    {
-                        pane.untile();
-                        cramped_changed |= pane.cramped();
-                        pane.set_cramped(false);
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        // Let go of altogether: a placement that was
+                        // holding it at its tile until its client answered
+                        // holds it no longer.
+                        // `a_window_let_go_by_its_layout_is_not_held_in_its_old_tile`.
+                        self.let_go_of_answer(pane);
+                        if let Some(pane) = self.panes.get_mut(pane) {
+                            pane.untile();
+                            cramped_changed |= pane.cramped();
+                            pane.set_cramped(false);
+                        }
                     }
                 }
                 Command::Close { id } => {
@@ -921,6 +951,8 @@ impl Solium {
                 Command::Watch { id, path, shown } => self.files.watch(id, &path, shown),
                 Command::WatchCancel(id) => self.files.cancel_watch(id),
                 Command::StoreLoaded { name, text } => self.files.loaded_store(name, text),
+                Command::StoreSave { name, value } => self.files.save([(&name, &value)]),
+                Command::StoreInterval(every) => self.files.store_interval = every,
                 Command::FolderTrust { absolute } => {
                     self.folder_trust.trust(&absolute);
                     // Copied only when an entry changes, so `Folder` is sent
@@ -1132,11 +1164,11 @@ impl Solium {
     /// `super+shift+r`; the Lua state does not. So the second half of a reload
     /// is putting the new scripts back in touch with the session they have
     /// inherited, and it has two parts, both of which are the contract on
-    /// [`Scripts::load_carrying`]:
+    /// `solium_lua::Host::reload`:
     ///
-    ///  * `Scripts::kept` and `load_carrying` hand back what the old scripts
-    ///    asked to keep, *before* the new ones run, so a script's top level
-    ///    sees its own state rather than its defaults;
+    ///  * the window manager carries what the old scripts asked to keep into
+    ///    the new ones, *before* they run, so a script's top level sees its
+    ///    own state rather than its defaults;
     ///  * `restore`, `monitors` and `layout` re-announce the world, in that
     ///    order, so nothing has to be kept that could be recomputed.
     ///
@@ -1161,14 +1193,171 @@ impl Solium {
     /// `tests::real_client::a_reload_that_moves_the_primary_drops_the_old_primarys_scene`
     /// reloads.
     pub(crate) fn reload_from(&mut self, path: &std::path::Path) {
-        // Collected before the new configuration is even read, because reading
-        // it is what may fail, and the failure path has to leave the running
-        // scripts -- and therefore their keep -- untouched.
-        let carried = self.scripts.as_ref().map(Scripts::kept).unwrap_or_default();
         // The stores saved now, whatever the new configuration turns out to
         // be, so a reload never loses what a restart would keep (#473).
-        self.files.save(carried.stores());
-        match Scripts::load_carrying(path, carried) {
+        crate::files::save_stores_at_last(self);
+        // The window manager reloads itself, carrying what it kept; one
+        // that fails to load leaves the running configuration as it was.
+        let reloaded = match self.scripts.take() {
+            // The shipped configuration, run in place of one that kept
+            // stopping, reads nothing of the user's: a reload is how theirs
+            // is tried again, in a window manager of its own, and the
+            // shipped one goes on if it will not load.
+            // And when `wm.toml` names another program than the one
+            // running, the reload is that program started, the one running
+            // going on if it will not.
+            Some(scripts) if scripts.shipped_only() || scripts.chosen_another() => {
+                match Scripts::load(path) {
+                    Ok(loaded) => Ok(loaded),
+                    Err(err) => {
+                        self.scripts = Some(scripts);
+                        Err(err)
+                    }
+                }
+            }
+            Some(mut scripts) => match scripts.reload(path) {
+                Ok(()) => Ok(scripts),
+                Err(err) => {
+                    self.scripts = Some(scripts);
+                    Err(err)
+                }
+            },
+            None => Scripts::load(path),
+        };
+        if reloaded.is_ok() {
+            // A reload that loads is the user's word that this is the
+            // window manager to run: what the last one's stops said is
+            // over, and so is their count. Before the new configuration is
+            // told the problems there are.
+            self.effects.clear_problems_of("wm");
+            self.wm_restarts = crate::wm::Restarts::default();
+        }
+        self.take_on(reloaded, path);
+    }
+
+    /// The window manager a session starts with: the user's, on `config`,
+    /// or, when that will not start (a `wm.toml` naming a program that is
+    /// not there, a configuration that does not load), the shipped
+    /// configuration in its place, which reads nothing of the user's, with
+    /// a problem saying why. A desktop with the shipped bindings and the
+    /// reason on screen can be mended from inside it; one with no window
+    /// manager has no key that opens a terminal. A reload tries the user's
+    /// again, as it does after [`Self::restart_wm`] gave up on it.
+    pub(crate) fn first_scripts(&mut self, config: &std::path::Path) -> Option<Scripts> {
+        let err = match Scripts::load(config) {
+            Ok(scripts) => return Some(scripts),
+            Err(err) => err,
+        };
+        tracing::error!(?err, config = %config.display(), "the window manager would not start");
+        let (scripts, said) =
+            match Scripts::start_again(&Scripts::shipped_config(), true, Vec::new()) {
+                Ok(scripts) => (
+                    Some(scripts),
+                    format!(
+                        "the window manager would not start: {err:#}. The shipped configuration \
+                     is running in its place: reload to run yours again."
+                    ),
+                ),
+                Err(shipped) => {
+                    tracing::error!(err = ?shipped, "nor would the shipped configuration");
+                    (
+                        None,
+                        format!(
+                            "the window manager would not start: {err:#}. Neither would the \
+                         shipped configuration: {shipped:#}. No window manager is running."
+                        ),
+                    )
+                }
+            };
+        let named_in = Scripts::named_by(&crate::wm::Chosen::read().0, false, config);
+        self.effects
+            .push_problem(crate::effect::host::Problem::error(
+                "wm", &named_in, None, said,
+            ));
+        scripts
+    }
+
+    /// Start the window manager again, in place of one that stopped
+    /// answering or went ([`Scripts::down`]). Every window stays where it
+    /// is, and a problem says what happened.
+    ///
+    /// As a reload does it, with a new window manager: the timers, runs and
+    /// watches of the one that stopped went with it, and the new one is
+    /// told the desktop from the start, and handed what the old one kept
+    /// as it last said, which the compositor asks for with the stores,
+    /// every `files.store_interval`. One that stops more than
+    /// `wm.restarts` times in `wm.restart_window_s` is replaced by the
+    /// shipped configuration, which reads nothing of the user's, and when
+    /// that stops as often, by nothing.
+    /// `tests::a_window_manager_that_goes_is_started_again_and_a_problem_says_so`.
+    pub(crate) fn restart_wm(&mut self) {
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let why = scripts.why_down().unwrap_or("stopped").to_owned();
+        scripts.say_timing();
+        // What it kept, as it last said, for the one started in its place:
+        // a tiled desk comes back split for split.
+        let keeps = scripts.take_keeps();
+        let config = scripts.config().to_owned();
+        let named_in = scripts.named_in();
+        let shipped_only = scripts.shipped_only();
+        let window = scripts.settings.restart_window.as_secs_f64();
+        let start =
+            self.wm_restarts
+                .stopped(std::time::Instant::now(), &scripts.settings, shipped_only);
+        drop(scripts);
+        self.watch_wm();
+        tracing::error!(why, ?start, "the window manager stopped");
+        let again = format!("the window manager {why}. It was started again.");
+        let shipped =
+            |keeps: crate::wm::Keeps| Scripts::start_again(&Scripts::shipped_config(), true, keeps);
+        let (started, said) = match start {
+            crate::wm::Start::Again if shipped_only => (Some(shipped(keeps)), again),
+            crate::wm::Start::Again => (
+                // One that will not start at all is no better than one
+                // that keeps stopping.
+                Some(
+                    Scripts::start_again(&config, false, keeps.clone()).or_else(|err| {
+                        tracing::error!("{err:#}");
+                        shipped(keeps)
+                    }),
+                ),
+                again,
+            ),
+            crate::wm::Start::Shipped => (
+                Some(shipped(keeps)),
+                format!(
+                    "the window manager {why}, once too often in {window} s. The shipped \
+                     configuration is running in its place: reload to run yours again."
+                ),
+            ),
+            crate::wm::Start::Nothing => (
+                None,
+                format!(
+                    "the window manager {why}, once too often in {window} s, and so did \
+                     the shipped configuration. No window manager is running."
+                ),
+            ),
+        };
+        if !started.is_some_and(|started| self.take_on(started, &config)) {
+            // Nothing took its place: what it started is still its own.
+            self.runs.stop_all();
+            self.timers.clear();
+            self.files.reload();
+        }
+        self.effects.clear_problems_of("wm");
+        self.effects
+            .push_problem(crate::effect::host::Problem::error(
+                "wm", &named_in, None, said,
+            ));
+        self.redraw = true;
+    }
+
+    /// Take a window manager that has just loaded, or loaded again, in
+    /// place of the one before: whether there was one to take.
+    fn take_on(&mut self, reloaded: anyhow::Result<Scripts>, path: &std::path::Path) -> bool {
+        match reloaded {
             Ok(scripts) => {
                 crate::qml::clear_cache();
                 // Installed applications can change between one session and
@@ -1293,6 +1482,7 @@ impl Solium {
                          away and back again, which re-states where every desk sits"
                     );
                 }
+                true
             }
             Err(err) => {
                 tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
@@ -1303,6 +1493,7 @@ impl Solium {
                 self.effects.clear_problems_of("config");
                 self.effects
                     .push_problem(crate::effect::host::config_problem(&format!("{err:#}")));
+                false
             }
         }
     }
@@ -1402,19 +1593,65 @@ impl Solium {
         self.keyboard = crate::keymap::describe(self);
         let Some(mut scripts) = scripts else {
             self.scripts = None;
+            self.watch_wm();
             return;
         };
         self.inhibitors.settings = crate::shortcuts_inhibit::Settings::default();
         let outcome = scripts.startup();
+        // Its process in a scope of its own, when this is the session: a
+        // new process each time one is started, and the same one after a
+        // reload, which asks nothing.
+        if let Some(pid) = scripts.pid() {
+            self.session
+                .window_manager(pid, scripts.chosen().cpu_weight);
+        }
+        // What was wrong with `wm.toml` when it was started, where a
+        // mistake in any other part of the configuration is said.
+        self.effects.clear_problems_of("wm.toml");
+        if let Some(file) = crate::wm::Chosen::file() {
+            for line in scripts.chosen_said() {
+                self.effects
+                    .push_problem(crate::effect::host::Problem::warning(
+                        "wm.toml",
+                        &file,
+                        line.clone(),
+                    ));
+            }
+        }
         self.scripts = Some(scripts);
+        self.watch_wm();
         // What the configuration does to the keyboard as it starts is told
         // nothing, and what the keys do after it is:
         // `keyboard_change::tests::a_new_keymap_and_a_starting_configuration_are_told_nothing`.
         self.keyboard_told.forget();
         self.apply(outcome);
+        // And its first moment, with the desktop as it stands once that is
+        // applied: every window and monitor, as a window manager that was
+        // just started, or has just loaded again, has heard of none.
+        let snapshot = self.snapshot();
+        if let Some(mut scripts) = self.scripts.take() {
+            let outcome = scripts.started(snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
         self.keyboard_changed();
         self.refresh_inhibitors();
         self.warn_about_unwatched_configured_paths();
+    }
+
+    /// Have the event loop wake on the window manager's socket, the one
+    /// there is now: an answer the compositor stopped waiting for is applied
+    /// when it comes (`wm::wake`).
+    pub(crate) fn watch_wm(&mut self) {
+        let Some(watch) = self.wm_watch.as_mut() else {
+            return;
+        };
+        let socket = self
+            .scripts
+            .as_ref()
+            .filter(|scripts| !scripts.down())
+            .and_then(|scripts| scripts.link.socket().ok());
+        watch.on(socket);
     }
 
     pub(crate) fn trigger_monitors_changed(&mut self) {
@@ -1862,6 +2099,50 @@ impl Solium {
         let slots = self.outers_before_restyle();
         self.decorations.swap(&mut self.panes);
         self.restyled(slots, now);
+    }
+
+    /// Tell the window manager that a window's title, or its application's
+    /// name, changed: only one that listens for it, since an application
+    /// changes its title as often as it likes and a snapshot is not free.
+    pub(crate) fn tell_renamed(&mut self, window: &Window) {
+        if !self
+            .scripts
+            .as_ref()
+            .is_some_and(|scripts| scripts.listens_to("renamed"))
+        {
+            return;
+        }
+        let id = self.window_id(window);
+        if id == 0 {
+            return;
+        }
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.renamed(id, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell the window manager of each window whose application has drawn
+    /// it at a size of its own rather than the one it was placed at
+    /// (`Self::land_on`). Once a pass, after the holds are settled: not from
+    /// inside the settling, which is walking them.
+    /// `tests::real_client::fullscreen_glides::a_window_manager_is_told_the_size_an_application_took`.
+    pub(crate) fn tell_sized(&mut self) {
+        if self.took_sizes.is_empty() {
+            return;
+        }
+        for (id, size) in std::mem::take(&mut self.took_sizes) {
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                return;
+            };
+            let outcome = scripts.sized(id, size, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
     }
 
     pub(crate) fn trigger_relayout(&mut self) {

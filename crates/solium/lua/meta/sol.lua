@@ -332,6 +332,15 @@
 ---@field store_interval? number Milliseconds between the comparisons of each store with what was last saved, above 0. Default 1000.
 ---@field store_max? integer The most bytes of a store's file that are read, 0 or more; a larger file is broken. Default 1048576 (1 MiB).
 
+---`config.lua`'s `wm`: how long the compositor waits for the window manager.
+---@class sol.WmOptions
+---@field ask_ms? number Milliseconds an event's answer is waited for before the compositor goes on by itself, above 0. Default 4.
+---@field hard_ms? number The hard deadline in milliseconds, above 0: a window manager that says nothing for `strikes` of them running, while an event waits, is ended and started again. Also how long its last word is waited for, before a reload and as the compositor ends. Default 1000.
+---@field strikes? integer How many hard deadlines running, 1 or more. Default 3.
+---@field restarts? integer How many times a window manager that stopped is started again within `restart_window_s`, 0 or more; one stop more and the shipped configuration runs in its place. Default 3.
+---@field restart_window_s? number Seconds, above 0. Default 60.
+---@field load_ms? number Milliseconds a configuration may take to load again on a reload, above 0. Default 10000.
+
 ---What a `sol.watch` function is told (#473).
 ---@class sol.WatchEvent
 ---@field kind "changed"|"created"|"removed" `"changed"`: written and closed, or another file renamed onto it. `"created"`: it appeared. `"removed"`: deleted, or renamed away.
@@ -568,6 +577,8 @@
 ---| "closing" # A close was asked for and the window is fading: `(id)`.
 ---| "close_landed" # A close the compositor asked for has played its animation: the window has faded out of sight where it stood, and its application has just been asked to go -- or, an X11 one that let the last request go unanswered, been ended: `(id)`. Told after `closing` and before the `close` or `refused` that follows; not told for a window that went, or answered with a dialog, before its close landed, nor for one whose application never came, which is told `close` there and then.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
+---| "rename" # A window's title, or its application's name, changed: `(id)`. `sol.windows()` has them.
+---| "size" # A window's application drew it at a size of its own, not the one it was placed at, and the window has taken it: `(id, w, h)`, frame included. Told once the application has answered a `sol.place`, or has had `resize.patience` to; until then the window is drawn in the rectangle it was placed at.
 ---| "minimize" # A window was minimized, by `sol.minimize` or its application: `(id)`. Told once, before anything else reacts, with the window already `minimized`: a present started here plays out before the window is put away, and a layout takes the window out. The keyboard leaves it afterwards, as it leaves a window whose close landed (`focus.after_close`).
 ---| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward, but never behind the lock: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
 ---| "close" # The window is gone: `(id)`.
@@ -1901,6 +1912,15 @@ function sol.store(name, defaults) end
 ---@return nil
 function sol.files(options) end
 
+---How long the compositor waits for the window manager, which this
+---configuration runs in: `config.wm`, which the shipped `init.lua` hands
+---over. After `ask_ms` an event goes on without its answer, which is applied
+---when it comes; a window manager that stops answering, or goes, is started
+---again. A key left out, or one of the wrong kind, keeps the default.
+---@param options? sol.WmOptions
+---@return nil
+function sol.wm(options) end
+
 ---Whether a program can be found on `PATH`. A name with a `/` in it is
 ---checked as a path. Nothing is run.
 ---@param program string
@@ -2002,7 +2022,8 @@ function sol.unknown(key, meant) end
 ---finalizer, and the `__close` of a to-be-closed variable in the function a
 ---stop interrupts, run where no hook does, so the deadline cannot stop a loop
 ---in either.
----@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize", handler: fun(id: integer))
+---@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize"|"rename", handler: fun(id: integer))
+---@overload fun(event: "size", handler: fun(id: integer, w: integer, h: integer))
 ---@overload fun(event: "focus", handler: fun(id: integer, source: sol.FocusSource, changed: boolean))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drag", handler: fun(id: integer, phase: "begin"|"move"|"end", x: number, y: number))

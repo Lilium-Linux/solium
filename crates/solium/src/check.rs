@@ -73,6 +73,24 @@ impl<'a> Report<'a> {
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
 pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
     report.line(&format!("checking {}", path.display()));
+    // Which window manager answers for it: the program `wm.toml` names, or
+    // the shipped one. What is wrong with that file fails the check, as a
+    // setting nothing reads does: the file would not do what it says.
+    let (chosen, said) = crate::wm::Chosen::read();
+    match chosen.command.as_deref() {
+        Some(command) => report.line(&format!(
+            "  window manager  {}  (wm.toml)",
+            crate::wm::Chosen::spelled(command)
+        )),
+        None => match crate::wm::link::program() {
+            Ok(program) => report.line(&format!("  solium-lua  {}", program.display())),
+            Err(why) => report.line(&format!("  solium-lua  missing: {why}")),
+        },
+    }
+    for line in &said {
+        let file = crate::wm::Chosen::file().unwrap_or_default();
+        report.fail(&format!("  {}: {line}", file.display()));
+    }
     // Read only: a check changes none of the user's files (#473).
     match crate::script::Scripts::load_for_check(path) {
         Err(err) => {
@@ -162,6 +180,10 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
             // A store's file a session would set aside: said, not failed,
             // and left as it is (#473).
             // `tests::a_check_leaves_a_broken_store_file_as_it_was`.
+            for refused in scripts.refused_at_load() {
+                report.fail(&format!("  {refused}"));
+            }
+
             for note in scripts.check_notes() {
                 report.line(&format!("  warning: {note}"));
             }
@@ -1043,7 +1065,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         .map(|dir| dir.join(format!("{name}.portal")))
                         .find(|path| path.is_file())
                 },
-                crate::script::which("slurp"),
+                crate::launch::which("slurp"),
             );
         }
     }
@@ -1325,9 +1347,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&directory);
         let path = directory.join("init.lua");
         std::fs::write(&path, r#"prefs = sol.store("prefs", { volume = 50 })"#).expect("the file");
+        // A check never asks for the stores, so saves none: the state
+        // directory is as it was, below.
         let (passed, text) = reported(|report| {
-            let scripts = config(&path, report).expect("it loads");
-            assert!(scripts.stores().is_empty(), "a check would save");
+            let _ = config(&path, report).expect("it loads");
         });
         assert!(passed, "{text}");
         assert!(
@@ -2198,6 +2221,31 @@ mod tests {
         assert!(
             super::configured_rules(&scripts).is_none(),
             "the rules of a refused sol.effects were taken as applied"
+        );
+    }
+
+    /// **A settings section the compositor refuses fails the check, with
+    /// why**: the configuration still loads, but `sol.input` with a
+    /// shortcuts policy that is not one applies nothing, and the check says
+    /// which section and what is wrong with it.
+    #[test]
+    fn a_refused_settings_section_fails_the_check() {
+        let directory = crate::effect::host::tests::scratch("check-refused-section");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.input({ shortcuts_inhibit = { allow = "sometimes" } })"#,
+        )
+        .expect("writing");
+        let (passed, out) = reported(|report| {
+            let _ = super::config(&config, report);
+        });
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(!passed, "{out}");
+        assert!(out.contains("sol.input is refused"), "{out}");
+        assert!(
+            out.contains("allow must be true, false or 'fullscreen'"),
+            "{out}"
         );
     }
 

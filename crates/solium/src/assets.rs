@@ -146,6 +146,45 @@ pub(crate) fn lua() -> PathBuf {
     root().join("lua")
 }
 
+/// Where a program Solium ships beside itself is looked for, for a Solium
+/// binary at `exe`: an installed layout's `<prefix>/libexec/<name>` first,
+/// then `<name>` beside the binary, as a build tree has it.
+pub(crate) fn helpers(exe: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let mut places = Vec::new();
+    if let Some(prefix) = dir.parent() {
+        places.push(prefix.join("libexec").join(name));
+    }
+    places.push(dir.join(name));
+    places
+}
+
+/// The first of [`helpers`] for this binary that is an executable file, or
+/// where it was looked for.
+pub(crate) fn helper(name: &str) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(exe) = std::env::current_exe().ok() else {
+        return Err(format!("no {name}: this binary does not know where it is"));
+    };
+    let places = helpers(&exe, name);
+    places
+        .iter()
+        .find(|path| {
+            std::fs::metadata(path)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            let looked: Vec<String> = places
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!("no {name} at {}", looked.join(" or "))
+        })
+}
+
 /// The shipped effect folders: `effects/<name>/`, beside `qml/` and `lua/`.
 ///
 /// Not part of what `holds_assets` looks for: a build without them is a

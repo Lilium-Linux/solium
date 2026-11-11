@@ -298,10 +298,13 @@ and the documented [defaults](crates/solium/lua/config.lua).
 
 ## How it is built
 
-Rust owns protocols, input, window state and rendering primitives. Lua chooses
-layouts, bindings and policy. QML supplies window frames and hosted desktop
-scenes; effect folders combine Lua and GLSL. One compositor clock drives
-window and QML animation.
+Rust owns protocols, input, window state and rendering primitives. A window
+manager chooses layouts, bindings and policy: it is a separate program that
+talks to the compositor over a socket, as a window manager talks to an X
+server. The one Solium ships runs the Lua configuration, and `wm.toml` names
+another, written in any language. QML supplies window frames and hosted
+desktop scenes; effect folders combine Lua and GLSL. One compositor clock
+drives window and QML animation.
 
 The renderer uses Smithay's GLES renderer. Hardware sessions use DRM/libinput;
 nested sessions use winit. QML uses the GPU on supported hardware after a
@@ -320,6 +323,7 @@ project. The default configuration is one configuration of the compositor.
 |---|---|
 | Configure the desktop | [Configuration guide](docs/ricing.md), [modes](docs/modes.md), [decorations](docs/decorations.md) |
 | Write a shell or effect | [Shell hosting and integration](docs/shell-boundary.md), [effects](crates/solium/effects/README.md) |
+| Write a window manager | [Writing a window manager](docs/window-managers.md), the examples in [Rust](crates/wm-protocol/examples/tiny_wm.rs) and [C#](sdk/csharp/README.md) |
 | Understand support and plans | [Status](docs/status.md), [known limitations](docs/gaps.md), [roadmap](docs/roadmap.md) |
 | Develop Solium | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [development tools](dev/README.md) |
 | Report a problem | [Issue tracker](https://github.com/Lilium-Linux/solium/issues), [security policy](SECURITY.md) |

@@ -20,9 +20,44 @@
 //! assert_eq!(move_window.progress(Duration::from_millis(200)), 1.0);
 //! ```
 
+pub mod mat4;
+
 use std::time::Duration;
 
 pub mod ffi;
+
+/// How a batch of movements animates: how long, and along which curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimationSpec {
+    pub duration: Duration,
+    pub easing: Curve,
+}
+
+impl Default for AnimationSpec {
+    fn default() -> Self {
+        Self {
+            duration: Duration::from_millis(220),
+            easing: Curve::OutCubic,
+        }
+    }
+}
+
+impl AnimationSpec {
+    /// This, with whatever a call actually named.
+    #[must_use]
+    pub const fn with(self, duration: Option<Duration>, easing: Option<Curve>) -> Self {
+        Self {
+            duration: match duration {
+                Some(duration) => duration,
+                None => self.duration,
+            },
+            easing: match easing {
+                Some(easing) => easing,
+                None => self.easing,
+            },
+        }
+    }
+}
 
 /// A damped spring.
 ///

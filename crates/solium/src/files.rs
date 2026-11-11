@@ -26,7 +26,7 @@
 //! The Lua side, which keeps each callback under its id, is in `script.rs`.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ffi::OsString,
     fs::{self, File},
     io::{self, Read as _, Write as _},
@@ -38,37 +38,11 @@ use std::{
 
 use crate::{json::Json, state::Solium};
 
-/// How much `sol.read` reads when `files.max_read` does not say: 4 MiB.
-pub(crate) const MAX_READ: usize = 4 << 20;
-/// The largest store file that is read when `files.store_max` does not
-/// say: 1 MiB. A store is settings and small state, read on the
-/// compositor's own thread when it is first asked for, so a bigger one is
-/// taken for a broken one.
-pub(crate) const MAX_STORE: u64 = 1 << 20;
 /// How often the stores are compared with what was last written when
 /// `files.store_interval` does not say.
 pub(crate) const STORE_INTERVAL: Duration = Duration::from_secs(1);
 /// What a read past `files.max_read` is told.
 pub(crate) const TOO_LONG: &str = "longer than files.max_read";
-
-/// A path a configuration names, made absolute: `~/` is the home
-/// directory, and anything that is neither absolute nor under `~/` is
-/// refused, since the compositor's working directory is nobody's.
-/// `tests::a_path_is_absolute_or_under_home`.
-pub(crate) fn expand(path: &str) -> Result<PathBuf, String> {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .ok_or_else(|| format!("{path}: HOME is not set, so `~/` names nothing"))?;
-        return Ok(PathBuf::from(home).join(rest));
-    }
-    if path.starts_with('/') {
-        return Ok(PathBuf::from(path));
-    }
-    Err(format!(
-        "{path:?} is neither absolute nor under `~/`: a path is relative to nothing here"
-    ))
-}
 
 /// Read `path` to its end, at most `max` bytes: the error, as the system
 /// words it, when it cannot be read, and [`TOO_LONG`] past `max`.
@@ -161,14 +135,7 @@ pub(crate) fn state_dir() -> Option<PathBuf> {
     }
 }
 
-/// Whether `name` may name a store: letters, digits, `_` and `-`, so it is
-/// always one file in the state directory.
-pub(crate) fn store_name_ok(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
+pub(crate) use solium_wm_protocol::store::name_ok as store_name_ok;
 
 /// The file store `name` is kept in.
 pub(crate) fn store_path(name: &str) -> Option<PathBuf> {
@@ -235,126 +202,6 @@ pub(crate) fn set_aside(name: &str, path: &Path) {
     }
 }
 
-/// A Lua value as the plain data a store keeps: strings, finite numbers,
-/// booleans, and tables of them, a sequence as a list and string keys as an
-/// object. Anything else is left out, and named in the log once per key
-/// path (`warned` holds those already named). `where_it_is` is the path down
-/// to `value`, from the store's name. `left` bounds the values read, since
-/// the walk is Rust, which the handler deadline cannot stop: past it the
-/// whole store is an error and is not saved.
-/// `tests::only_plain_data_is_stored`.
-pub(crate) fn plain(
-    value: &mlua::Value,
-    where_it_is: &str,
-    depth: usize,
-    left: &mut usize,
-    warned: &mut HashSet<String>,
-) -> Result<Option<Json>, String> {
-    /// As deep as JSON text may nest (`json.rs`).
-    const DEEPEST: usize = 64;
-    *left = left
-        .checked_sub(1)
-        .ok_or_else(|| "more than 65536 values".to_owned())?;
-    fn leave_out(
-        warned: &mut HashSet<String>,
-        where_it_is: &str,
-        why: &str,
-    ) -> Result<Option<Json>, String> {
-        if warned.insert(where_it_is.to_owned()) {
-            tracing::warn!(
-                key = where_it_is,
-                why,
-                "a store keeps only strings, numbers, booleans and tables of them; this is left out"
-            );
-        }
-        Ok(None)
-    }
-    match value {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::Boolean(yes) => Ok(Some(Json::Bool(*yes))),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "stored as JSON, whose numbers are doubles"
-        )]
-        mlua::Value::Integer(number) => Ok(Some(Json::Number(*number as f64))),
-        mlua::Value::Number(number) if number.is_finite() => Ok(Some(Json::Number(*number))),
-        mlua::Value::Number(_) => leave_out(warned, where_it_is, "a number that is not finite"),
-        mlua::Value::String(text) => match text.to_str() {
-            Ok(text) => Ok(Some(Json::Text(text.to_owned()))),
-            Err(_) => leave_out(warned, where_it_is, "a string that is not UTF-8"),
-        },
-        mlua::Value::Table(table) => {
-            if depth >= DEEPEST {
-                return leave_out(
-                    warned,
-                    where_it_is,
-                    "nested deeper than 64, or a table that contains itself",
-                );
-            }
-            let pairs: Vec<(mlua::Value, mlua::Value)> = table
-                .pairs::<mlua::Value, mlua::Value>()
-                .filter_map(Result::ok)
-                .collect();
-            let length = table.raw_len();
-            let is_list = length > 0
-                && pairs.len() == length
-                && pairs.iter().all(|(key, _)| {
-                    matches!(key, mlua::Value::Integer(index)
-                        if usize::try_from(*index).is_ok_and(|index| (1..=length).contains(&index)))
-                });
-            if is_list {
-                let mut items = Vec::with_capacity(length);
-                for index in 1..=length {
-                    let item = table
-                        .raw_get::<mlua::Value>(index)
-                        .unwrap_or(mlua::Value::Nil);
-                    let named = format!("{where_it_is}.{index}");
-                    match plain(&item, &named, depth + 1, left, warned)? {
-                        Some(item) => items.push(item),
-                        // A list keeps its positions: what cannot be kept
-                        // in one is `null`.
-                        None => items.push(Json::Null),
-                    }
-                }
-                return Ok(Some(Json::List(items)));
-            }
-            let mut fields = BTreeMap::new();
-            for (key, item) in pairs {
-                let key = match key {
-                    mlua::Value::String(key) => match key.to_str() {
-                        Ok(key) => key.to_owned(),
-                        Err(_) => continue,
-                    },
-                    other => {
-                        let named = format!("{where_it_is}.{}", key_name(&other));
-                        if warned.insert(named.clone()) {
-                            tracing::warn!(
-                                key = named,
-                                "a store's tables are lists or have string keys; this key is left out"
-                            );
-                        }
-                        continue;
-                    }
-                };
-                let named = format!("{where_it_is}.{key}");
-                if let Some(item) = plain(&item, &named, depth + 1, left, warned)? {
-                    fields.insert(key, item);
-                }
-            }
-            Ok(Some(Json::Object(fields)))
-        }
-        other => leave_out(warned, where_it_is, other.type_name()),
-    }
-}
-
-fn key_name(key: &mlua::Value) -> String {
-    match key {
-        mlua::Value::Integer(number) => number.to_string(),
-        mlua::Value::Number(number) => number.to_string(),
-        other => format!("<{}>", other.type_name()),
-    }
-}
-
 /// What a watch saw happen to its file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -363,17 +210,6 @@ pub(crate) enum Kind {
     Created,
     /// Deleted, or renamed away.
     Removed,
-}
-
-impl Kind {
-    /// As Lua is told it.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Changed => "changed",
-            Self::Created => "created",
-            Self::Removed => "removed",
-        }
-    }
 }
 
 /// What [`Files::pump`] heard, for the configuration.
@@ -518,6 +354,9 @@ pub(crate) struct Files {
     stored: HashMap<String, String>,
     /// When the stores are next compared, on the compositor's clock.
     next_save: Duration,
+    /// How often the configuration is asked for its stores:
+    /// `files.store_interval`.
+    pub(crate) store_interval: Duration,
 }
 
 impl Default for Files {
@@ -537,6 +376,7 @@ impl Default for Files {
             watches: HashMap::new(),
             stored: HashMap::new(),
             next_save: Duration::ZERO,
+            store_interval: STORE_INTERVAL,
         }
     }
 }
@@ -1032,13 +872,9 @@ pub(crate) fn settle(state: &mut Solium) {
 
 /// [`settle`], at `now` on the compositor's clock, which a test chooses.
 pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
-    if let Some(scripts) = state.scripts.as_ref()
-        && state.files.save_due(now, scripts.store_interval())
-    {
-        let stores = scripts.stores();
-        state
-            .files
-            .save(stores.iter().map(|(name, value)| (name, value)));
+    let every = state.files.store_interval;
+    if state.scripts.is_some() && state.files.save_due(now, every) {
+        save_stores(state);
     }
     if state.files.is_idle() {
         return;
@@ -1059,13 +895,36 @@ pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
 /// At the compositor's end: save the stores that changed, and wait a
 /// bounded time for every write to land.
 pub(crate) fn finish(state: &mut Solium) {
-    if let Some(scripts) = state.scripts.as_ref() {
-        let stores = scripts.stores();
-        state
-            .files
-            .save(stores.iter().map(|(name, value)| (name, value)));
-    }
+    save_stores_at_last(state);
     state.files.wait_for_writes();
+    // The session's last word on its window manager: how long it took to
+    // answer, all told.
+    if let Some(scripts) = &state.scripts {
+        scripts.say_timing();
+    }
+}
+
+/// Ask the configuration for the stores that changed, and save them.
+fn save_stores(state: &mut Solium) {
+    let snapshot = state.snapshot();
+    let Some(mut scripts) = state.scripts.take() else {
+        return;
+    };
+    let outcome = scripts.save_stores(snapshot);
+    state.scripts = Some(scripts);
+    state.apply(outcome);
+}
+
+/// [`save_stores`], when nothing comes after it: before the configuration
+/// is loaded again, and at the compositor's end.
+pub(crate) fn save_stores_at_last(state: &mut Solium) {
+    let snapshot = state.snapshot();
+    let Some(mut scripts) = state.scripts.take() else {
+        return;
+    };
+    let outcome = scripts.save_stores_at_last(snapshot);
+    state.scripts = Some(scripts);
+    state.apply(outcome);
 }
 
 #[cfg(test)]
@@ -1076,6 +935,9 @@ pub(crate) mod tests {
     };
 
     use super::*;
+    use std::collections::HashSet;
+
+    use crate::script::lua::{MAX_READ, MAX_STORE, expand, plain};
 
     thread_local! {
         /// The state directory a test chose for its own thread.

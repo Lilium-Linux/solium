@@ -7,6 +7,9 @@
 // denies panics because a compositor crash takes the session down with it, and
 // that reasoning does not apply to a test binary.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
+// A test writes its fixtures in Lua, and runs the Lua window manager on a
+// thread: the types `clippy.toml` denies the compositor are a test's to use.
+#![cfg_attr(test, allow(clippy::disallowed_types))]
 
 mod ages;
 mod apps;
@@ -93,6 +96,7 @@ mod tty;
 mod warm;
 mod warp;
 mod winit;
+mod wm;
 mod xwayland;
 
 use std::{io::IsTerminal, path::PathBuf};

@@ -13,6 +13,7 @@
 // The arrangements themselves are safe; `ffi` needs `unsafe` to export C
 // symbols and to hand the preview a buffer to read, and says so at each use.
 pub mod ffi;
+pub mod plain;
 
 pub mod scroller;
 pub mod tree;

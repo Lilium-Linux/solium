@@ -256,6 +256,130 @@ assert(user.shell.scene == here .. "/shell/Shell.qml", "shell.scene is " .. user
     assert_eq!(code, 0, "{out}{err}");
 }
 
+/// **`wm.toml` names the window manager that is started, and a check says
+/// which**: the command is run as it is written, so a check of this
+/// configuration reports the bindings of the file the command names, not of
+/// the `init.lua` a check without it reads. The program is the Lua window
+/// manager, named by hand as any other would be.
+#[test]
+fn check_runs_the_window_manager_wm_toml_names() {
+    let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("solium-lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let write = |dir: &Path, toml: &str| {
+        std::fs::write(
+            dir.join("init.lua"),
+            r#"sol.bind("super+f7", function() end)"#,
+        )
+        .expect("an init.lua");
+        std::fs::write(
+            dir.join("named.lua"),
+            r#"sol.bind("super+f8", function() end)"#,
+        )
+        .expect("the file the command names");
+        std::fs::create_dir_all(dir.join("solium")).expect("the configuration directory");
+        std::fs::write(dir.join("solium/wm.toml"), toml).expect("a wm.toml");
+    };
+
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-none", |dir| {
+        std::fs::write(
+            dir.join("init.lua"),
+            r#"sol.bind("super+f7", function() end)"#,
+        )
+        .expect("an init.lua");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("super+f7") && !out.contains("wm.toml"),
+        "{out}"
+    );
+
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-named", |dir| {
+        write(
+            dir,
+            &format!(
+                "command = [{:?}, {:?}, {shipped:?}]\n",
+                wm.display().to_string(),
+                dir.join("named.lua").display().to_string(),
+            ),
+        );
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("  window manager  ")
+            && out.contains("named.lua")
+            && out.contains("(wm.toml)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("super+f8") && !out.contains("super+f7"),
+        "{out}"
+    );
+
+    // What the file gets wrong fails the check, with the key named, and the
+    // rest of it is still used.
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-wrong", |dir| {
+        write(dir, "comand = [\"my-wm\"]\ncpu_weight = 20000\n");
+    });
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("wm.toml: `comand` is not a key of this file")
+            && out.contains("wm.toml: `cpu_weight` is 1 to 10000, not 20000"),
+        "{out}"
+    );
+    assert!(
+        out.contains("super+f7"),
+        "the shipped window manager ran: {out}"
+    );
+
+    // A program that is not there fails it too, saying which.
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-missing", |dir| {
+        write(dir, "command = [\"/no/such/window-manager\"]\n");
+    });
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("starting /no/such/window-manager"),
+        "{out}{err}"
+    );
+}
+
+/// **A window manager that is not the Lua one is checked as it is**: the
+/// example written in Rust against the protocol crate
+/// (`crates/wm-protocol/examples/tiny_wm.rs`), started as its own program
+/// from `wm.toml`, answers `hello` with its bindings, and the check lists
+/// them with what each does. No Lua runs.
+#[test]
+fn check_lists_the_bindings_of_a_window_manager_in_another_language() {
+    let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("examples/tiny_wm");
+    assert!(
+        wm.is_file(),
+        "{} is not built: cargo build -p solium-wm-protocol --examples",
+        wm.display()
+    );
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-rust", |dir| {
+        // Not Lua at all: a window manager that read it would fail to load.
+        std::fs::write(dir.join("init.lua"), "this is not a configuration").expect("an init.lua");
+        std::fs::create_dir_all(dir.join("solium")).expect("the configuration directory");
+        std::fs::write(
+            dir.join("solium/wm.toml"),
+            format!("command = [{:?}]\n", wm.display().to_string()),
+        )
+        .expect("a wm.toml");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("tiny_wm  (wm.toml)"), "{out}");
+    assert!(out.contains("ok: 5 binding(s)"), "{out}");
+    for (combo, note) in [
+        ("super+return", "open a terminal"),
+        ("shift+super+e", "end the session"),
+    ] {
+        assert!(
+            out.lines()
+                .any(|line| line.contains(combo) && line.contains(note)),
+            "{combo}: {out}"
+        );
+    }
+}
+
 /// **`solium pin set` and `solium pin clear` need a terminal**: with
 /// standard input not one, each exits 1 saying so, before asking for anything
 /// or writing anything, and `pin` with any other word is refused like any

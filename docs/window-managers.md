@@ -1,0 +1,562 @@
+# Writing a window manager
+
+Solium is a display server and an engine: it speaks Wayland, draws every
+frame, reads the input devices, runs the animations, the effects and the QML
+scenes, and keeps the session's services. It does not decide where a window
+goes or what a key does. A **window manager** decides that, and it is a
+separate program, as it is under an X server.
+
+The window manager Solium ships is `solium-lua`, which runs the Lua
+configuration. Any program that speaks the same protocol can take its place,
+in any language, and nobody rebuilds Solium to change it.
+
+This page says how such a program is started, how the conversation with the
+compositor goes, what happens when it is slow or stops, and how each value is
+written on the socket. Every message and type is listed, with what it means,
+in [the protocol reference](generated/reference/protocol.md).
+
+Use this guide by task:
+
+- [Run another window manager](#choosing-the-window-manager).
+- [Follow the conversation](#the-conversation), from `hello` to `goodbye`.
+- [Know how long the compositor waits](#how-long-the-compositor-waits) and
+  [what it does when a window manager stops](#when-a-window-manager-stops).
+- [Encode and decode the messages](#the-wire-format) without generated code.
+- Start from an example, [in Rust](#a-window-manager-in-rust) or
+  [in C#](#a-window-manager-in-another-language).
+
+## What each side does
+
+| Solium | The window manager |
+|---|---|
+| Wayland and X11 clients, their surfaces and buffers | Where each window lives (`place`), and where it is drawn (`present`) |
+| Rendering, frame timing, every frame of every animation | How a motion moves: its duration and easing, or a spring |
+| Keyboard, pointer and touch devices; which window has the keyboard | Which keys are its own (`declare`), and what each does |
+| QML scenes: it loads and draws them | Which scenes are on the desktop (`surface`), and their properties |
+| Effects, run in their sandbox | Which effect applies to what (the `effects` settings) |
+| Starting programs, timers, reading and writing files | Asking for each (`spawn`, `run`, `timer`, `file-read`) |
+| Notifications, audio, the tray, media players | Showing them, and deciding a notification's fate |
+
+A window manager never draws and never keeps time. It says where something
+goes and how it gets there, and the compositor moves it: a window follows the
+pointer in the compositor, at the display's refresh rate, whatever the window
+manager is doing.
+
+## Choosing the window manager
+
+`~/.config/solium/wm.toml` says which program is started. It is the one file
+of the configuration that Solium reads for itself, because it is read before
+any window manager runs.
+
+```toml
+# ~/.config/solium/wm.toml
+command = ["my-wm", "--rules", "~/.config/my-wm/rules"]
+cpu_weight = 1000
+```
+
+| Key | What it is |
+|---|---|
+| `command` | The program and its arguments, run exactly as written. A program with no directory in its name is looked for on `PATH`, and a leading `~/` in the program or an argument is your home directory. Without this key, the shipped `solium-lua` runs. |
+| `cpu_weight` | The CPU weight of the systemd scope the window manager is put in, from 1 to 10000, where 100 is what an ordinary program has. 1000 unless you say. |
+
+The program is started with the socket to the compositor as its **standard
+input**, as Solium starts every program: with the environment Solium itself
+was started with, in a session of its own, and holding no file descriptor but
+its standard input, output and error. It gets no arguments but the ones you
+wrote. What it writes to its standard error goes to the compositor's log
+(`~/.local/state/solium/session.log`).
+
+- The file is read each time a window manager is started. After you change
+  `command`, a reload starts the new program; if it will not start, the one
+  that was running goes on.
+- A key the file gets wrong is shown on the desktop's problems overlay and
+  fails `solium --check`, which also names the program it would start.
+- A program that cannot be started, or that says `goodbye` instead of
+  answering `hello`, is replaced by the shipped configuration, with the reason
+  on the overlay. See [when a window manager stops](#when-a-window-manager-stops).
+
+When Solium is the session (started by its session file), it asks systemd to
+put the window manager's process in a scope of its own, `solium-wm-<pid>.scope`
+in `session.slice`, at `cpu_weight`. A window manager answers in microseconds
+and then sleeps, so the weight costs nothing and keeps its answers inside a
+frame while every core is busy. Started nested or by hand, Solium asks systemd
+for nothing and the window manager stays a plain child process.
+
+## The conversation
+
+Everything is a **message**, one per frame on the socket. The names below are
+the protocol's own; each is described in [the reference](generated/reference/protocol.md).
+
+### 1. Hello
+
+The compositor speaks first:
+
+- `hello` carries the protocol's `version`, whether the session is in debug
+  mode, and `keeps`: what the window manager this one takes the place of asked
+  the compositor to hold (nothing, at the start of a session).
+
+The window manager answers with one of:
+
+- `hello-answer`: the version it was built for, and the commands that set the
+  desktop up before its first frame. These usually include `declare` (its key
+  bindings), `listen` (the events it wants) and `configure` (settings).
+- `goodbye`, with why it cannot run. The compositor then runs the shipped
+  configuration in its place.
+
+Two versions speak to each other when their major numbers are equal. Before
+1.0, the minor numbers must be equal too: `0.1.3` speaks to `0.1.0` and not to
+`0.2.0`. A window manager refuses a compositor of another version in its
+answer to `hello`, and the compositor refuses a `hello-answer` of another
+version.
+
+The compositor waits `wm.load_ms` (10 seconds) for the answer to `hello`.
+
+### 2. Batches and answers
+
+From then on the compositor sends a `batch` whenever something the window
+manager listens to happens. A batch has:
+
+- a `serial`;
+- `at`: what the compositor's clock read, in milliseconds;
+- `changes`: what changed on the desktop since the last batch. A window or a
+  monitor is sent whole when any field of it changed. Apply these first, to
+  your own copy of the desktop, so each event is handled with the desktop as
+  it was when it happened;
+- `events`: what happened, in order.
+
+The window manager answers **every batch once, in the order they came**, with
+an `answer` naming the batch's serial:
+
+- `handled`: whether the batch's key, press or scroll was the window
+  manager's. One it did not take goes to the window under it. For an `opened`
+  event, `handled` with a `place` command means the window manager placed the
+  window; otherwise the compositor places it, centred and cascaded.
+- `commands`: applied in order, all at once, on the next frame at the latest.
+- `motion`: for a `fullscreen` or `maximize` event, how the window's picture
+  moves to its new place.
+- `decision`: for a `notification` event, what becomes of it.
+
+The first batch is `startup`, sent once `hello-answer`'s commands are applied:
+its changes are the whole desktop, every window and monitor there is.
+
+A window is the window manager's to place from its `opened` event, and the
+answer to that event is where to place it. A window's row can come in an
+earlier batch, while its application has not drawn yet (`shown` says whether
+it has): a `place` sent then is overridden when the window opens.
+
+A window placed in a tile is drawn in that rectangle from the next frame,
+whatever its application has drawn: the compositor fits the picture it has
+into it (the setting `resize.fill`) until the application draws the new size.
+Nothing waits for the application. One that draws a size of its own instead,
+or nothing for as long as `resize.patience`, is then drawn at the size it has,
+cut to its tile, and the `sized` event says which size that is.
+
+A window manager's picture of the desktop is as fresh as the last batch. What
+changed comes only with a batch, and a batch is sent only for an event it
+listens to, so one that wants to know of every window listens to `opened` and
+`closed`, and one that reads titles listens to `renamed`.
+
+### 3. Listening
+
+A window manager is sent only the events it named in its last `listen`
+command, which lists all of them each time. Until it has sent one, it listens
+to none. An event nobody listens to is not sent at all: the compositor treats
+it as one nobody handled and does its own thing.
+
+Eight events need no listening, because each answers something the window
+manager itself asked for, or is the moment it starts: `startup`, `key`,
+`timers`, `runs`, `files`, `attempts-settled`, `notify-action` and
+`notify-forget`.
+
+Listen to what you use. A window manager that listens to `dragged` is woken
+for every motion of a dragged window and must answer each one.
+
+### 4. Key bindings
+
+The key combinations that are the window manager's are **declared**, in the
+`declare` command, so the compositor answers a key without asking: one that is
+declared is the window manager's, and any other goes to the focused window.
+
+A combination is any of the modifiers `ctrl`, `alt`, `shift` and `super` and
+one key by its XKB name, joined by `+`, in any order and either case:
+`super+shift+e`. When it is pressed, the window manager is sent `key` with the
+combination spelled as it declared it. The compositor does the matching, so a
+binding works whichever keyboard layout is live.
+
+A binding can also be `repeating` (fired again while held), `locked` (fired at
+the lock screen) and `inhibited` (fired over a window that holds the
+compositor's shortcuts, as a virtual machine does). `declare` is sent whole
+each time it changes.
+
+### 5. Commands of its own
+
+A window manager can send `submit`, a list of commands, at any time, with no
+batch asking for them: what a timer or a socket of its own led to. They are
+applied in the order they come.
+
+For timing, prefer the compositor's clock: the `timer` command sets one, and
+the `timers` event says when it falls due. That clock is the one animations
+run on, and every batch's `at` is a reading of it: a timer the compositor
+was late for is told once, however many times it fell due, and `at` says how
+late.
+
+### 6. Questions
+
+In the middle of a batch, a window manager can ask the compositor something it
+cannot know from its own copy of the desktop, with `query`, and gets a `reply`
+with the same serial:
+
+- `window-at`: the topmost window drawn at a point;
+- `store`: a saved document, read from its file;
+- `styles`: the window frame styles this machine has.
+
+The compositor may already have sent the next batch when it reads the
+question, so other messages can arrive before the reply. Keep them, and handle
+them after the batch you are in.
+
+### 7. Reload
+
+`reload` asks the window manager to load its configuration again: the user
+pressed the reload key, or a file under `~/.config/solium` changed. It answers
+`reloaded`:
+
+- `loaded`, with an answer whose commands set the desktop up as
+  `hello-answer`'s did. What the window manager declared and listened to
+  before is forgotten, so say both again;
+- `failed`, with why. Nothing changes, and the reason is shown on the overlay.
+
+A window manager with no configuration of its own to read answers `loaded`
+with what it said at the start.
+
+### 8. Goodbye
+
+Either side may say `goodbye`, with why. The compositor says it as the session
+ends, waits a second for the window manager to exit, and then stops it.
+
+## How long the compositor waits
+
+A window manager that is slow never holds a frame. The compositor tells an
+event in one of two ways.
+
+### What it asks
+
+Some events decide what the compositor does next, or a handler goes on from
+their answer: a bound key, a window opening or closing, a fullscreen or a
+maximise, a notification, a press while the window manager holds input, a
+modified wheel turn, a window's own resize, a scene's or a frame's action.
+Each is sent at once, in a batch of its own, and its answer is waited for:
+
+- The compositor waits **one frame**: `wm.ask_ms`, 4 ms, which is a frame at
+  260 Hz. The socket itself takes about 20 microseconds there and back, so
+  how long an answer takes is how long the window manager works on it, and
+  one that is late is a window manager that is busy or stuck.
+- When the answer is late the compositor goes on, and does what it would do
+  with no window manager:
+
+  | The batch was | The compositor |
+  |---|---|
+  | a bound key | does not type it into the focused window |
+  | a window opening | places it plainly, centred and cascaded |
+  | a notification | shows it |
+  | a fullscreen or maximise | moves the window with its default motion |
+  | a wheel turn, or a window's own resize | does as it did for the last one |
+  | anything else | nothing |
+
+- The late answer is **applied when it comes**. A window the compositor placed
+  plainly then moves to where the window manager wanted it.
+- While an answer has been owed for that long, **no later batch is waited
+  for at all**. So a slow window manager costs one frame once, not one frame
+  for each event. Once it has answered everything, the next batch is waited
+  for again.
+
+### What it only tells
+
+Other events can come many times a frame, and nothing waits on one where it
+happens: `touch`, `dragged`, `resizing`, `timers`, `runs`, `files`, `renamed`,
+and the services' `notifications`, `audio`, `tray` and `media`. These are
+notices:
+
+- **They are sent together.** The notices of one pass of the compositor's
+  loop are one batch, so a batch's `events` can hold several. Answer it once,
+  as any batch.
+- **Only one batch of them is unanswered at a time.** While it is, the next
+  ones wait for its answer, and a later position takes the place of an
+  earlier one: a `touch` of kind `motion` for the same finger, a `dragged` or
+  a `resizing` of phase `move` for the same window, a `renamed` for the same
+  window. A finger going down or lifting, and a drag's beginning and end, are
+  each told. So a window manager that is slow is sent fewer batches, and
+  never a backlog: what it reads is where the finger is, not where it was.
+- **A frame waits for them once.** Before a frame is drawn the compositor
+  gives the window manager what is left of `wm.ask_ms` to answer the batch
+  in flight, so a window it moves for a finger is there in that frame. When
+  the last batch took longer than `wm.ask_ms`, the next is not waited for:
+  the answer is drawn a frame later, and the frames keep their time.
+
+A window manager on a slow machine, or in a language that stops now and then
+to collect its garbage, is therefore late with a window by a frame or two,
+and never the reason a frame was missed.
+
+The window manager sets these with the `wm` settings section
+(`configure("wm", …)`):
+
+| Key | Default | What it is |
+|---|---|---|
+| `ask_ms` | 4 | How long an answer is waited for, and how long a frame waits for a batch of notices. |
+| `hard_ms` | 1000 | How long without a word, with a batch unanswered, counts once against the window manager. |
+| `strikes` | 3 | How many of those in a row mean it has stopped. |
+| `load_ms` | 10000 | How long `hello` and `reload` are waited for. |
+| `restarts` | 3 | How many times it may stop inside `restart_window_s` before the shipped configuration takes its place. |
+| `restart_window_s` | 60 | The window those are counted in. |
+
+## When a window manager stops
+
+A window manager has stopped when its socket closes, a read or a write on it
+fails, it says `goodbye`, or it has sent nothing at all for `strikes` ×
+`hard_ms` (3 seconds) while a batch waits for its answer. Any byte it sends,
+a question included, counts as a word.
+
+Then:
+
+1. **Every window stays where it is.** The compositor goes on drawing, and
+   clients are told nothing.
+2. The same program is **started again**, about a tenth of a second later,
+   and a problem on the overlay says what happened.
+3. It is handed, in `hello`, **what the last one kept**: every document it
+   sent with `keep`. A window manager that keeps its layout this way comes
+   back with every window where it was.
+4. It is told the desktop from the start (every window and monitor, as
+   changes), and sent `restored`.
+
+The timers, runs and file watches of the one that stopped are gone with it.
+
+A window manager that stops `wm.restarts` times inside `wm.restart_window_s`
+is not started a fourth time. The **shipped configuration** runs in its place,
+reading nothing of yours, and the overlay says so. A reload tries yours again.
+If the shipped one stops as often, none runs.
+
+The same happens at the start of a session: a window manager that will not
+start gives way to the shipped configuration, so there is always a key that
+opens a terminal.
+
+### Keeping state
+
+`keep(name, document)` asks the compositor to hold a document under a name.
+Send it whenever the state changes, or when the compositor sends
+`save-stores`, which it does every `files.store_interval` (a second) to a
+window manager that listens to it. The compositor holds the latest of each
+name and hands them all back in the next `hello`.
+
+A reload forgets them: the window manager is the same process and still has
+its state.
+
+## Settings
+
+Every setting of the compositor is set with `configure(section, document)`:
+the section's name (`input`, `idle`, `monitors`, `effects`, `lock` and the
+rest) and a document of its keys. The sections and their keys are the ones in
+[the configuration reference](generated/reference/configuration.md), which
+writes each as the Lua table the shipped window manager sends.
+
+A **document** is a tree of tables, numbers, text and booleans, flattened into
+a list because WIT has no recursive types: the first node is the root, and a
+table names its children by their index in the list. A table has a list part
+(the values at 1, 2, 3…), named fields, and numbered fields.
+
+A section the compositor cannot read is left as it was, and the mistake is a
+problem on the overlay with the key named.
+
+## The wire format
+
+The socket is a Unix stream socket: the window manager's standard input. Both
+directions use it.
+
+What is on it is [protobuf](https://protobuf.dev).
+[`crates/wm-protocol/proto/solium_wm.proto`](https://github.com/Lilium-Linux/solium/blob/stage/crates/wm-protocol/proto/solium_wm.proto)
+describes every message. It is generated from the WIT, so it says the same
+thing in the language protobuf's generators read: give it to the generator
+for your language and you have every type on this page, with its encoding.
+
+A **frame** is a byte count as a varint, followed by that many bytes: one
+`Message`. This is protobuf's own "delimited" framing, which most of its
+libraries read and write whole: `ParseDelimitedFrom` and `WriteDelimitedTo`
+in C#, `sizeDelimitedDecodeStream` in protobuf-es, `protodelim` in Go. A frame
+of more than 16 MiB closes the connection.
+
+How the WIT reads as protobuf:
+
+| WIT | protobuf |
+|---|---|
+| `bool` | `bool` |
+| `u8`, `u16`, `u32`, `char` | `uint32` |
+| `u64` | `uint64` |
+| `s8`, `s16`, `s32` | `sint32` |
+| `s64` | `sint64` |
+| `f32`, `f64` | `float`, `double` |
+| `string` | `string` |
+| `list<u8>` | `bytes` |
+| `list<T>` | `repeated T`, numbers packed |
+| `option<T>` | `optional T` |
+| `record` | A message. Its fields are numbered from 1, in the WIT's order. |
+| `variant` | A message with one `oneof kind`. Its cases are numbered from 1, in the WIT's order, and a case that carries nothing is an empty `Unit`. |
+| `enum` | An enum. Its cases are numbered from 0 and named after it, as protobuf's style has them: `FOCUS_CAUSE_CLICK`. |
+
+A `oneof` can hold neither a list nor an optional value, so a variant's case
+that is one goes in a small message of its own: `spawn` is a `StringList`
+with `items`, and `decoration` an `OptionalString` with `value`.
+
+For example, this answer:
+
+```text
+answer { serial: 300, handled: true, commands: [unplace(5), quit] }
+```
+
+is these sixteen bytes, and the frame is `10` and then them:
+
+| Bytes | What |
+|---|---|
+| `22 0e` | `message`'s field 4, `answer`: fourteen bytes |
+| `08 ac 02` | field 1, `serial`: 300 |
+| `10 01` | field 2, `handled`: true |
+| `1a 02 70 05` | field 3, a command: its field 14, `unplace`, 5 |
+| `1a 03 aa 03 00` | field 3, a command: its field 53, `quit`, which carries nothing |
+
+Its `motion` and `decision` are not set, so they are not sent.
+
+### Older and newer
+
+Either side may be newer than the other:
+
+- A field the reader does not know is passed over.
+- A field that was not sent is its type's default: 0, false, empty text, an
+  empty list, none, a variant's first case. So a `place` needs only what you
+  mean to say; its `motion` left out is no motion.
+- A command, a change or an event in a case the reader does not have is left
+  out of its list, and the rest is read. The compositor says in its log what
+  it left out.
+
+That is why the protocol is only ever added to, at the end of a record, a
+variant or an enum, and why what is there keeps its place. `hello` still says
+the version: a window manager and a compositor of the same major version
+(before 1.0, the same minor one) speak to each other.
+
+## A window manager in Rust
+
+The crate `solium-wm-protocol` (`crates/wm-protocol`) is the WIT as Rust
+types, with their encoding as protobuf, generated from the same files. It depends on
+nothing of the compositor's. Beside the types it has:
+
+- `client::Client`: the conversation. `hello`, `ready`, `next`, `reply`,
+  `submit`, `query`, `reloaded`;
+- `mirror::Mirror`: a copy of the desktop, kept by applying each batch's
+  changes.
+
+[`crates/wm-protocol/examples/tiny_wm.rs`](../crates/wm-protocol/examples/tiny_wm.rs)
+is a whole window manager in one file of about two hundred lines: it tiles
+windows into equal columns and binds five keys. Its loop is the whole shape of
+one:
+
+```rust
+client.hello()?;
+client.ready(setup())?;            // declare the bindings, listen to three events
+loop {
+    match client.next()? {
+        Heard::Batch(batch) => {
+            mirror.apply_all(batch.changes);
+            let (handled, commands) = handle(batch.events);
+            client.reply(batch.serial, handled, commands)?;
+        }
+        Heard::Reload(_) => client.reloaded(/* what `setup()` said */)?,
+        Heard::Goodbye(_) => return Ok(()),
+    }
+}
+```
+
+Build it and name it in `wm.toml`:
+
+```sh
+cargo build -p solium-wm-protocol --example tiny_wm
+```
+
+```toml
+command = ["/path/to/solium/target/debug/examples/tiny_wm"]
+```
+
+## A window manager in another language
+
+Nothing above needs Rust. Any language with a protobuf library can speak
+the protocol, and there is one for nearly every language:
+
+1. Give
+   [`solium_wm.proto`](https://github.com/Lilium-Linux/solium/blob/stage/crates/wm-protocol/proto/solium_wm.proto)
+   to protobuf's generator for your language. That is every type on this
+   page, with its encoding, and nothing to write by hand.
+2. Open file descriptor 0 as a socket: it is one, and it is used both ways.
+   In Python that is `socket.socket(fileno=0)`, in Node
+   `new net.Socket({ fd: 0 })`, in Go `net.FileConn(os.Stdin)`. Standard
+   output and standard error stay yours to print to.
+3. Read and write `Message`s, each with its length before it as a varint,
+   which your protobuf library has a call for
+   ([the wire format](#the-wire-format)).
+4. Answer `hello` with a `hello_answer`, and from then on every `batch` with
+   an `answer` of the same serial, having applied its changes to your own
+   copy of the desktop first.
+
+What a field you do not set means is its default, so a command is as short
+as what you mean to say.
+
+### C#
+
+[`sdk/csharp`](https://github.com/Lilium-Linux/solium/tree/stage/sdk/csharp)
+is steps 1 to 4 done: the generated types, the connection, the desktop kept
+current, and the conversation. A window manager derives from `WindowManager`
+and writes two methods, what it asks for and what it does with a batch.
+[`Tiny`](https://github.com/Lilium-Linux/solium/blob/stage/sdk/csharp/Tiny/Program.cs)
+there is the same window manager as `tiny_wm.rs`, in about a hundred lines.
+
+[`examples/bad-apple`](../examples/bad-apple/README.md) is a larger one on
+the same package: it plays a black and white film with real terminals, the
+light parts of each frame covered with light ones and the dark parts with
+dark ones, by moving and resizing those whose part of the picture changed,
+twenty-four times a second. Its README lists which parts of the protocol it
+uses and why.
+
+### How fast a window manager has to be
+
+Not very. The compositor never waits for one longer than a frame
+([how long the compositor waits](#how-long-the-compositor-waits)), what
+happens many times a frame is sent to it together, and while it is busy it
+is sent the latest position of a finger or a drag, not every one. A window
+manager that takes a millisecond to answer costs a millisecond a frame at
+most, and one that takes ten is a frame or two behind the finger and holds
+nothing up.
+
+A language that compiles as it runs is slow the first time it handles each
+kind of event. The C# window managers here answer their first batch in a
+tenth to a third of a second and settle to well under a millisecond; until
+then the compositor places a window plainly and moves it when the answer
+comes.
+
+An event is listened to by its name, as the WIT spells it (`monitors-changed`).
+The generated Rust types list the names in the WIT's order:
+`solium_wm_protocol::Event::CASES` and `Command::CASES`.
+
+## Checking and debugging
+
+- `solium --check` starts the window manager `wm.toml` names, lists the
+  bindings it declared, and exits 1 if it would not start or the file has a
+  mistake. It needs no display.
+- To try a window manager without touching your session, run Solium nested
+  with a configuration directory of its own:
+
+  ```sh
+  XDG_CONFIG_HOME=/tmp/try ./target/debug/solium
+  ```
+
+  with `/tmp/try/solium/wm.toml` naming it.
+- Every session's log ends with one line on how the window manager did: how
+  many batches it answered, the time half of the answers and 99 in 100 came
+  within, the slowest, how many came after the compositor had gone on, and
+  which events there were most of. A window manager that handles a batch in
+  tens of microseconds costs a frame nothing.
+- `RUST_LOG=info,solium::wm=debug` logs each answer that came late and how
+  long it took.

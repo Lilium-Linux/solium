@@ -758,6 +758,44 @@ local defaults = {
         store_max = 1048576,
     },
 
+    -- The window manager, which this configuration runs in, is a program of
+    -- its own: the compositor tells it what happens and waits for what it
+    -- answers. These are how long.
+    wm = {
+        -- How long, in milliseconds, an event's answer is waited for. After
+        -- that the compositor goes on by itself (a bound key is not typed
+        -- into the focused window, a new window is placed plainly), applies
+        -- the answer when it comes, and waits for no other until the window
+        -- manager has caught up. One frame at 260 Hz. Above 0.
+        --
+        -- What comes many times a frame (a finger, a drag, a timer) is not
+        -- waited for where it happens. It goes out with the rest of the
+        -- loop's pass, and a frame about to be drawn waits this long for the
+        -- answer, once; not at all after a batch that took longer.
+        ask_ms = 4,
+        -- The hard deadline, in milliseconds. A window manager that says
+        -- nothing for `strikes` of them running, while an event waits for
+        -- its answer, has stopped: it is ended and started again, with every
+        -- window where it was, and a problem says so. Each listener of this
+        -- configuration is stopped at 100 ms by itself, so this is for one
+        -- that is stuck. Also how long its last word is waited for: the
+        -- stores it saves before a reload, and as the compositor ends.
+        -- Above 0.
+        hard_ms = 1000,
+        -- How many hard deadlines running. A whole number, 1 or more.
+        strikes = 3,
+        -- How many times a window manager that stopped, or went, is started
+        -- again within `restart_window_s` seconds. One stop more, and the
+        -- shipped configuration runs in its place, reading nothing of yours,
+        -- until you reload; and if that stops as often, nothing does. A
+        -- whole number, 0 or more; the window above 0.
+        restarts = 3,
+        restart_window_s = 60,
+        -- How long, in milliseconds, a configuration may take to load again
+        -- on a reload. Above 0.
+        load_ms = 10000,
+    },
+
     -- libinput device settings: tap-to-click, scrolling, acceleration and the
     -- rest (#157). Applied to every device already connected and to each one
     -- added later, and reapplied on reload.
@@ -1505,14 +1543,14 @@ local defaults = {
         -- kept.
         background = "edge",
 
-        -- How long, in milliseconds, a window's picture waits at the
-        -- rectangle a change gave it for its application to draw at that
-        -- size, once the change is over: after you let go of an edge, after
-        -- a fullscreen or maximise glide lands, and after a layout's glide
-        -- lands -- when the picture stays against the edges the glide did not
-        -- move. Then the window is shown at the size the application has. 0
-        -- (do not wait) to 5000; anything else is named in the log and the
-        -- default kept.
+        -- How long, in milliseconds, a window waits at the rectangle a
+        -- change gave it for its application to draw at that size, once the
+        -- change is over: after you let go of an edge, after a fullscreen or
+        -- maximise glide lands, and after a layout puts a window in a tile,
+        -- at once or by a glide -- when its picture also stays against the
+        -- edges the glide did not move. Then the window is shown at the size
+        -- the application has. 0 (do not wait) to 5000; anything else is
+        -- named in the log and the default kept.
         -- `a_longer_patience_keeps_a_landed_glides_picture_where_it_was_for_longer`.
         patience = 250,
 

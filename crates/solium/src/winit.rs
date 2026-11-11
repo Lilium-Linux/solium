@@ -458,17 +458,12 @@ pub(crate) fn run() -> Result<()> {
         .map(|(output, _)| output.clone())
         .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
 
-    // Scripts are loaded before the first frame so a mode can be triggered
-    // immediately. A broken config leaves the compositor usable and unbound
-    // rather than refusing to start.
+    // The window manager is started before the first frame so a mode can be
+    // triggered immediately. One that will not start is replaced by the
+    // shipped configuration rather than refusing to start
+    // (`Solium::first_scripts`).
     let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    let scripts = state.first_scripts(&config);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
@@ -498,6 +493,7 @@ pub(crate) fn run() -> Result<()> {
         dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    state.wm_watch = Some(crate::wm::Watch::new(event_loop.handle(), |state| state));
     state.start_scripts(scripts);
     // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
     // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the
@@ -884,6 +880,10 @@ pub(crate) fn run() -> Result<()> {
         // And a move drag's last motion, told once (#452). Before the
         // resize, so a window a listener restores is placed in this frame.
         crate::input::grab::settle_drags(&mut state, false);
+        // What this pass told the window manager without waiting (its
+        // fingers, its drags), sent, and answered in time for the frame:
+        // `wm::before_frame`.
+        crate::wm::before_frame(&mut state, true);
         state.settle_resize();
         // What the focused text field said since the last pass, told to the
         // configuration once, so a pill it moves to the caret is in this
@@ -1393,6 +1393,9 @@ pub(crate) fn run() -> Result<()> {
         // What its reads, writes and watches came to, and its stores saved
         // when they changed (#473): `files.rs`.
         crate::files::settle(&mut state);
+        // What the window manager answered after the compositor stopped
+        // waiting for it, and one that has stopped, started again: `wm`.
+        crate::wm::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.

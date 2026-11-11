@@ -94,6 +94,13 @@ run "$polite cargo fmt --all --check" \
 echo "clippy..."
 run "$polite cargo clippy --all-targets $jobs -- -D warnings" \
     || { echo "GATE FAILED: clippy" >&2; exit 1; }
+# Built before the tests: the command-line tests run the compositor as a
+# process, and it starts the window manager as another (`solium-lua`, and
+# the example in `crates/wm-protocol/examples`), which only a build of the
+# whole workspace puts beside it. CI builds first for the same reason.
+echo "build..."
+run "$polite cargo build --workspace --all-targets $jobs" \
+    || { echo "GATE FAILED: build" >&2; exit 1; }
 # Under nextest, every test in a process of its own: each Qt test gets a Qt
 # thread of its own instead of queueing on the one a process may have, so the
 # suite runs on every CPU it is given (#480). Doctests are cargo's, since
@@ -105,9 +112,6 @@ run "$polite cargo nextest run --workspace --no-fail-fast ${SOLIUM_GATE_JOBS:+--
     || { echo "GATE FAILED: tests" >&2; exit 1; }
 run "$polite cargo test --doc --workspace $jobs" \
     || { echo "GATE FAILED: doctests" >&2; exit 1; }
-echo "build..."
-run "$polite cargo build $jobs" \
-    || { echo "GATE FAILED: build" >&2; exit 1; }
 
 # The configuration is Lua, and nothing above this line reads Lua. A syntax
 # error in config.lua compiles, tests and clippies perfectly cleanly, and then

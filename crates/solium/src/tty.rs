@@ -357,13 +357,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
     let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    let scripts = solium.first_scripts(&config);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
@@ -396,6 +390,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         crate::dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    solium.wm_watch = Some(crate::wm::Watch::new(loop_handle.clone(), |state| {
+        &mut state.solium
+    }));
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());
@@ -870,6 +867,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // reported it. See `settle_resize`.
             // And a move drag's last motion, told once (#452).
             crate::input::grab::settle_drags(&mut state.solium, false);
+            // What this pass told the window manager without waiting (its
+            // fingers, its drags), sent, and answered in time for the
+            // frame when one is about to be drawn: `wm::before_frame`.
+            let drawable = state.drawable_now(crate::pacing::monotonic_now());
+            crate::wm::before_frame(&mut state.solium, drawable);
             state.solium.settle_resize();
             // What the focused text field said since the last pass, told to the
             // configuration once, so a pill it moves to the caret is in this
@@ -922,6 +924,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // What its reads, writes and watches came to, and its stores
             // saved when they changed (#473): `files.rs`.
             crate::files::settle(&mut state.solium);
+            // What the window manager answered after the compositor stopped
+            // waiting for it, and one that has stopped, started again: `wm`.
+            crate::wm::settle(&mut state.solium);
             // The native lock's password check: the one place its yes unlocks.
             crate::lock_auth::settle(&mut state.solium);
             // And the end of its exit, at `lock.exit_ms` whatever the scene

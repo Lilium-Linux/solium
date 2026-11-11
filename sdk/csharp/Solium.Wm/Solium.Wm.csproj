@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Solium.Wm</RootNamespace>
+    <AssemblyName>Solium.Wm</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- The protocol's types are not kept here: protobuf's own generator
+       writes them from the .proto file before every build, into obj/. -->
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.32.1" />
+    <PackageReference Include="Grpc.Tools" Version="2.49.0" PrivateAssets="all" />
+    <Protobuf Include="../../../crates/wm-protocol/proto/solium_wm.proto"
+              Link="solium_wm.proto" GrpcServices="None" />
+  </ItemGroup>
+
+</Project>

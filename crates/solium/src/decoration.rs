@@ -3008,16 +3008,6 @@ pub(crate) enum StyleKind {
     File,
 }
 
-impl StyleKind {
-    /// The word a script sees. Matched in `lua/tweaks.lua`.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Bundle => "bundle",
-            Self::File => "file",
-        }
-    }
-}
-
 /// One thing this machine can be asked to draw.
 ///
 /// Field order is the sort order: kind, then name.

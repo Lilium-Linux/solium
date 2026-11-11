@@ -26,10 +26,6 @@ use std::{
 
 use crate::state::Solium;
 
-/// How long a child may run when its options do not say, in milliseconds.
-pub(crate) const TIMEOUT_MS: u64 = 30_000;
-/// How much of each stream is kept when its options do not say, in bytes.
-pub(crate) const MAX_OUTPUT: usize = 1 << 20;
 /// How much is read from a pipe at a time.
 const CHUNK: usize = 64 * 1024;
 
@@ -56,16 +52,6 @@ pub(crate) struct Request {
 pub(crate) enum Stream {
     Stdout,
     Stderr,
-}
-
-impl Stream {
-    /// As Lua is told it.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
-    }
 }
 
 /// How a child ended, for its `done`.
@@ -457,6 +443,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::script::lua::{MAX_OUTPUT, TIMEOUT_MS};
 
     fn request(id: u64, script: &str) -> Request {
         Request {
