@@ -141,9 +141,11 @@ interface messages {
     /// is sent the ones it named in its `listen` command, and a few that
     /// need no listening, which that command lists.
     variant event {
-        /// The window manager has been started, or started again, and what
-        /// it asked for in `hello-answer` is applied: the desktop's first
-        /// moment. Sent without being listened to.
+        /// The window manager's first moment: it has been started, or has
+        /// loaded again, and what it asked for in `hello-answer` or
+        /// `reloaded` is applied. The batch tells the desktop as that left
+        /// it: every window and monitor there is. Sent without being
+        /// listened to.
         startup,
         /// A key combination the window manager bound was pressed, named
         /// as it wrote it in its `binding`. Sent without being listened

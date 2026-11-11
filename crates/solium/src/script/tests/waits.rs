@@ -465,3 +465,34 @@ fn a_configuration_is_sent_only_what_it_listens_to() {
     assert_eq!(scripts.serial, start + 2);
     let _ = std::fs::remove_dir_all(directory);
 }
+
+/// **A window manager is told its first moment, with the desktop**: one
+/// that listens to nothing is still sent `startup`, and the batch carries
+/// every window and monitor there is, which it has heard of none of.
+#[test]
+fn a_window_manager_is_told_when_it_starts_and_what_is_there() {
+    let (mut scripts, mut hand) = Hand::with(vec![wire::Command::Listen(Vec::new())]);
+    hand.answer(1, false, quit());
+    let outcome = scripts.started(one_screen(&[4, 9]));
+    assert!(asked_to_quit(&outcome), "{outcome:?}");
+    let Message::Batch(batch) = hand.read() else {
+        panic!("not a batch");
+    };
+    assert_eq!(batch.events, [wire::Event::Startup]);
+    let windows: Vec<u64> = batch
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            wire::Change::Window(window) => Some(window.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(windows, [4, 9]);
+    assert!(
+        batch.changes.iter().any(
+            |change| matches!(change, wire::Change::Monitors(monitors) if monitors.len() == 1)
+        ),
+        "{:?}",
+        batch.changes
+    );
+}

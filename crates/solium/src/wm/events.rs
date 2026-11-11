@@ -38,6 +38,14 @@ impl Scripts {
         }
     }
 
+    /// The window manager's first moment: what it asked for as it loaded
+    /// has been applied, and this tells it the desktop as that left it.
+    /// Sent whatever it listens to, since a window manager that has heard
+    /// nothing yet knows of no monitor to put anything on.
+    pub(crate) fn started(&mut self, snapshot: Snapshot) -> Outcome {
+        self.send(snapshot, wire::Event::Startup)
+    }
+
     /// Tell scripts a window has appeared.
     ///
     /// Every listener runs. Returns whether any of them did: nothing happening

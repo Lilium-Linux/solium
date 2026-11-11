@@ -134,6 +134,9 @@ an `answer` naming the batch's serial:
   moves to its new place.
 - `decision`: for a `notification` event, what becomes of it.
 
+The first batch is `startup`, sent once `hello-answer`'s commands are applied:
+its changes are the whole desktop, every window and monitor there is.
+
 A window manager's picture of the desktop is as fresh as the last batch. What
 changed comes only with a batch, and a batch is sent only for an event it
 listens to, so one that wants to know of every window listens to `opened` and

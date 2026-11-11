@@ -1620,6 +1620,15 @@ impl Solium {
         // `keyboard_change::tests::a_new_keymap_and_a_starting_configuration_are_told_nothing`.
         self.keyboard_told.forget();
         self.apply(outcome);
+        // And its first moment, with the desktop as it stands once that is
+        // applied: every window and monitor, as a window manager that was
+        // just started, or has just loaded again, has heard of none.
+        let snapshot = self.snapshot();
+        if let Some(mut scripts) = self.scripts.take() {
+            let outcome = scripts.started(snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
         self.keyboard_changed();
         self.refresh_inhibitors();
         self.warn_about_unwatched_configured_paths();
