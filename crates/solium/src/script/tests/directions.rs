@@ -256,6 +256,7 @@ impl Desk {
             .find(|monitor| monitor.focused)
             .map_or(WIDE, |monitor| monitor.area);
         Snapshot {
+            now: std::time::Duration::ZERO,
             windows: self.windows.clone(),
             monitors: self.monitors.clone(),
             work_area,
@@ -1845,6 +1846,7 @@ fn sol_toggles_name_the_focused_window_when_given_none() {
         "#,
     );
     let desk = |focused: bool| Snapshot {
+        now: std::time::Duration::ZERO,
         windows: vec![
             window(4, "DP-1", WIDE),
             WindowInfo {
@@ -1917,6 +1919,7 @@ fn sol_press_names_a_button_or_a_key_and_refuses_what_it_cannot_reach() {
         "#,
     );
     let desk = |focused: bool| Snapshot {
+        now: std::time::Duration::ZERO,
         windows: vec![
             WindowInfo {
                 icon: None,
@@ -2018,6 +2021,7 @@ fn sol_minimize_names_the_focused_window_when_given_none_and_reaches_past_the_lo
         "#,
     );
     let desk = |focused: bool| Snapshot {
+        now: std::time::Duration::ZERO,
         windows: vec![
             window(4, "DP-1", WIDE),
             WindowInfo {

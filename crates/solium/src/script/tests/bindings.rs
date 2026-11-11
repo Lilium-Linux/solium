@@ -1106,6 +1106,7 @@ fn a_binding_a_listener_makes_is_declared_in_that_answer_and_only_then() {
         .send(&solium_wm_protocol::Message::Batch(
             solium_wm_protocol::Batch {
                 serial: 9,
+                at: 0.0,
                 changes: Vec::new(),
                 events: vec![solium_wm_protocol::Event::Relayout],
             },

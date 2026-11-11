@@ -9,7 +9,7 @@
 /// While an answer is owed, no later batch is waited for at all. The window
 /// manager may also `submit` commands of its own whenever it likes.
 interface messages {
-    use types.{rect, window, monitor, keyboard, text-field, problem, touch-event, doc, style};
+    use types.{rect, size, window, monitor, keyboard, text-field, problem, touch-event, doc, style};
     use commands.{command, focus-cause, motion};
 
     /// The first message, from the compositor: the protocol it speaks,
@@ -186,6 +186,16 @@ interface messages {
         /// when an application already running answered a launch with a
         /// window it had, `request` for anything else.
         activated(tuple<u64, string>),
+        /// A window's title, or its application's name, changed: the
+        /// window's id. Its row has them.
+        renamed(u64),
+        /// A window's application drew it at a size of its own, not the
+        /// one it was given, and the window has taken that size: its id,
+        /// and the size, frame included. Told once the application has
+        /// answered a `place`, or a fullscreen or a maximise, or has had
+        /// long enough to (the setting `resize.patience`); until then the
+        /// window is drawn in the rectangle it was given.
+        sized(tuple<u64, size>),
         /// An edge of a window is being dragged by the window's own
         /// resize. An answer that is `handled` moves a seam of a layout;
         /// otherwise the compositor resizes the window itself.
@@ -299,6 +309,10 @@ interface messages {
     record batch {
         /// Which batch this is: its answer names it.
         serial: u64,
+        /// The compositor's clock at this batch, in milliseconds: the
+        /// clock its timers and its animations run on. Where it starts
+        /// means nothing; it only goes forward.
+        at: f64,
         /// Applied to the window manager's picture of the desktop before
         /// the events are handled.
         changes: list<change>,

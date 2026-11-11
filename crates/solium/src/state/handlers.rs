@@ -67,6 +67,11 @@ impl CompositorHandler for Solium {
             }
             if let Some(window) = self.window_for(&root) {
                 window.on_commit();
+                // This may be the answer a placement, or a fullscreen
+                // change, holds the window for: weighed now, so a client
+                // that has answered is drawn as it answered from this
+                // commit, as a window nothing holds is.
+                self.settle_answer_of(&window);
                 // Ahead of the first show, so that a window launched with
                 // `sol.spawn` whose first limits come with its first frame is
                 // still one that has not been shown when the layouts hear of
@@ -280,6 +285,18 @@ impl XdgShellHandler for Solium {
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         self.decide_frame(&surface);
         self.refresh_inhibitors();
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.tell_renamed(&window);
+        }
+    }
+
+    /// A window's title changed: told to a window manager that listens for
+    /// it, with the window's row.
+    /// `tests::real_client::fullscreen_glides::a_window_manager_that_listens_is_told_a_windows_new_title`.
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.tell_renamed(&window);
+        }
     }
 
     /// Which configure a toplevel has acknowledged, remembered for the commit

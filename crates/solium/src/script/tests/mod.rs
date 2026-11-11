@@ -149,6 +149,7 @@ fn after_closes(commands: Vec<Command>) -> Vec<Option<Vec<crate::successor::Succ
 /// A snapshot with nothing in it, for the tests that only want a call made.
 fn empty_snapshot() -> Snapshot {
     Snapshot {
+        now: std::time::Duration::ZERO,
         locked: false,
         notifications: Default::default(),
         audio: Default::default(),
@@ -218,6 +219,7 @@ fn carried(commands: &[Command]) -> std::collections::HashMap<String, (f64, f64)
 /// One 1600x900 screen and three windows on it, for the reload test.
 fn one_screen(windows: &[u64]) -> Snapshot {
     Snapshot {
+        now: std::time::Duration::ZERO,
         locked: false,
         notifications: Default::default(),
         audio: Default::default(),

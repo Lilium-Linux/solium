@@ -142,6 +142,7 @@ mod tests {
             }),
             Message::Batch(Batch {
                 serial: u64::MAX,
+                at: 1234.5,
                 changes: vec![
                     Change::Window(window(1)),
                     Change::WindowGone(9),

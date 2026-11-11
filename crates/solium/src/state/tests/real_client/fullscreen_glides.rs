@@ -1042,3 +1042,145 @@ fn a_reload_mid_glide_leaves_the_window_at_rest() {
     }
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// A window placed where `to` says, as a layout places a tile.
+fn place(desk: &mut Desk, to: Rectangle<i32, Logical>, duration: Duration) {
+    let id = desk.state.window_id(&desk.window);
+    let now = desk.state.clock.now();
+    desk.state.place(
+        id,
+        to_rect(to),
+        AnimationSpec {
+            duration,
+            easing: present::Curve::Linear,
+        },
+        now,
+        Standing::Tile,
+    );
+    desk.pump();
+}
+
+/// **A window placed at a new size is drawn in the rectangle it was
+/// placed at until its client answers**, as one a fullscreen change
+/// moved is: the same hold, kept from the placement. Without it the
+/// window was the size its client last drew, 400x300, in the corner of
+/// its new 800x600 rectangle, from the frame after a placement of no
+/// length and from the frame a glide landed on, until the client drew:
+/// a gap beside it, or, placed smaller, over its neighbour. Answered, it
+/// is drawn as it is and nothing holds it.
+#[test]
+fn a_window_placed_at_a_new_size_is_drawn_there_until_its_client_answers() {
+    let to = Rectangle::new((100, 50).into(), (800, 600).into());
+    for (name, duration) in [
+        ("placed-at-once", Duration::ZERO),
+        ("placed-by-a-glide", Duration::from_millis(120)),
+    ] {
+        let mut desk = Desk::new(name, SCRIPT);
+        place(&mut desk, to, duration);
+        desk.frame_after(duration + Duration::from_millis(16));
+        assert!(
+            !desk.transformed(),
+            "{name}: arrived, it holds no transform"
+        );
+        assert_eq!(
+            desk.window.geometry().size,
+            (400, 300).into(),
+            "{name}: the premise: its client has not answered"
+        );
+        assert_eq!(
+            desk.drawn(desk.state.clock.now()),
+            to.to_f64(),
+            "{name}: drawn in the rectangle it was placed at"
+        );
+        assert!(
+            desk.state.holding_resize(desk.pane),
+            "{name}: and held there"
+        );
+        desk.answer(800, 600);
+        desk.frame_after(Duration::from_millis(16));
+        assert_eq!(
+            desk.drawn(desk.state.clock.now()),
+            to.to_f64(),
+            "{name}: and once it has answered"
+        );
+        assert!(
+            !desk.state.holding_resize(desk.pane),
+            "{name}: and nothing holds it once it has"
+        );
+    }
+}
+
+/// **A window placed where it is, at the size it has, is held by
+/// nothing**: a layout places every window on every pass, and most of
+/// them have not moved.
+#[test]
+fn a_window_placed_at_the_size_it_has_is_not_held() {
+    let mut desk = Desk::new("placed-as-it-is", SCRIPT);
+    let elsewhere = Rectangle::new((700, 400).into(), (400, 300).into());
+    place(&mut desk, elsewhere, Duration::ZERO);
+    assert!(
+        !desk.state.holding_resize(desk.pane),
+        "moved and not resized: its client has nothing to answer"
+    );
+    desk.frame_after(Duration::from_millis(16));
+    assert_eq!(desk.drawn(desk.state.clock.now()), elsewhere.to_f64());
+}
+
+/// **The window manager is told the size an application took**, when it
+/// is not the one the window was placed at: a client that never answers
+/// a placement is held in its rectangle for `resize.patience`, then
+/// drawn at the size it has, and a listener to `size` hears that size.
+/// One that answers with the size it was asked for is told nothing.
+#[test]
+fn a_window_manager_is_told_the_size_an_application_took() {
+    const LISTENS: &str = r#"
+        sol.on("size", function(id, w, h) sol.status(w .. "x" .. h) end)
+    "#;
+    let to = Rectangle::new((100, 50).into(), (800, 600).into());
+
+    let mut desk = Desk::new("took-its-own-size", LISTENS);
+    place(&mut desk, to, Duration::ZERO);
+    desk.frame_after(Duration::from_millis(16));
+    assert_eq!(desk.state.status, "", "held, and nothing told yet");
+    desk.frame_after(crate::resizing::PATIENCE);
+    assert!(!desk.state.holding_resize(desk.pane), "no longer held");
+    assert_eq!(
+        desk.drawn(desk.state.clock.now()).size,
+        (400.0, 300.0).into(),
+        "drawn at the size its client has"
+    );
+    assert_eq!(
+        desk.state.status, "400x300",
+        "and the window manager is told"
+    );
+
+    let mut desk = Desk::new("took-the-size-it-was-given", LISTENS);
+    place(&mut desk, to, Duration::ZERO);
+    desk.answer(800, 600);
+    desk.frame_after(Duration::from_millis(16));
+    desk.frame_after(crate::resizing::PATIENCE);
+    assert_eq!(
+        desk.state.status, "",
+        "an application that drew the size it was given took none of its own"
+    );
+}
+
+/// **A window manager that listens is told a window's new title**, with
+/// the window's row: a title is something an application changes when
+/// it likes, and no other event says so.
+#[test]
+fn a_window_manager_that_listens_is_told_a_windows_new_title() {
+    let mut desk = Desk::new(
+        "renamed",
+        r#"
+        sol.on("rename", function(id)
+            for _, window in ipairs(sol.windows()) do
+                if window.id == id then sol.status(window.title) end
+            end
+        end)
+        "#,
+    );
+    desk.toplevel.set_title("ready".to_owned());
+    desk.pump();
+    assert_eq!(desk.state.status, "ready");
+}

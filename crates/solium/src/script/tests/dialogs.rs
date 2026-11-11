@@ -224,6 +224,7 @@ fn snapshot_on(monitors: Vec<MonitorInfo>, windows: Vec<WindowInfo>) -> Snapshot
         .or_else(|| monitors.first())
         .map_or(AREA, |monitor| monitor.area);
     Snapshot {
+        now: std::time::Duration::ZERO,
         windows,
         monitors,
         work_area,
@@ -1554,6 +1555,7 @@ mod overflow {
     /// the layout placed.
     fn desk_at(ids: &[u64], cursor: (f64, f64)) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             cursor,
             ..snapshot(ids.iter().map(|&id| window(id, 800.0, 600.0)).collect())
         }
@@ -1883,6 +1885,7 @@ mod overflow {
         let _ = scripts.opened(
             3,
             Snapshot {
+                now: std::time::Duration::ZERO,
                 cursor: (500.0, 500.0),
                 ..desk(&before, &[1, 2, 3], &[2])
             },
@@ -1906,6 +1909,7 @@ mod overflow {
         let told = scripts.opened(
             3,
             Snapshot {
+                now: std::time::Duration::ZERO,
                 cursor: (500.0, 500.0),
                 ..snapshot(windows)
             },
@@ -2371,6 +2375,7 @@ mod overflow {
             let _ = scripts.opened(
                 3,
                 Snapshot {
+                    now: std::time::Duration::ZERO,
                     cursor: (500.0, 500.0),
                     ..snapshot(windows)
                 },
@@ -2531,6 +2536,7 @@ mod client_sizes {
     /// These windows, with the pointer at `cursor`.
     fn desk(windows: Vec<WindowInfo>, cursor: (f64, f64)) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             cursor,
             ..snapshot(windows)
         }
@@ -3119,6 +3125,7 @@ mod reload {
     /// size its client chose, at the origin.
     fn desk(rects: &HashMap<u64, Rect>, ids: &[u64], cursor: (f64, f64)) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             cursor,
             ..snapshot(ids.iter().map(|&id| at_rest(rects, id)).collect())
         }
@@ -3633,6 +3640,7 @@ mod reload {
         let (mut scripts, _) = session("");
         let both = || vec![monitor(), second_monitor()];
         let two = |rects: &HashMap<u64, Rect>, ids: &[u64], cursor: (f64, f64)| Snapshot {
+            now: std::time::Duration::ZERO,
             cursor,
             ..snapshot_on(
                 both(),

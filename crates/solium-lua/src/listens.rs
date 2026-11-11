@@ -19,6 +19,8 @@ const HEARD: &[(&str, &str)] = &[
     ("lock", "lock-changed"),
     ("text_input", "text-input"),
     ("activate", "activated"),
+    ("rename", "renamed"),
+    ("size", "sized"),
     ("resize", "resized"),
     ("close", "closed"),
     ("closing", "closing"),

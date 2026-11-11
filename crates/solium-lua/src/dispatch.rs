@@ -186,6 +186,8 @@ fn run(
             call_listeners(lua, "text_input", (field, why))
         }
         E::Activated((id, why)) => call_listeners(lua, "activate", (id, why)),
+        E::Renamed(id) => call_listeners(lua, "rename", id),
+        E::Sized((id, size)) => call_listeners(lua, "size", (id, size.w, size.h)),
         E::Resized(resized) => {
             let wire::Resized {
                 id,

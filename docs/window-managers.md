@@ -117,6 +117,7 @@ From then on the compositor sends a `batch` whenever something the window
 manager listens to happens. A batch has:
 
 - a `serial`;
+- `at`: what the compositor's clock read, in milliseconds;
 - `changes`: what changed on the desktop since the last batch. A window or a
   monitor is sent whole when any field of it changed. Apply these first, to
   your own copy of the desktop, so each event is handled with the desktop as
@@ -143,10 +144,17 @@ answer to that event is where to place it. A window's row can come in an
 earlier batch, while its application has not drawn yet (`shown` says whether
 it has): a `place` sent then is overridden when the window opens.
 
+A window placed in a tile is drawn in that rectangle from the next frame,
+whatever its application has drawn: the compositor fits the picture it has
+into it (the setting `resize.fill`) until the application draws the new size.
+Nothing waits for the application. One that draws a size of its own instead,
+or nothing for as long as `resize.patience`, is then drawn at the size it has,
+cut to its tile, and the `sized` event says which size that is.
+
 A window manager's picture of the desktop is as fresh as the last batch. What
 changed comes only with a batch, and a batch is sent only for an event it
 listens to, so one that wants to know of every window listens to `opened` and
-`closed`.
+`closed`, and one that reads titles listens to `renamed`.
 
 ### 3. Listening
 
@@ -188,7 +196,9 @@ applied in the order they come.
 
 For timing, prefer the compositor's clock: the `timer` command sets one, and
 the `timers` event says when it falls due. That clock is the one animations
-run on.
+run on, and every batch's `at` is a reading of it: a timer the compositor
+was late for is told once, however many times it fell due, and `at` says how
+late.
 
 ### 6. Questions
 

@@ -581,6 +581,10 @@ pub(crate) struct Solium {
     /// Lua once all of it is applied (Ruling 15).
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
     pub(crate) settled_attempts: Vec<crate::script::Settled>,
+    /// The windows whose applications took a size of their own since the
+    /// window manager was last told, each with the size, frame included
+    /// (`Self::tell_sized`).
+    pub(crate) took_sizes: Vec<(u64, (i32, i32))>,
     /// The actions `sol.act` was asked for that the compositor does not know,
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
@@ -1445,6 +1449,7 @@ impl Solium {
             touch_time: 0,
             touch_events: Vec::new(),
             settled_attempts: Vec::new(),
+            took_sizes: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
             unknown_in_workspaces: std::collections::HashSet::new(),
             telling_attempts: false,
@@ -2440,12 +2445,14 @@ impl Solium {
                 pane.set_shrinking(None);
             }
         }
-        // And one a fullscreen or maximise change is holding at its new
-        // rectangle is let go once its client answers, or has had long enough
-        // to. Until then the frames keep coming, or a client that never
-        // answers would be held until something else drew one.
+        // And one a placement, or a fullscreen or maximise change, is
+        // holding at its new rectangle is let go once its client answers, or
+        // has had long enough to. Until then the frames keep coming, or a
+        // client that never answers would be held until something else drew
+        // one.
         // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
         animating |= self.settle_answering(now);
+        self.tell_sized();
         // And a glide that has landed with its client's picture still held
         // against the edges it pinned, until `resize.patience` lets it go
         // (#233): that frame has to be drawn too.

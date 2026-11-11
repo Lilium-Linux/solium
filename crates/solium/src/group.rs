@@ -1197,6 +1197,7 @@ mod desk {
     /// on one desk and another on another.
     fn snapshot(ids: &[u64], focused: u64) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             windows: ids.iter().map(|id| window(*id, *id == focused)).collect(),
             monitors: vec![monitor()],
             work_area: monitor().area,

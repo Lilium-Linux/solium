@@ -248,6 +248,7 @@ fn a_script_binds_a_key_and_its_commands_come_back() {
     assert!(!scripts.has_binding("super+tab"));
 
     let snapshot = Snapshot {
+        now: std::time::Duration::ZERO,
         locked: false,
         notifications: Default::default(),
         audio: Default::default(),

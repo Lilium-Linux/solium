@@ -590,12 +590,17 @@ impl Solium {
                     }
                 }
                 Command::Unplace { id } => {
-                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
-                        && let Some(pane) = self.panes.get_mut(pane)
-                    {
-                        pane.untile();
-                        cramped_changed |= pane.cramped();
-                        pane.set_cramped(false);
+                    if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
+                        // Let go of altogether: a placement that was
+                        // holding it at its tile until its client answered
+                        // holds it no longer.
+                        // `a_window_let_go_by_its_layout_is_not_held_in_its_old_tile`.
+                        self.let_go_of_answer(pane);
+                        if let Some(pane) = self.panes.get_mut(pane) {
+                            pane.untile();
+                            cramped_changed |= pane.cramped();
+                            pane.set_cramped(false);
+                        }
                     }
                 }
                 Command::Close { id } => {
@@ -2094,6 +2099,50 @@ impl Solium {
         let slots = self.outers_before_restyle();
         self.decorations.swap(&mut self.panes);
         self.restyled(slots, now);
+    }
+
+    /// Tell the window manager that a window's title, or its application's
+    /// name, changed: only one that listens for it, since an application
+    /// changes its title as often as it likes and a snapshot is not free.
+    pub(crate) fn tell_renamed(&mut self, window: &Window) {
+        if !self
+            .scripts
+            .as_ref()
+            .is_some_and(|scripts| scripts.listens_to("renamed"))
+        {
+            return;
+        }
+        let id = self.window_id(window);
+        if id == 0 {
+            return;
+        }
+        let snapshot = self.snapshot();
+        let Some(mut scripts) = self.scripts.take() else {
+            return;
+        };
+        let outcome = scripts.renamed(id, snapshot);
+        self.scripts = Some(scripts);
+        self.apply(outcome);
+    }
+
+    /// Tell the window manager of each window whose application has drawn
+    /// it at a size of its own rather than the one it was placed at
+    /// (`Self::land_on`). Once a pass, after the holds are settled: not from
+    /// inside the settling, which is walking them.
+    /// `tests::real_client::fullscreen_glides::a_window_manager_is_told_the_size_an_application_took`.
+    pub(crate) fn tell_sized(&mut self) {
+        if self.took_sizes.is_empty() {
+            return;
+        }
+        for (id, size) in std::mem::take(&mut self.took_sizes) {
+            let snapshot = self.snapshot();
+            let Some(mut scripts) = self.scripts.take() else {
+                return;
+            };
+            let outcome = scripts.sized(id, size, snapshot);
+            self.scripts = Some(scripts);
+            self.apply(outcome);
+        }
     }
 
     pub(crate) fn trigger_relayout(&mut self) {

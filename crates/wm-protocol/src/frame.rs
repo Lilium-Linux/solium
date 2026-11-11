@@ -145,6 +145,7 @@ mod tests {
     fn batch() -> Message {
         Message::Batch(Batch {
             serial: 7,
+            at: 0.0,
             changes: vec![Change::WorkArea(Rect {
                 x: 0.0,
                 y: 32.0,

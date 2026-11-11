@@ -577,6 +577,8 @@
 ---| "closing" # A close was asked for and the window is fading: `(id)`.
 ---| "close_landed" # A close the compositor asked for has played its animation: the window has faded out of sight where it stood, and its application has just been asked to go -- or, an X11 one that let the last request go unanswered, been ended: `(id)`. Told after `closing` and before the `close` or `refused` that follows; not told for a window that went, or answered with a dialog, before its close landed, nor for one whose application never came, which is told `close` there and then.
 ---| "refused" # Its application declined, and the window is back: `(id)`.
+---| "rename" # A window's title, or its application's name, changed: `(id)`. `sol.windows()` has them.
+---| "size" # A window's application drew it at a size of its own, not the one it was placed at, and the window has taken it: `(id, w, h)`, frame included. Told once the application has answered a `sol.place`, or has had `resize.patience` to; until then the window is drawn in the rectangle it was placed at.
 ---| "minimize" # A window was minimized, by `sol.minimize` or its application: `(id)`. Told once, before anything else reacts, with the window already `minimized`: a present started here plays out before the window is put away, and a layout takes the window out. The keyboard leaves it afterwards, as it leaves a window whose close landed (`focus.after_close`).
 ---| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward, but never behind the lock: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
 ---| "close" # The window is gone: `(id)`.
@@ -2020,7 +2022,8 @@ function sol.unknown(key, meant) end
 ---finalizer, and the `__close` of a to-be-closed variable in the function a
 ---stop interrupts, run where no hook does, so the deadline cannot stop a loop
 ---in either.
----@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize", handler: fun(id: integer))
+---@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize"|"rename", handler: fun(id: integer))
+---@overload fun(event: "size", handler: fun(id: integer, w: integer, h: integer))
 ---@overload fun(event: "focus", handler: fun(id: integer, source: sol.FocusSource, changed: boolean))
 ---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
 ---@overload fun(event: "drag", handler: fun(id: integer, phase: "begin"|"move"|"end", x: number, y: number))

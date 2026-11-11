@@ -189,6 +189,7 @@ mod tests {
 
     fn snapshot(windows: &[(u64, &str)]) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             windows: windows
                 .iter()
                 .map(|(id, title)| {

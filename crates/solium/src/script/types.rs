@@ -297,6 +297,11 @@ pub(crate) struct MonitorInfo {
 /// What the compositor looked like when a handler was called.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Snapshot {
+    /// The compositor's clock when it was taken: what a batch is stamped
+    /// with, so a window manager can time by the clock its timers and the
+    /// compositor's animations run on.
+    /// `script::tests::rust_wm::a_batch_says_what_the_compositors_clock_read`.
+    pub(crate) now: std::time::Duration,
     /// Topmost first, so hit-testing walks it in order.
     pub(crate) windows: Vec<WindowInfo>,
     /// Every monitor, in the order the compositor holds them.

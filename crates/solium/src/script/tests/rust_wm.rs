@@ -127,6 +127,31 @@ fn a_window_manager_in_rust_answers_a_reload() {
     assert_eq!(placed(&outcome), [(1, 0.0, 800.0), (2, 800.0, 800.0)]);
 }
 
+/// **A batch says what the compositor's clock read**, in milliseconds: a
+/// window manager has timers on that clock, and with this it can time by
+/// it too, rather than by a clock of its own that the compositor's
+/// animations do not run on.
+#[test]
+fn a_batch_says_what_the_compositors_clock_read() {
+    use solium_wm_protocol::client::Heard;
+    let mut scripts = Scripts::played(|stream| {
+        let client = Client::over(stream);
+        if client.hello().is_err() {
+            return;
+        }
+        let _ = client.ready(vec![wire::Command::Listen(vec!["relayout".to_owned()])]);
+        while let Ok(Heard::Batch(batch)) = client.next() {
+            let said = wire::Command::Status(format!("{}", batch.at));
+            let _ = client.reply(batch.serial, false, vec![said]);
+        }
+    })
+    .expect("it answers `hello`");
+    let mut snapshot = empty_snapshot();
+    snapshot.now = std::time::Duration::from_millis(1500);
+    let outcome = scripts.relayout(snapshot);
+    assert_eq!(outcome.status.as_deref(), Some("1500"));
+}
+
 /// **A window manager of another version of the protocol is refused**: the
 /// compositor says which it speaks and which the window manager does, and
 /// starts nothing on it.

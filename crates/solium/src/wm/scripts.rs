@@ -137,6 +137,10 @@ pub(crate) struct Scripts {
     /// is sent, but for those that need no listening
     /// ([`wire::listen::ALWAYS`]).
     listens: std::collections::BTreeSet<String>,
+    /// What the compositor's clock read at the last snapshot a batch was
+    /// made from, in milliseconds: what a batch with no snapshot of its own
+    /// is stamped with.
+    pub(crate) at: f64,
     /// Each bound combination the window manager wrote in a spelling of
     /// its own, by its one spelling.
     spellings: std::collections::HashMap<String, String>,
@@ -272,6 +276,7 @@ impl Scripts {
             loaded_stores,
             keeps: std::collections::BTreeMap::new(),
             listens: std::collections::BTreeSet::new(),
+            at: 0.0,
             spellings: std::collections::HashMap::new(),
             timing: crate::wm::timing::Timing::default(),
         };
@@ -750,6 +755,13 @@ impl Scripts {
     /// is one that needs no listening.
     pub(crate) fn hears(&self, event: &wire::Event) -> bool {
         event.always() || self.listens.contains(event.case())
+    }
+
+    /// Whether the window manager listens to the event of this name: asked
+    /// before a snapshot is taken for an event that comes often and that
+    /// few listen to, a window's title among them.
+    pub(crate) fn listens_to(&self, event: &str) -> bool {
+        self.listens.contains(event)
     }
 
     /// Commands the window manager sent of its own accord, asked for by no

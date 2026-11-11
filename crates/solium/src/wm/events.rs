@@ -137,6 +137,21 @@ impl Scripts {
         self.send(snapshot, wire::Event::Activated((id, why.to_owned())))
     }
 
+    /// A window's title, or its application's name, changed.
+    pub(crate) fn renamed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
+        self.send(snapshot, wire::Event::Renamed(id))
+    }
+
+    /// A window's application drew it at a size of its own, and the window
+    /// has taken it: the size, frame included.
+    pub(crate) fn sized(&mut self, id: u64, size: (i32, i32), snapshot: Snapshot) -> Outcome {
+        let size = wire::Size {
+            w: size.0,
+            h: size.1,
+        };
+        self.send(snapshot, wire::Event::Sized((id, size)))
+    }
+
     /// A window's own resize moved an edge to `edge_at`.
     ///
     /// A layout that takes it moves a seam, and the compositor resizes the
@@ -506,8 +521,12 @@ impl Scripts {
             return Some((None, Outcome::default()));
         }
         self.serial += 1;
+        if let Some(snapshot) = &snapshot {
+            self.at = snapshot.now.as_secs_f64() * 1000.0;
+        }
         let batch = wire::Batch {
             serial: self.serial,
+            at: self.at,
             changes: snapshot
                 .as_ref()
                 .map(|snapshot| self.told.changes(snapshot))

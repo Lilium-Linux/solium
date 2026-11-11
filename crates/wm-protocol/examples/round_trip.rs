@@ -144,6 +144,7 @@ fn main() {
             let start = Instant::now();
             let batch = Message::Batch(Batch {
                 serial,
+                at: 0.0,
                 changes: rows.clone(),
                 events: vec![Event::Key("super+t".to_owned())],
             });

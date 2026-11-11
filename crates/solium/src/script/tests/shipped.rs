@@ -780,6 +780,7 @@ fn the_shipped_media_keys_act_on_the_active_player_and_fall_back_to_playerctl() 
     .expect("writing the entry point");
     let mut scripts = Scripts::load(&entry).expect("loading the shipped init.lua");
     let following = super::Snapshot {
+        now: std::time::Duration::ZERO,
         media: crate::services::media::Seen {
             view: std::rc::Rc::new(crate::services::media::View {
                 available: true,

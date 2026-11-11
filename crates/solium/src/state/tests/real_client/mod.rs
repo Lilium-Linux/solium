@@ -5633,6 +5633,10 @@ fn tiled_alone(
         .and_then(Pane::placed)
         .expect("a pane the layout has just placed is in a tile");
     state.settle(state.clock.now());
+    // And past the patience its tile holds it for: these clients answer
+    // nothing, and a desktop between gestures is one whose windows are
+    // drawn as their clients drew them.
+    past_patience(state);
     (pane, tile)
 }
 
@@ -5641,6 +5645,21 @@ fn tiled_alone(
 fn a_frame(state: &mut Solium) {
     state.sync_panes();
     state.settle(state.clock.now());
+}
+
+/// Past the time a placement holds a window in its tile for its client's
+/// answer (`resize.patience`), retired as a frame retires it. A client
+/// that has answered nothing, or drew a size of its own without saying
+/// which it was answering, is drawn as it is from here: as it was from
+/// the next frame, before a placement held anything
+/// (`fullscreen_glides::a_window_placed_at_a_new_size_is_drawn_there_until_its_client_answers`).
+fn past_patience(state: &mut Solium) {
+    state
+        .clock
+        .advance(crate::resizing::PATIENCE + Duration::from_millis(1));
+    state.sync_panes();
+    state.settle(state.clock.now());
+    state.sync_panes();
 }
 
 /// **#133: a tiled client that commits more than its tile is held
@@ -5709,6 +5728,9 @@ fn a_tiled_client_that_commits_more_than_its_tile_is_held_inside_it() {
     );
     state.space.raise_element(&left, false);
     a_frame(&mut state);
+    // The left client drew a size nobody asked it for: its tile holds it
+    // at the tile's own until its patience is out.
+    past_patience(&mut state);
     assert_eq!(
         left.geometry().size,
         Size::from(wide),
@@ -14359,13 +14381,18 @@ fn a_keyboard_nudge_arms_no_bridge_and_still_reaches_its_client() {
     );
 
     assert!(
-        !state.holding_resize(pane),
+        state.held_hold(pane).is_none(),
         "a keypress is not a gesture and has nothing that could ever \
-         end a hold"
+         end a drag's hold"
     );
     assert!(
         state.resize_bridge.is_none(),
         "and no bridge was opened for it either"
+    );
+    assert!(
+        state.holding_resize(pane),
+        "what holds it is its placement, until its client answers or \
+         its patience runs out"
     );
     pump(
         &mut display,

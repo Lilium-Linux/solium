@@ -350,6 +350,7 @@ mod tests {
     fn batch(serial: u64, event: Event) -> Message {
         Message::Batch(Batch {
             serial,
+            at: 0.0,
             changes: Vec::new(),
             events: vec![event],
         })

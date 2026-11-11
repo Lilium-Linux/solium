@@ -1538,14 +1538,14 @@ local defaults = {
         -- kept.
         background = "edge",
 
-        -- How long, in milliseconds, a window's picture waits at the
-        -- rectangle a change gave it for its application to draw at that
-        -- size, once the change is over: after you let go of an edge, after
-        -- a fullscreen or maximise glide lands, and after a layout's glide
-        -- lands -- when the picture stays against the edges the glide did not
-        -- move. Then the window is shown at the size the application has. 0
-        -- (do not wait) to 5000; anything else is named in the log and the
-        -- default kept.
+        -- How long, in milliseconds, a window waits at the rectangle a
+        -- change gave it for its application to draw at that size, once the
+        -- change is over: after you let go of an edge, after a fullscreen or
+        -- maximise glide lands, and after a layout puts a window in a tile,
+        -- at once or by a glide -- when its picture also stays against the
+        -- edges the glide did not move. Then the window is shown at the size
+        -- the application has. 0 (do not wait) to 5000; anything else is
+        -- named in the log and the default kept.
         -- `a_longer_patience_keeps_a_landed_glides_picture_where_it_was_for_longer`.
         patience = 250,
 
