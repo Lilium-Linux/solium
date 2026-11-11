@@ -1,0 +1,65 @@
+# A batch: every kind of change and a handful of events, with the largest
+# serial there is.
+batch {
+  serial: 18446744073709551615
+  at: 1234.5
+  changes {
+    window {
+      id: 1
+      rect { x: 10 y: 20 w: 640 h: 480 }
+      insets { top: 30 }
+      title: "Öffnen"
+      focused: true
+      monitor: "DP-1"
+      parent { window: 9 }
+      icon { x: 1 y: 2 w: 3 h: 4 }
+      app_id: "foot"
+      min { w: 10 h: 10 }
+      style: "liquid"
+      x11_type: "dialog"
+      content_type: "none"
+      pid: 0
+    }
+  }
+  changes { window_gone: 4 }
+  changes { stacking { items: 3 items: 1 items: 2 } }
+  changes {
+    monitors {
+      items {
+        name: "DP-1"
+        area { y: 32 w: 1920 h: 1048 }
+        whole { w: 1920 h: 1080 }
+        scale: 1.25
+        primary: true
+        transform: "normal"
+      }
+    }
+  }
+  changes { cursor { x: 1.5 y: -2 } }
+  changes { shortcuts_owner {} }
+  changes {
+    text_field {
+      value { window: 1 caret { x: 1 y: 1 w: 1 h: 10 } framed: true }
+    }
+  }
+  changes { locked: false }
+  changes { service { name: "audio" } }
+  events { startup {} }
+  events { key: "super+t" }
+  events { fullscreen { id: 1 entering: true } }
+  events { timers { items { id: 4 } items { id: 5 last: true } } }
+  events {
+    runs {
+      items { stdout { id: 1 line: "hi" } }
+      items { done { id: 1 code: 0 truncated: true } }
+    }
+  }
+  events {
+    files {
+      items { read { id: 2 outcome { error: "gone" } } }
+      items { watched { id: 3 change: FILE_CHANGE_REMOVED path: "~/x" } }
+    }
+  }
+  events { sized { id: 1 size { w: 640 h: 480 } } }
+  events { focused { id: 1 cause: FOCUS_CAUSE_HOVER changed: true } }
+}

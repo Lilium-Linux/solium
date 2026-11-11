@@ -1,14 +1,16 @@
 //! Frames: each message on the socket, prefixed with its length.
 //!
-//! A frame is a `u32` byte count, little-endian, then that many bytes: one
-//! [`crate::Message`] in the protocol's encoding. A peer reads
-//! whole frames out of whatever the socket hands it, which on a
+//! A frame is a byte count as a varint, then that many bytes: one
+//! [`crate::Message`] as protobuf writes it. This is protobuf's own
+//! "delimited" framing, which its libraries read and write whole
+//! (`ParseDelimitedFrom`, `sizeDelimitedDecodeStream`, `protodelim`). A peer
+//! reads whole frames out of whatever the socket hands it, which on a
 //! non-blocking socket can be half a frame or three and a half.
 
 use std::io::{self, Read, Write};
 
 use crate::Message;
-use crate::wire::{DecodeError, Input, Wire};
+use crate::wire::{self, DecodeError, Input, Wire};
 
 /// A frame larger than this, in bytes, closes the connection: no message of
 /// the protocol is near it (a batch of every window of a full desktop is
@@ -43,10 +45,8 @@ impl std::error::Error for FrameError {}
 
 /// A message as one frame, ready to write.
 pub fn encode(message: &Message) -> Vec<u8> {
-    let mut out = vec![0u8; 4];
-    message.encode(&mut out);
-    let length = u32::try_from(out.len() - 4).unwrap_or(u32::MAX);
-    out[..4].copy_from_slice(&length.to_le_bytes());
+    let mut out = Vec::with_capacity(256);
+    wire::delimited(&mut out, |out| message.encode(out));
     out
 }
 
@@ -60,6 +60,9 @@ pub fn write(writer: &mut impl Write, message: &Message) -> io::Result<()> {
 pub struct Reader {
     buffer: Vec<u8>,
     max: usize,
+    /// What was left out of the messages read, for being of a kind this
+    /// version does not have.
+    unknown: u32,
 }
 
 impl Default for Reader {
@@ -73,6 +76,7 @@ impl Reader {
         Self {
             buffer: Vec::new(),
             max,
+            unknown: 0,
         }
     }
 
@@ -81,21 +85,52 @@ impl Reader {
         self.buffer.extend_from_slice(bytes);
     }
 
-    /// The next whole message, if one has arrived.
+    /// How much of what has been read since this was last asked was left
+    /// out for being of a kind this version does not have: a command, a
+    /// change or a whole message a newer peer sent. The rest was read.
+    pub fn unknown(&mut self) -> u32 {
+        std::mem::take(&mut self.unknown)
+    }
+
+    /// The next whole message, if one has arrived. One of a kind this
+    /// version does not have is passed over and counted.
     pub fn next_message(&mut self) -> Result<Option<Message>, FrameError> {
-        let Some(header) = self.buffer.get(..4) else {
-            return Ok(None);
-        };
-        let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        if length > self.max {
-            return Err(FrameError::TooLarge(length));
+        loop {
+            // The length: a varint of at most five bytes, since no frame
+            // is near four gigabytes.
+            let mut length = 0u64;
+            let mut header = 0;
+            loop {
+                let Some(byte) = self.buffer.get(header) else {
+                    return Ok(None);
+                };
+                length |= u64::from(byte & 0x7f) << (7 * header);
+                header += 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                if header == 5 {
+                    return Err(FrameError::TooLarge(usize::MAX));
+                }
+            }
+            let length = usize::try_from(length).unwrap_or(usize::MAX);
+            if length > self.max {
+                return Err(FrameError::TooLarge(length));
+            }
+            let Some(body) = self.buffer.get(header..header + length) else {
+                return Ok(None);
+            };
+            let read = Input::read_whole::<Message>(body);
+            self.buffer.drain(..header + length);
+            match read {
+                Ok((message, unknown)) => {
+                    self.unknown += unknown;
+                    return Ok(Some(message));
+                }
+                Err(DecodeError::UnknownCase(_)) => self.unknown += 1,
+                Err(err) => return Err(FrameError::Decode(err)),
+            }
         }
-        let Some(body) = self.buffer.get(4..4 + length) else {
-            return Ok(None);
-        };
-        let message = Input::read_whole::<Message>(body).map_err(FrameError::Decode)?;
-        self.buffer.drain(..4 + length);
-        Ok(Some(message))
     }
 
     /// Read what a non-blocking socket has, without waiting, and return the
@@ -197,7 +232,8 @@ mod tests {
     #[test]
     fn a_frame_past_the_limit_is_refused_before_it_is_read() {
         let mut reader = Reader::new(16);
-        reader.push(&1000u32.to_le_bytes());
+        // 1000, as a varint.
+        reader.push(&[0xe8, 0x07]);
         assert!(matches!(
             reader.next_message(),
             Err(FrameError::TooLarge(1000))
@@ -207,9 +243,40 @@ mod tests {
     #[test]
     fn a_frame_that_is_not_a_message_is_an_error() {
         let mut reader = Reader::default();
-        reader.push(&2u32.to_le_bytes());
-        reader.push(&[0x7f, 0x00]);
+        // Two bytes: a field of a kind protobuf does not have.
+        reader.push(&[2, 0x0b, 0x00]);
         assert!(matches!(reader.next_message(), Err(FrameError::Decode(_))));
+    }
+
+    /// A newer peer may send a message this version has no case for. It is
+    /// not the end of the connection: the frame is passed over, and what
+    /// comes after it is read.
+    #[test]
+    fn a_message_of_a_kind_this_version_does_not_have_is_passed_over() {
+        let mut reader = Reader::default();
+        // One frame of three bytes: field 99 of `message`, a varint.
+        reader.push(&[3, 0x98, 0x06, 0x01]);
+        reader.push(&encode(&batch()));
+        assert_eq!(reader.next_message().expect("decodes"), Some(batch()));
+        assert_eq!(reader.unknown(), 1, "and it is counted, to be said");
+        assert_eq!(reader.unknown(), 0, "once");
+    }
+
+    #[test]
+    fn a_frame_is_its_length_as_a_varint_and_then_the_message() {
+        let short = encode(&Message::Goodbye("bye".to_owned()));
+        // `goodbye` is `message`'s tenth case: field 10, text.
+        assert_eq!(short, [5, 0x52, 3, b'b', b'y', b'e']);
+        let long = encode(&Message::Goodbye("x".repeat(300)));
+        // 303 bytes of message: 0xaf 0x02.
+        assert_eq!(long[..2], [0xaf, 0x02]);
+        assert_eq!(long.len(), 2 + 303);
+        let mut reader = Reader::default();
+        reader.push(&long);
+        assert_eq!(
+            reader.next_message().expect("decodes"),
+            Some(Message::Goodbye("x".repeat(300)))
+        );
     }
 
     #[test]

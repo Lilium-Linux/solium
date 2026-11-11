@@ -1,16 +1,24 @@
-//! Generate the protocol's Rust types and their encoding from `wit/`.
+//! Generate, from `wit/`, the protocol's Rust types with their encoding and
+//! the `.proto` file that says the same in protobuf's own language.
 //!
-//! The WIT is the protocol's one definition: a window manager in another
-//! language reads it, and this crate is built from it, so the two cannot
-//! disagree. Every named type of every interface becomes a Rust type of the
-//! same name in `UpperCamelCase`, its fields and cases in `snake_case` and
-//! `UpperCamelCase`, with a [`Wire`] implementation in the encoding
-//! `src/lib.rs` documents.
+//! The WIT is the protocol's one definition. This crate is built from it,
+//! and a window manager in another language is built from the `.proto`
+//! with protobuf's generator for that language, so the two cannot
+//! disagree: what is on the wire is protobuf, and both files describe it.
+//!
+//! A field's number on the wire is its place in its record, counted from
+//! 1; a variant's case is a field numbered by its place, from 1; an enum's
+//! case is its place, from 0. So the WIT is only ever added to at the end
+//! of a record, a variant or an enum, and what is there keeps its place.
 
-use std::fmt::Write as _;
+#[path = "generate/proto.rs"]
+mod proto;
+#[path = "generate/rust.rs"]
+mod rust;
+
 use std::path::Path;
 
-use wit_parser::{Resolve, Type, TypeDefKind, TypeId, TypeOwner};
+use wit_parser::{Resolve, Type, TypeDef, TypeDefKind, TypeId, TypeOwner};
 
 fn main() {
     let wit = Path::new("wit");
@@ -27,14 +35,9 @@ fn main() {
         .map_or_else(|| "0.0.0".to_owned(), ToString::to_string);
     println!("cargo:rustc-env=SOLIUM_WM_PROTOCOL_VERSION={version}");
 
-    let mut out = String::new();
-    out.push_str("use crate::wire::{DecodeError, Input, Wire, write_leb};\n\n");
-    // What the WIT says nothing about: the documentation is generated from
-    // its comments, so a type or a word of the protocol's vocabulary with
-    // none is one nobody is told the meaning of.
-    let mut undocumented = Vec::new();
-    // Every type in the package, in the order the resolver sorted them,
-    // which puts each after the types it uses.
+    // Every type of the package that has a name of its own, in the order
+    // the resolver sorted them, which puts each after the types it uses.
+    let mut named = Vec::new();
     for (id, def) in &resolve.types {
         let TypeOwner::Interface(owner) = def.owner else {
             continue;
@@ -46,51 +49,141 @@ fn main() {
             continue;
         };
         // A `use` brings a type into another interface as an alias of the
-        // same id: the original is generated once, under its own name.
+        // same name: the original is generated once.
         if let TypeDefKind::Type(Type::Id(other)) = &def.kind
             && resolve.types[*other].name.as_deref() == Some(name.as_str())
         {
             continue;
         }
-        if def.docs.contents.is_none() {
-            undocumented.push(name.clone());
-        }
-        if let TypeDefKind::Variant(variant) = &def.kind
-            && VOCABULARY.contains(&name.as_str())
-        {
-            for case in &variant.cases {
-                if case.docs.contents.is_none() {
-                    undocumented.push(format!("{name}.{}", case.name));
-                }
-            }
-        }
-        generate(&resolve, id, name, &mut out);
+        named.push(id);
     }
-    out.push_str(
-        "/// The types of the WIT, and the cases of its messages, changes, events,\n\
-         /// commands, queries and replies, that have no documentation: none, which\n\
-         /// `tests::every_word_of_the_protocol_says_what_it_means` holds it to.\n\
-         pub const UNDOCUMENTED: &[&str] = &[\n",
-    );
-    for name in &undocumented {
-        let _ = writeln!(out, "    {name:?},");
-    }
-    out.push_str("];\n");
+    let model = Model {
+        resolve: &resolve,
+        named,
+    };
 
-    let target = Path::new(&std::env::var("OUT_DIR").unwrap_or_else(|_| fail("no OUT_DIR")))
-        .join("generated.rs");
-    if let Err(err) = std::fs::write(&target, out) {
-        fail(&format!("writing {}: {err}", target.display()));
+    let out =
+        Path::new(&std::env::var("OUT_DIR").unwrap_or_else(|_| fail("no OUT_DIR"))).to_path_buf();
+    for (file, text) in [
+        ("generated.rs", rust::generate(&model)),
+        ("solium_wm.proto", proto::generate(&model, &version)),
+    ] {
+        let target = out.join(file);
+        if let Err(err) = std::fs::write(&target, text) {
+            fail(&format!("writing {}: {err}", target.display()));
+        }
     }
 }
-
-/// The variants whose every case is a word of the protocol a window manager
-/// reads or writes, and so is documented.
-const VOCABULARY: &[&str] = &["message", "change", "event", "command", "query", "reply"];
 
 fn fail(message: &str) -> ! {
     eprintln!("solium-wm-protocol: {message}");
     std::process::exit(1)
+}
+
+/// The WIT, as both generators read it.
+struct Model<'a> {
+    resolve: &'a Resolve,
+    /// The types generated, in order.
+    named: Vec<TypeId>,
+}
+
+/// A value with no parts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scalar {
+    Bool,
+    U8,
+    U16,
+    U32,
+    U64,
+    S8,
+    S16,
+    S32,
+    S64,
+    F32,
+    F64,
+    Char,
+    String,
+}
+
+/// What a field or a case's payload is, with every alias followed.
+enum Shape {
+    Scalar(Scalar),
+    /// A record, a variant or an enum, by the id of its definition.
+    Named(TypeId),
+    /// `list<u8>`.
+    Bytes,
+    /// A list of scalars or of named types.
+    List(Box<Shape>),
+    Option(Box<Shape>),
+}
+
+impl Model<'_> {
+    fn def(&self, id: TypeId) -> &TypeDef {
+        &self.resolve.types[id]
+    }
+
+    /// A named type's name, as the WIT spells it.
+    fn name(&self, id: TypeId) -> &str {
+        self.def(id).name.as_deref().unwrap_or("")
+    }
+
+    fn is_enum(&self, id: TypeId) -> bool {
+        matches!(self.def(id).kind, TypeDefKind::Enum(_))
+    }
+
+    /// The shape of a type, or the build's end for one protobuf has no
+    /// plain word for: a tuple, whose parts have no names, and a list or
+    /// an option nested in another.
+    fn shape(&self, ty: &Type) -> Shape {
+        let scalar = match ty {
+            Type::Bool => Scalar::Bool,
+            Type::U8 => Scalar::U8,
+            Type::U16 => Scalar::U16,
+            Type::U32 => Scalar::U32,
+            Type::U64 => Scalar::U64,
+            Type::S8 => Scalar::S8,
+            Type::S16 => Scalar::S16,
+            Type::S32 => Scalar::S32,
+            Type::S64 => Scalar::S64,
+            Type::F32 => Scalar::F32,
+            Type::F64 => Scalar::F64,
+            Type::Char => Scalar::Char,
+            Type::String => Scalar::String,
+            Type::Id(id) => {
+                return match &self.def(*id).kind {
+                    TypeDefKind::Record(_) | TypeDefKind::Variant(_) | TypeDefKind::Enum(_) => {
+                        Shape::Named(*id)
+                    }
+                    TypeDefKind::Type(inner) => self.shape(inner),
+                    TypeDefKind::List(Type::U8) => Shape::Bytes,
+                    TypeDefKind::List(item) => {
+                        let item = self.shape(item);
+                        if !matches!(item, Shape::Scalar(_) | Shape::Named(_)) {
+                            fail(
+                                "a list of lists, of options or of bytes has no name for \
+                                 its items: make the item a record",
+                            );
+                        }
+                        Shape::List(Box::new(item))
+                    }
+                    TypeDefKind::Option(item) => {
+                        let item = self.shape(item);
+                        if matches!(item, Shape::Option(_)) {
+                            fail("an option of an option is one option");
+                        }
+                        Shape::Option(Box::new(item))
+                    }
+                    TypeDefKind::Tuple(_) => fail(
+                        "a tuple's parts have no names, and a window manager in another \
+                         language reads them by name: make it a record",
+                    ),
+                    other => fail(&format!("a {} is not in the protocol", other.as_str())),
+                };
+            }
+            other => fail(&format!("{other:?} is not in the protocol")),
+        };
+        Shape::Scalar(scalar)
+    }
 }
 
 /// `kebab-case` as `UpperCamelCase`.
@@ -103,251 +196,4 @@ fn camel(name: &str) -> String {
             })
         })
         .collect()
-}
-
-/// `kebab-case` as `snake_case`, a Rust keyword escaped.
-fn snake(name: &str) -> String {
-    let name = name.replace('-', "_");
-    match name.as_str() {
-        "type" | "move" | "match" | "ref" | "self" | "in" | "loop" | "box" | "use" | "mod"
-        | "fn" | "impl" | "for" | "where" | "async" | "await" | "dyn" | "static" | "struct"
-        | "enum" | "trait" | "crate" | "super" | "const" | "let" | "mut" | "pub" | "return"
-        | "true" | "false" | "while" | "if" | "else" | "break" | "continue" | "unsafe"
-        | "extern" | "abstract" | "final" | "override" | "virtual" | "yield" | "try" | "macro"
-        | "priv" | "typeof" | "unsized" | "become" | "do" | "gen" => {
-            format!("r#{name}")
-        }
-        _ => name,
-    }
-}
-
-/// The Rust type a WIT type is written as.
-fn rust(resolve: &Resolve, ty: &Type) -> String {
-    match ty {
-        Type::Bool => "bool".into(),
-        Type::U8 => "u8".into(),
-        Type::U16 => "u16".into(),
-        Type::U32 => "u32".into(),
-        Type::U64 => "u64".into(),
-        Type::S8 => "i8".into(),
-        Type::S16 => "i16".into(),
-        Type::S32 => "i32".into(),
-        Type::S64 => "i64".into(),
-        Type::F32 => "f32".into(),
-        Type::F64 => "f64".into(),
-        Type::Char => "char".into(),
-        Type::String => "String".into(),
-        Type::Id(id) => {
-            let def = &resolve.types[*id];
-            if let Some(name) = &def.name {
-                // An alias brought in by `use` is the original's name.
-                let mut target = *id;
-                while let TypeDefKind::Type(Type::Id(next)) = &resolve.types[target].kind {
-                    if resolve.types[*next].name.as_deref() != Some(name.as_str()) {
-                        break;
-                    }
-                    target = *next;
-                }
-                return camel(resolve.types[target].name.as_deref().unwrap_or(name));
-            }
-            match &def.kind {
-                TypeDefKind::List(item) => format!("Vec<{}>", rust(resolve, item)),
-                TypeDefKind::Option(item) => format!("Option<{}>", rust(resolve, item)),
-                TypeDefKind::Tuple(tuple) => {
-                    let items: Vec<String> =
-                        tuple.types.iter().map(|item| rust(resolve, item)).collect();
-                    format!("({},)", items.join(", "))
-                }
-                TypeDefKind::Type(inner) => rust(resolve, inner),
-                other => fail(&format!(
-                    "an anonymous {} is not in the protocol",
-                    other.as_str()
-                )),
-            }
-        }
-        other => fail(&format!("{other:?} is not in the protocol")),
-    }
-}
-
-/// The documentation a WIT item carries, as Rust doc comments.
-fn docs(contents: Option<&String>, indent: &str, out: &mut String) {
-    if let Some(contents) = contents {
-        for line in contents.lines() {
-            let _ = writeln!(out, "{indent}/// {line}");
-        }
-    }
-}
-
-fn generate(resolve: &Resolve, id: TypeId, name: &str, out: &mut String) {
-    let def = &resolve.types[id];
-    let ty = camel(name);
-    docs(def.docs.contents.as_ref(), "", out);
-    match &def.kind {
-        TypeDefKind::Record(record) => {
-            let _ = writeln!(
-                out,
-                "#[derive(Clone, Debug, PartialEq)]\npub struct {ty} {{"
-            );
-            for field in &record.fields {
-                docs(field.docs.contents.as_ref(), "    ", out);
-                let _ = writeln!(
-                    out,
-                    "    pub {}: {},",
-                    snake(&field.name),
-                    rust(resolve, &field.ty)
-                );
-            }
-            out.push_str("}\n\n");
-            let _ = writeln!(
-                out,
-                "impl Wire for {ty} {{\n    fn encode(&self, out: &mut Vec<u8>) {{"
-            );
-            for field in &record.fields {
-                let _ = writeln!(out, "        self.{}.encode(out);", snake(&field.name));
-            }
-            out.push_str("    }\n    fn decode(input: &mut Input<'_>) -> Result<Self, DecodeError> {\n        Ok(Self {\n");
-            for field in &record.fields {
-                let _ = writeln!(
-                    out,
-                    "            {}: Wire::decode(input)?,",
-                    snake(&field.name)
-                );
-            }
-            out.push_str("        })\n    }\n}\n\n");
-        }
-        TypeDefKind::Variant(variant) => {
-            let _ = writeln!(out, "#[derive(Clone, Debug, PartialEq)]\npub enum {ty} {{");
-            for case in &variant.cases {
-                docs(case.docs.contents.as_ref(), "    ", out);
-                match &case.ty {
-                    Some(payload) => {
-                        let _ = writeln!(
-                            out,
-                            "    {}({}),",
-                            camel(&case.name),
-                            rust(resolve, payload)
-                        );
-                    }
-                    None => {
-                        let _ = writeln!(out, "    {},", camel(&case.name));
-                    }
-                }
-            }
-            out.push_str("}\n\n");
-            // Each case's name as the WIT spells it, and all of them: an
-            // event is listened to by its name.
-            let _ = writeln!(
-                out,
-                "impl {ty} {{\n    /// Every case's name, as the WIT spells it, in its order.\n    pub const CASES: &'static [&'static str] = &["
-            );
-            for case in &variant.cases {
-                let _ = writeln!(out, "        {:?},", case.name);
-            }
-            let _ = writeln!(
-                out,
-                "    ];\n\n    /// This case's name, as the WIT spells it.\n    pub const fn case(&self) -> &'static str {{\n        match self {{"
-            );
-            for case in &variant.cases {
-                let pattern = if case.ty.is_some() { "(_)" } else { "" };
-                let _ = writeln!(
-                    out,
-                    "            Self::{}{pattern} => {:?},",
-                    camel(&case.name),
-                    case.name
-                );
-            }
-            out.push_str("        }\n    }\n}\n\n");
-            let _ = writeln!(
-                out,
-                "impl Wire for {ty} {{\n    fn encode(&self, out: &mut Vec<u8>) {{\n        match self {{"
-            );
-            for (index, case) in variant.cases.iter().enumerate() {
-                let case_name = camel(&case.name);
-                if case.ty.is_some() {
-                    let _ = writeln!(
-                        out,
-                        "            Self::{case_name}(payload) => {{ write_leb(out, {index}); payload.encode(out); }}"
-                    );
-                } else {
-                    let _ = writeln!(
-                        out,
-                        "            Self::{case_name} => write_leb(out, {index}),"
-                    );
-                }
-            }
-            out.push_str("        }\n    }\n    fn decode(input: &mut Input<'_>) -> Result<Self, DecodeError> {\n        match input.leb(64)? {\n");
-            for (index, case) in variant.cases.iter().enumerate() {
-                let case_name = camel(&case.name);
-                if case.ty.is_some() {
-                    let _ = writeln!(
-                        out,
-                        "            {index} => Ok(Self::{case_name}(Wire::decode(input)?)),"
-                    );
-                } else {
-                    let _ = writeln!(out, "            {index} => Ok(Self::{case_name}),");
-                }
-            }
-            let _ = writeln!(
-                out,
-                "            case => Err(DecodeError::BadCase({name:?}, case)),\n        }}\n    }}\n}}\n"
-            );
-        }
-        TypeDefKind::Enum(enumeration) => {
-            let _ = writeln!(
-                out,
-                "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub enum {ty} {{"
-            );
-            for case in &enumeration.cases {
-                docs(case.docs.contents.as_ref(), "    ", out);
-                let _ = writeln!(out, "    {},", camel(&case.name));
-            }
-            out.push_str("}\n\n");
-            // Each case's name as the WIT spells it, for a peer that speaks
-            // in words: a script, a log.
-            let _ = writeln!(
-                out,
-                "impl {ty} {{\n    /// This case's name, as the WIT spells it.\n    pub const fn name(self) -> &'static str {{\n        match self {{"
-            );
-            for case in &enumeration.cases {
-                let _ = writeln!(
-                    out,
-                    "            Self::{} => {:?},",
-                    camel(&case.name),
-                    case.name
-                );
-            }
-            out.push_str("        }\n    }\n}\n\n");
-            let _ = writeln!(
-                out,
-                "impl Wire for {ty} {{\n    fn encode(&self, out: &mut Vec<u8>) {{\n        write_leb(out, *self as u64);\n    }}\n    fn decode(input: &mut Input<'_>) -> Result<Self, DecodeError> {{\n        match input.leb(64)? {{"
-            );
-            for (index, case) in enumeration.cases.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "            {index} => Ok(Self::{}),",
-                    camel(&case.name)
-                );
-            }
-            let _ = writeln!(
-                out,
-                "            case => Err(DecodeError::BadCase({name:?}, case)),\n        }}\n    }}\n}}\n"
-            );
-        }
-        TypeDefKind::Type(inner) => {
-            let _ = writeln!(out, "pub type {ty} = {};\n", rust(resolve, inner));
-        }
-        TypeDefKind::List(item) => {
-            let _ = writeln!(out, "pub type {ty} = Vec<{}>;\n", rust(resolve, item));
-        }
-        TypeDefKind::Option(item) => {
-            let _ = writeln!(out, "pub type {ty} = Option<{}>;\n", rust(resolve, item));
-        }
-        TypeDefKind::Tuple(_) => {
-            let _ = writeln!(out, "pub type {ty} = {};\n", rust(resolve, &Type::Id(id)));
-        }
-        other => fail(&format!(
-            "`{name}` is a {}, which the protocol does not use",
-            other.as_str()
-        )),
-    }
 }

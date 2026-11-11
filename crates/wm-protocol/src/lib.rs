@@ -4,28 +4,36 @@
 //! A window manager is a separate program. It hears the desktop as a
 //! [`Message::Batch`] of changes and events, and answers with commands; it
 //! may also send commands of its own at any time. Every message is one
-//! frame on a Unix stream socket ([`frame`]), its value in the encoding
-//! below, so a window manager in any language can speak it from the WIT and
-//! this page alone.
+//! frame on a Unix stream socket ([`frame`]).
 //!
 //! # The encoding
 //!
-//! - `bool`: one byte, 0 or 1.
-//! - unsigned integers: LEB128; signed ones: zigzag, then LEB128.
-//! - `f32`, `f64`: little-endian IEEE 754.
-//! - `char`: its scalar value, as a `u32`.
-//! - `string`: its length in bytes, then its UTF-8.
-//! - `list<T>`: its length, then each item.
-//! - `option<T>`: 0 for none; 1, then the value.
-//! - `tuple`, `record`: each element or field in order.
-//! - `variant`, `enum`: the case's index in declaration order, then the
-//!   case's payload, if it has one.
+//! What is on the wire is protobuf. `proto/solium_wm.proto`, generated from
+//! the same WIT, describes it in protobuf's own language, so a window
+//! manager in any language with a protobuf generator is built from that
+//! file, and this crate is the same thing for Rust:
+//!
+//! - a record is a message, its fields numbered from 1 in the WIT's order;
+//! - a variant is a message with one `oneof`, its cases numbered from 1;
+//! - an enum's cases are numbered from 0;
+//! - unsigned integers are `uint32` and `uint64`, signed ones `sint32` and
+//!   `sint64`, `f32` and `f64` are `float` and `double`, `list<u8>` is
+//!   `bytes`, and a list of numbers is packed.
+//!
+//! Either side may be newer than the other. A field one does not know is
+//! passed over, a field that was not sent is its type's default (0, false,
+//! empty, none, a variant's first case), and a command, change or event in
+//! a case one does not have is left out of its list and counted
+//! ([`frame::Reader::unknown`]). So the WIT is only ever added to, at the
+//! end of a record, a variant or an enum.
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::panic, clippy::unwrap_used))]
 
 pub mod client;
 pub mod combo;
 pub mod frame;
+#[cfg(test)]
+mod golden;
 pub mod listen;
 pub mod lock;
 pub mod mirror;
@@ -35,7 +43,7 @@ pub mod touch;
 mod wire;
 
 pub use client::{Ask, compatible};
-pub use wire::{DecodeError, Input, Wire};
+pub use wire::{DecodeError, Input, Kind, Wire};
 
 #[allow(
     clippy::all,
@@ -233,7 +241,7 @@ mod tests {
         ];
         for message in messages {
             let bytes = message.to_bytes();
-            assert_eq!(Input::read_whole::<Message>(&bytes), Ok(message));
+            assert_eq!(Input::read_whole::<Message>(&bytes), Ok((message, 0)));
         }
     }
 
@@ -248,14 +256,18 @@ mod tests {
             motion: None,
             decision: None,
         });
-        let answer = 3; // `message`'s fourth case
-        let unplace = 13; // `command`'s fourteenth case
-        let quit = 52; // `command`'s last case
+        #[rustfmt::skip]
+        let documented = [
+            0x22, 14,               // `message`'s fourth case, `answer`: 14 bytes
+            0x08, 0xac, 0x02,       // field 1, `serial`: 300
+            0x10, 0x01,             // field 2, `handled`: true
+            0x1a, 2, 0x70, 5,       // field 3, a command: its 14th case, `unplace`, 5
+            0x1a, 3, 0xaa, 0x03, 0, // field 3, a command: its 53rd case, `quit`, nothing
+        ];
         assert_eq!(
             message.to_bytes(),
-            [answer, 0xac, 0x02, 1, 2, unplace, 5, quit, 0, 0],
-            "case, serial as LEB128, handled, two commands each a case and its payload, no \
-             motion, no decision"
+            documented,
+            "no motion and no decision, which are not sent at all"
         );
     }
 

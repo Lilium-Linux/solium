@@ -1,0 +1,1671 @@
+// The protocol between Solium and a window manager, version 0.2.0.
+//
+// Generated from the WIT in crates/wm-protocol/wit, which is the
+// protocol's one definition: change that, never this file.
+//
+// A window manager is started with a Unix stream socket as its standard
+// input. Each message on it, either way, is one `Message`, with its
+// length before it as a varint: protobuf's delimited framing.
+// docs/window-managers.md says who sends what, and when.
+//
+// What is here is only ever added to: a field, a case of a `oneof` or
+// of an enum, at the end. A peer that does not know it passes over it.
+
+syntax = "proto3";
+
+package solium.wm;
+
+option csharp_namespace = "Solium.Wm";
+option go_package = "solium/wm";
+option java_package = "org.solium.wm";
+option java_multiple_files = true;
+
+// Nothing: a case that carries no value.
+message Unit {}
+
+// A rectangle in the compositor's logical space.
+message Rect {
+  double x = 1;
+  double y = 2;
+  double w = 3;
+  double h = 4;
+}
+
+// A point of the desktop, in logical pixels.
+message Point {
+  double x = 1;
+  double y = 2;
+}
+
+// A size in logical pixels.
+message Size {
+  sint32 w = 1;
+  sint32 h = 2;
+}
+
+// What a window's frame takes of its rectangle on each side.
+message Insets {
+  sint32 top = 1;
+  sint32 right = 2;
+  sint32 bottom = 3;
+  sint32 left = 4;
+}
+
+// Which window a window belongs to: none named, one named that cannot
+// be pointed at, or that window.
+message Parentage {
+  oneof kind {
+    // It named no parent.
+    Unit none = 1;
+    // It named a parent that is not a window on screen.
+    Unit unknown = 2;
+    // The window it belongs to, by its id.
+    uint64 window = 3;
+  }
+}
+
+// A window.
+message Window {
+  // Its id, which every command about it takes. Never reused in a
+  // session.
+  uint64 id = 1;
+  // Where it lives, frame included: where a layout last put it, or
+  // where it opened.
+  Rect rect = 2;
+  // What its frame takes of `rect` on each side right now: the
+  // client is that rectangle less these. All 0 for a window drawn
+  // bare.
+  Insets insets = 3;
+  // Its title; the program's name until its application arrives.
+  string title = 4;
+  // Whether it has the keyboard.
+  bool focused = 5;
+  // The name of the monitor it is on.
+  string monitor = 6;
+  // Whether it says it is a modal dialog.
+  bool modal = 7;
+  // The window it belongs to, as a dialog does.
+  Parentage parent = 8;
+  // Whether it is closing: between the events `closing` and `closed`
+  // or `refused`.
+  bool leaving = 9;
+  // Whether it is minimized: still mapped and alive, but drawn only
+  // while a `present` on it plays out or `show-minimized` shows it,
+  // under no pointer or finger, and never holding the keyboard.
+  bool minimized = 10;
+  // Whether it is kept above every window that is not (`keep-above`).
+  bool above = 11;
+  // Where a dock that is its own program shows this window, as that
+  // program said: what a minimize can fly to.
+  optional Rect icon = 12;
+  // The application's own name: a Wayland `app_id`, an X11
+  // `WM_CLASS` class. Empty until the application arrives.
+  string app_id = 13;
+  // The smallest the application says it can be, frame included.
+  optional Size min = 14;
+  // The largest the application says it can be, frame included.
+  optional Size max = 15;
+  // Whether it was last placed with `cramped` set: in a tile smaller
+  // than its own minimum.
+  bool cramped = 16;
+  // Whether its application has shown its first frame yet.
+  bool shown = 17;
+  // Whether the compositor last told it to be fullscreen.
+  bool fullscreen = 18;
+  // Whether the compositor last told it to be maximised.
+  bool maximized = 19;
+  // The frame style it is drawn in, or `none` when it is drawn bare.
+  string style = 20;
+  // Whether its application draws its own titlebar.
+  bool client_side = 21;
+  // Whether it asked for the background behind part of it to be
+  // blurred.
+  bool blur_region = 22;
+  // Its X11 window type, lower case (`normal`, `dialog`, `utility`,
+  // `splash` and the rest of EWMH's); none for a Wayland window.
+  optional string x11_type = 23;
+  // Whether it may ever be given the keyboard: an X11 client can
+  // say it never takes it.
+  bool accepts_input = 24;
+  // Its X11 `WM_CLASS` class; none for a Wayland window.
+  optional string class = 25;
+  // Its X11 `WM_CLASS` instance; none for a Wayland window.
+  optional string instance = 26;
+  // What it says it is showing: `none`, `photo`, `video` or `game`.
+  string content_type = 27;
+  // The process it belongs to, when that can be told.
+  optional uint32 pid = 28;
+}
+
+// A monitor.
+message Monitor {
+  // Its connector's name, such as `DP-1`.
+  string name = 1;
+  // The part of it that bars and docks leave: where windows go.
+  Rect area = 2;
+  // The whole of it: what a wallpaper or a fullscreen window covers.
+  Rect whole = 3;
+  // Device pixels per logical pixel.
+  double scale = 4;
+  // Whether the pointer is on it.
+  bool focused = 5;
+  // Whether it is the primary monitor.
+  bool primary = 6;
+  // Its rotation: `normal`, `_90`, `_180`, `_270`, `flipped`,
+  // `flipped90`, `flipped180` or `flipped270`.
+  string transform = 7;
+  // Whether its display is off. A monitor that is off keeps its
+  // place, its work area and its windows.
+  bool off = 8;
+}
+
+// The keyboard: its layouts, the active one, the locks and repeat.
+message Keyboard {
+  // The layouts' names, in order, such as `Russian`.
+  repeated string layouts = 1;
+  // Their short names, in the same order, such as `RU`.
+  repeated string short_names = 2;
+  // Which of them is live, counting from 1; 0 before the keymap is
+  // known.
+  uint32 active = 3;
+  // Whether Caps Lock is on.
+  bool caps = 4;
+  // Whether Num Lock is on.
+  bool num = 5;
+  // Repeats a second of a held key.
+  sint32 repeat_rate = 6;
+  // Milliseconds a key is held before it repeats.
+  sint32 repeat_delay = 7;
+}
+
+// A text field that has the keyboard, and where its caret is.
+message TextField {
+  // The window it is in.
+  uint64 window = 1;
+  // The caret's rectangle, where it is drawn, once the application
+  // has said where its caret is.
+  optional Rect caret = 2;
+  // Whether the window is drawn in a frame of the compositor's.
+  bool framed = 3;
+}
+
+// Something wrong in an effect, a rule or the configuration: what the
+// compositor found, for a window manager to show.
+message Problem {
+  // What it is about: an effect's name, `config`, `rules`,
+  // `settings`, `wm` for the window manager itself, `wm.toml`.
+  string effect = 1;
+  // The file the problem is in.
+  string file = 2;
+  // Its line in that file, where one is known.
+  optional uint32 line = 3;
+  // Its column, where one is known.
+  optional uint32 column = 4;
+  // What is wrong.
+  string message = 5;
+  // `error` or `warning`.
+  string severity = 6;
+}
+
+// A finger, in the compositor's space, routed to the window manager.
+message TouchEvent {
+  // `down`, `motion`, `up` or `cancel`.
+  string kind = 1;
+  // Which finger, from its down until its up or cancel.
+  sint32 slot = 2;
+  // Where it is; where it last was, for an up or a cancel.
+  double x = 3;
+  double y = 4;
+  // The monitor its down was on; empty outside every monitor.
+  string output = 5;
+  // What its down landed on: `client`, `frame`, `border`, `scene`,
+  // `script` or `blocked`.
+  string target = 6;
+  // The window under its down; none over a scene.
+  optional uint64 window = 7;
+  // Whether a control of the window's frame claims the down.
+  bool control = 8;
+  // The edge or corner of the window's frame under the finger, by
+  // the names `touch-action`'s `resize` takes.
+  optional string edges = 9;
+  // The device's own time in milliseconds, wrapping at 32 bits.
+  uint32 time = 10;
+  // The event's time in seconds, monotonic: differences are exact.
+  double t = 11;
+  // The finger's velocity, in logical pixels a second.
+  double vx = 12;
+  double vy = 13;
+}
+
+// A value of a table under a name: the name, and the value's index among
+// the document's nodes.
+message DocField {
+  string name = 1;
+  uint32 node = 2;
+}
+
+// A value of a table under a whole number that is not part of its list:
+// the number, and the value's index among the document's nodes.
+message DocNumbered {
+  sint64 key = 1;
+  uint32 node = 2;
+}
+
+// A table: its list part, its named keys and its numbered keys, each
+// value an index into the document's nodes.
+message DocTable {
+  // The values at 1, 2, 3 and so on, in order.
+  repeated uint32 list = 1;
+  // The values under names.
+  repeated DocField fields = 2;
+  // The values under whole numbers that are not part of the list.
+  repeated DocNumbered numbered = 3;
+}
+
+// One node of a settings document; a table's children are nodes by
+// index into the same list, because WIT has no recursive types.
+message DocNode {
+  oneof kind {
+    // Nothing: a key that is there and empty.
+    Unit nil = 1;
+    bool boolean = 2;
+    // A whole number.
+    sint64 integer = 3;
+    // A number with a fraction.
+    double number = 4;
+    string text = 5;
+    // A table of further nodes.
+    DocTable table = 6;
+    // Something a document cannot carry (a function, say), named by
+    // its kind so that whoever reads the document can say so.
+    string other = 7;
+  }
+}
+
+// A document the compositor holds for the window manager under a name
+// (`keep`), and hands to the one started in its place (`hello`).
+message Kept {
+  string name = 1;
+  repeated DocNode document = 2;
+}
+
+// What a window frame style is: a folder of QML and its parts, or a
+// single QML file.
+enum StyleKind {
+  STYLE_KIND_BUNDLE = 0;
+  STYLE_KIND_FILE = 1;
+}
+
+// A window frame style this machine can draw, by the name the `pane`
+// settings take.
+message Style {
+  string name = 1;
+  StyleKind kind = 2;
+}
+
+// A cubic bezier's two control points, as CSS has them.
+message Bezier {
+  double x1 = 1;
+  double y1 = 2;
+  double x2 = 3;
+  double y2 = 4;
+}
+
+// A spring: a mass on a spring, damped.
+message Spring {
+  double stiffness = 1;
+  double damping = 2;
+  double mass = 3;
+  // The speed it starts with, in its own units a second.
+  double initial_velocity = 4;
+  // How near its rest it is taken to have landed.
+  double epsilon = 5;
+}
+
+// How a motion moves: by name, a cubic bezier, or a spring.
+message Easing {
+  oneof kind {
+    // At one speed.
+    Unit linear = 1;
+    // Fast, then slowing into place.
+    Unit out_cubic = 2;
+    // Past its place a little, and back.
+    Unit out_back = 3;
+    // Slow, fast, slow, gently.
+    Unit in_out_quad = 4;
+    // Slow, fast, slow.
+    Unit in_out_cubic = 5;
+    // A cubic bezier through `(x1, y1)` and `(x2, y2)`, as CSS has it.
+    Bezier bezier = 6;
+    // A spring, which takes as long as it takes and carries the speed
+    // of the motion it interrupts.
+    Spring spring = 7;
+  }
+}
+
+// How long a motion takes and how it moves.
+message Motion {
+  // In milliseconds; 0 is at once. A spring takes its own time.
+  double duration_ms = 1;
+  Easing easing = 2;
+}
+
+// What a deform effect bends towards.
+message Aim {
+  oneof kind {
+    // A rectangle on screen.
+    Rect rect = 1;
+    // Another window, where it is drawn.
+    uint64 window = 2;
+    // A scene surface, by its name.
+    string surface = 3;
+  }
+}
+
+// A geometry effect applied to a window as it is presented: the window
+// drawn through a mesh an effect folder computes, as the genie does.
+message Deform {
+  // The effect's name: a folder of the effects the compositor loads.
+  string effect = 1;
+  // The effect's parameters.
+  repeated DocNode params = 2;
+  // Which edge leads: `down`, `up`, `left` or `right`. With `auto`,
+  // or none, it is the side the aim lies on, picked when the window
+  // starts to move and kept for the flight.
+  optional string axis = 3;
+  // How far into the aim it is: 0 is the window where it is, 1 all
+  // the way.
+  double progress = 4;
+  // What it is pulled into or drawn out of. A window or a surface
+  // is followed as it moves; a rectangle stays where it is.
+  Aim aim = 5;
+  // A number from 0 up to 1 that an effect which varies takes its
+  // variation from.
+  optional double seed = 6;
+  // What is drawn when the effect cannot run: `flat`, the window
+  // undeformed, or `hide`, nothing of it. None is the setting's.
+  optional string failed = 7;
+  // What a reload that finds the effect changed does to a deform
+  // under way: `flat` draws the window undeformed for the rest of
+  // the move, `keep` goes on with the effect it began with. None is
+  // the setting's.
+  optional string on_reload = 8;
+}
+
+// A point of a rectangle, as shares of its width and height.
+message Pivot {
+  float x = 1;
+  float y = 2;
+}
+
+// A motion of its own for one channel of a present, by the channel's
+// name.
+message Channel {
+  string name = 1;
+  Motion motion = 2;
+}
+
+// Where a window is drawn, which need not be where it is: a transform.
+// The window keeps its place and its application is told nothing, so
+// `clear` puts it back exactly. Input follows where it is drawn.
+message Present {
+  // The window.
+  uint64 id = 1;
+  // Where it is drawn; none is where it lives.
+  optional Rect rect = 2;
+  // How opaque the whole of it is, frame included, from 0 to 1.
+  optional float opacity = 3;
+  // How opaque its application's picture is, inside the frame.
+  optional float client_opacity = 4;
+  // A matrix it is drawn through, about its pivot.
+  optional F32List matrix = 5;
+  // A geometry effect it is drawn through.
+  optional Deform deform = 6;
+  // Its depth among presented windows: higher is nearer.
+  float z = 7;
+  // The point the matrix turns about, as shares of the rectangle's
+  // width and height, which may lie outside it.
+  Pivot pivot = 8;
+  // How it gets there from where it is drawn now.
+  Motion motion = 9;
+  // A motion of its own for each of `x`, `y`, `size`, `opacity` and
+  // `client_opacity`, those not named moving by `motion`.
+  repeated Channel channels = 10;
+}
+
+// A present that starts somewhere else and comes to where the window
+// is: every "appears from somewhere" animation.
+message PresentFrom {
+  // The window.
+  uint64 id = 1;
+  // Where it starts.
+  Rect rect = 2;
+  // How opaque it starts; it lands opaque.
+  optional float opacity = 3;
+  optional float client_opacity = 4;
+  Motion motion = 5;
+  repeated Channel channels = 6;
+  optional Deform deform = 7;
+}
+
+// What a group of windows, surfaces and monitors holds.
+message Selection {
+  repeated uint64 windows = 1;
+  // Scene surfaces, by name.
+  repeated string surfaces = 2;
+  // Monitors, by name: everything drawn on them.
+  repeated string monitors = 3;
+  // The one monitor whose copies of `surfaces` are meant: a surface
+  // on every monitor is several scenes with one name.
+  optional string on = 4;
+}
+
+// How a whole group is shifted.
+message Shift {
+  double dx = 1;
+  double dy = 2;
+  float opacity = 3;
+  repeated float matrix = 4;
+}
+
+// A place in a window: its id, and where in it, as shares of its width
+// and height.
+message WindowSpot {
+  uint64 id = 1;
+  double x = 2;
+  double y = 3;
+}
+
+// Where the pointer is sent.
+message WarpTo {
+  oneof kind {
+    // A point.
+    Point point = 1;
+    // A window: its id, and where in it, as shares of its width and
+    // height.
+    WindowSpot window = 2;
+  }
+}
+
+// Where the mouse carries on from when it moves before a warp's
+// picture has landed: from where the warp put the pointer, or from
+// where its picture has got to.
+enum Interrupt {
+  INTERRUPT_POINTER = 0;
+  INTERRUPT_PICTURE = 1;
+}
+
+// The pointer taken somewhere. It is there at once: what it is over
+// is the destination's from the first instant. Its picture flies
+// there.
+message Warp {
+  WarpTo to = 1;
+  // How its picture flies there; none is the setting's.
+  optional Motion motion = 2;
+  Interrupt interrupt = 3;
+}
+
+// Why the keyboard is moved, as the `focused` event says it.
+enum FocusCause {
+  // A key binding.
+  FOCUS_CAUSE_BINDING = 0;
+  // A key that moves the keyboard to the window in a direction.
+  FOCUS_CAUSE_DIRECTION = 1;
+  // A key that moves the focused window in a direction.
+  FOCUS_CAUSE_MOVE = 2;
+  // A press on a window.
+  FOCUS_CAUSE_CLICK = 3;
+  // The wheel, with the drag modifier held.
+  FOCUS_CAUSE_SCROLL = 4;
+  // A dragged window let go.
+  FOCUS_CAUSE_DROP = 5;
+  // A touch on a window.
+  FOCUS_CAUSE_TOUCH = 6;
+  // The pointer coming onto a window, where focus follows it.
+  FOCUS_CAUSE_HOVER = 7;
+  // A scene's action: a bar's window chip, a dock, a search.
+  FOCUS_CAUSE_SURFACE = 8;
+  // A window opening.
+  FOCUS_CAUSE_OPEN = 9;
+  // An application bringing its window forward.
+  FOCUS_CAUSE_ACTIVATE = 10;
+  // The window that had the keyboard went, and another took over.
+  FOCUS_CAUSE_SETTLE = 11;
+  // Anything else the window manager decided.
+  FOCUS_CAUSE_SCRIPT = 12;
+}
+
+// A window to resize by a finger, and the edge or corner it is held by.
+message TouchResize {
+  uint64 id = 1;
+  string edges = 2;
+}
+
+// A finger the window manager takes for itself, or hands a window.
+message TouchAction {
+  oneof kind {
+    // The finger is the window manager's: its events go on coming,
+    // and no window hears it.
+    Unit capture = 1;
+    // The finger moves this window.
+    uint64 move = 2;
+    // The window resized from an edge or corner, by its name: one of
+    // `top`, `bottom`, `left`, `right`, `top_left`, `top_right`,
+    // `bottom_left` and `bottom_right`.
+    TouchResize resize = 3;
+  }
+}
+
+// A press sent to a window: a button, or keys by name.
+message Press {
+  oneof kind {
+    // A pointer button, by its evdev code: 272 is the left one.
+    uint32 button = 1;
+    // Keys by their XKB names, pressed in order, the modifiers first
+    // and the key last, and let go of in reverse.
+    StringList keys = 2;
+  }
+}
+
+// A window placed by a layout: where it lives from now on. Its
+// application is told the size and asked to redraw, and the compositor
+// moves it there from where it was.
+message Place {
+  // The window.
+  uint64 id = 1;
+  // Where it lives, frame included.
+  Rect rect = 2;
+  // How it gets there.
+  Motion motion = 3;
+  // Whether `rect` is a tile: an application that will not shrink
+  // to it is cut to it rather than drawn over its neighbours.
+  bool tile = 4;
+  // The tile `rect` sits inside, when the window is placed smaller
+  // than the tile it has; none is `rect` itself.
+  optional Rect inside = 5;
+  // Whether the tile is smaller than the window's own minimum.
+  bool cramped = 6;
+  // Whether this is the focused window being moved by a key: a
+  // fullscreen or maximised window is placed nowhere by a layout,
+  // but for this one, which is moved to another monitor as it is.
+  bool moved = 7;
+}
+
+// A key binding, so a key is answered without a question: the compositor
+// knows the combination is taken.
+message Binding {
+  // The combination: any of the modifiers `ctrl`, `alt`, `shift`
+  // and `super`, and one key by its XKB name, joined by `+`, in any
+  // order and either case: `super+shift+e`. The `key` event names
+  // it as it is written here.
+  string combo = 1;
+  // What it does, as the window manager says it.
+  optional string note = 2;
+  // Fired again while held.
+  bool repeating = 3;
+  // Fired at the lock screen.
+  bool locked = 4;
+  // Fired over a window holding the keyboard shortcuts.
+  bool inhibited = 5;
+}
+
+// A setting the window manager was given that it does not have, and
+// the one it probably meant.
+message UnknownSetting {
+  string key = 1;
+  optional string meant = 2;
+}
+
+// What the window manager has declared: its bindings, the shipped ones
+// it took away, the settings it was given and does not have, and what
+// a check of its configuration should say. Sent whole, whenever any of
+// it changes.
+message Declarations {
+  // The key combinations that are the window manager's.
+  repeated Binding bindings = 1;
+  // Bindings it would have had and took away on purpose, for
+  // `solium --check` to say so.
+  repeated Binding unbound = 2;
+  // Settings of its own configuration that nothing reads, which
+  // fail `solium --check`.
+  repeated UnknownSetting unknown = 3;
+  // Anything else `solium --check` should print.
+  repeated string notes = 4;
+}
+
+// A change to a run's environment: a name and its value, or none to
+// take the name out.
+message EnvChange {
+  string name = 1;
+  optional string value = 2;
+}
+
+// A program run for its output.
+message Run {
+  // An id of the window manager's choosing, which the `runs` event
+  // names.
+  uint64 id = 1;
+  // The program and its arguments.
+  repeated string argv = 2;
+  // The directory it runs in; none is the compositor's.
+  optional string cwd = 3;
+  // Its environment's changes: a name and its value, or none to
+  // take the name out.
+  repeated EnvChange env = 4;
+  // How long it may run, in milliseconds, before it is stopped.
+  double timeout_ms = 5;
+  // How many bytes of each of its outputs are kept.
+  uint64 max_output = 6;
+  // Whether its output is told a line at a time, as it is written.
+  bool lines = 7;
+}
+
+// A directory watched for changes: its absolute path, and the path as
+// the window manager wrote it, which is what it is told back.
+message Watch {
+  // An id of the window manager's choosing, which the `files` event
+  // names.
+  uint64 id = 1;
+  string path = 2;
+  string shown = 3;
+}
+
+// The layer a scene surface is drawn in.
+enum Layer {
+  LAYER_BACKGROUND = 0;
+  LAYER_BOTTOM = 1;
+  LAYER_TOP = 2;
+  LAYER_OVERLAY = 3;
+}
+
+// A rectangle in whole logical pixels.
+message PixelRect {
+  sint32 x = 1;
+  sint32 y = 2;
+  sint32 w = 3;
+  sint32 h = 4;
+}
+
+// Where a scene surface is: on every monitor, the primary one, one by
+// name, or a rectangle `x`, `y`, `w`, `h`.
+message Placement {
+  oneof kind {
+    Unit every_monitor = 1;
+    Unit primary = 2;
+    string monitor = 3;
+    PixelRect rect = 4;
+  }
+}
+
+// What a press outside a surface's grab does: swallowed, or passed on.
+enum Outside {
+  OUTSIDE_SWALLOW = 0;
+  OUTSIDE_PASS = 1;
+}
+
+// What a press over one scene surface, by its name, does.
+message OutsideNamed {
+  string name = 1;
+  Outside outside = 2;
+}
+
+// What a press outside a surface that holds input does: by default,
+// and over each scene surface named.
+message OutsideClick {
+  Outside default = 1;
+  repeated OutsideNamed named = 2;
+}
+
+// Which keys a surface holding the keyboard gets: all but the bound
+// ones, all of them, or all with bindings off.
+enum KeyPolicy {
+  KEY_POLICY_EXCEPT_CLAIMED = 0;
+  KEY_POLICY_ALL = 1;
+  KEY_POLICY_NO_BINDINGS = 2;
+}
+
+// A QML scene the window manager puts on the desktop: a bar, a dock, a
+// launcher, a wallpaper. Declaring a name again changes the live
+// scene.
+message Surface {
+  // Its name, which is how it is changed and taken away.
+  string name = 1;
+  // The QML file it is.
+  string scene = 2;
+  Layer layer = 3;
+  Placement on = 4;
+  // Its properties, as a JSON object: what the scene reads.
+  string properties = 5;
+  // Whether it takes the pointer and fingers.
+  bool interactive = 6;
+  // What it takes of its monitor's edges, which windows are kept
+  // out of.
+  Insets reserve = 7;
+  OutsideClick outside_click = 8;
+  KeyPolicy keyboard = 9;
+}
+
+// A file to read, off the compositor's own thread.
+message FileRead {
+  // An id of the window manager's choosing, which the `files` event
+  // names.
+  uint64 id = 1;
+  string path = 2;
+  // The most bytes of it that are read.
+  uint64 max = 3;
+}
+
+// A file to write, whole: the old file or the new one is there,
+// whatever happens half-way.
+message FileWrite {
+  uint64 id = 1;
+  string path = 2;
+  bytes data = 3;
+  // Whether the `files` event says how it went.
+  bool report = 4;
+}
+
+// A timer on the compositor's clock, the one animations run on.
+message Timer {
+  // An id of the window manager's choosing, which the `timers`
+  // event names.
+  uint64 id = 1;
+  // When it first falls due, in milliseconds from now.
+  double after_ms = 2;
+  // How often it falls due again; none is once.
+  optional double period_ms = 3;
+}
+
+// An action a notification offers: its key and its label.
+message NotifyAction {
+  string key = 1;
+  string label = 2;
+}
+
+// A notification of the window manager's own.
+message Notify {
+  // A token of the window manager's choosing, which `notify-action`
+  // and `notify-forget` name.
+  uint64 token = 1;
+  string summary = 2;
+  string body = 3;
+  // An icon's name or path.
+  string icon = 4;
+  // `low`, `normal` or `critical`.
+  string urgency = 5;
+  // Its actions: each one's key and its label.
+  repeated NotifyAction actions = 6;
+  // Milliseconds it is shown for; -1 is the default, 0 until it is
+  // dismissed.
+  sint32 expire_timeout = 7;
+}
+
+// A settings section, by its name, as a document.
+message Configure {
+  string section = 1;
+  repeated DocNode settings = 2;
+}
+
+// A window and the motion it goes by.
+message Clear {
+  uint64 id = 1;
+  Motion motion = 2;
+}
+
+// A named selection; none takes the name away. The motion is how a
+// member that joins or leaves gets there.
+message Group {
+  string name = 1;
+  optional Selection selection = 2;
+  Motion motion = 3;
+}
+
+// What a group is moved by, and how.
+message PresentGroup {
+  string name = 1;
+  Shift shift = 2;
+  Motion motion = 3;
+}
+
+// A group and the motion it goes back by.
+message ClearGroup {
+  string name = 1;
+  Motion motion = 2;
+}
+
+// The window to give the keyboard, why, and where the pointer is taken
+// with it.
+message Focus {
+  uint64 id = 1;
+  FocusCause cause = 2;
+  optional Warp warp = 3;
+}
+
+// A finger, by its slot, and what is done with it.
+message TouchClaim {
+  sint32 slot = 1;
+  TouchAction action = 2;
+}
+
+// What is pressed on a window, and what the press counts as.
+message PressOn {
+  uint64 id = 1;
+  Press press = 2;
+  FocusCause cause = 3;
+}
+
+// A window and a yes or no about it.
+message WindowFlag {
+  uint64 id = 1;
+  bool on = 2;
+}
+
+// Where the pointer holds a dragged window: as shares of its frame's
+// width and height, and pixels further.
+message DragGrip {
+  uint64 id = 1;
+  double share_x = 2;
+  double share_y = 3;
+  double dx = 4;
+  double dy = 5;
+}
+
+// Whether a window is kept above the others; none turns it round.
+message KeepAbove {
+  uint64 id = 1;
+  optional bool on = 2;
+}
+
+// A scene's action sent by the window manager: an attempt's id of its
+// choosing, the action's name, its data as JSON text, and what a focus
+// it causes counts as.
+message Act {
+  uint64 attempt = 1;
+  string action = 2;
+  string data = 3;
+  FocusCause cause = 4;
+}
+
+// Values one window's frame reads, as a JSON object.
+message FrameValues {
+  uint64 id = 1;
+  string values = 2;
+}
+
+// A monitor's display, by its name, or every monitor's with none, and
+// whether it is on.
+message Power {
+  optional string monitor = 1;
+  bool on = 2;
+}
+
+// A store's content to save, as JSON text, by its name.
+message Store {
+  string name = 1;
+  string content = 2;
+}
+
+// One thing asked of the compositor.
+message Command {
+  oneof kind {
+    // A settings section, as a document: `idle`, `input`, `effects`,
+    // `monitors` and the rest, each read as the configuration
+    // reference documents it.
+    Configure configure = 1;
+    // A document for the compositor to hold under this name, and hand
+    // back in `hello` to the window manager started in this one's
+    // place.
+    Kept keep = 2;
+    // The events the window manager listens to, each by its name in
+    // `event`: all of them, each time the list changes. No other is
+    // sent, but for those that answer what the window manager itself
+    // asked for, which need no listening: `startup`, `key`, `runs`,
+    // `timers`, `files`, `attempts-settled`, `notify-action` and
+    // `notify-forget`. Until it has said, it listens to none.
+    StringList listen = 3;
+    // What the window manager declares, whole: its key bindings above
+    // all.
+    Declarations declare = 4;
+    // Whether a mode holds the pointer and touch, so a press goes to
+    // the window manager, as a `click` event, without a question.
+    bool grab = 5;
+    // A word for what the window manager is doing, such as its mode's
+    // name, which a scene can show.
+    string status = 6;
+    // Draw a window somewhere other than where it lives.
+    Present present = 7;
+    // Draw a window somewhere else and bring it to where it lives.
+    PresentFrom present_from = 8;
+    // Let a presented window go back to where it lives, by this
+    // motion.
+    Clear clear = 9;
+    // Name a selection of windows, surfaces and monitors, so one
+    // transform can carry them together; none takes the name away.
+    // The motion is how a member that joins or leaves gets there.
+    Group group = 10;
+    // Move, fade or turn a group as one.
+    PresentGroup present_group = 11;
+    // Let a group go back to where its members are.
+    ClearGroup clear_group = 12;
+    // Put a window where it lives.
+    Place place = 13;
+    // Let a window go from its tile: a layout no longer arranges it.
+    uint64 unplace = 14;
+    // Give a window the keyboard, saying why, and take the pointer to
+    // it when a warp is given.
+    Focus focus = 15;
+    // Take the pointer to a window or a point.
+    Warp warp = 16;
+    // Take the finger of this slot, whose down is the event being
+    // answered.
+    TouchClaim touch = 17;
+    // Have a press at this point heard as a `click` event.
+    Point click = 18;
+    // Press a button or keys on a window and let go, as a device
+    // would: its application hears it, and no binding fires.
+    PressOn press = 19;
+    // Make a window fullscreen, or give it back its place.
+    uint64 toggle_fullscreen = 20;
+    // Maximise a window, or give it back its place.
+    uint64 toggle_maximize = 21;
+    // Hold a window that is being dragged where it is, or let it go
+    // on.
+    WindowFlag drag_hold = 22;
+    // Say where the pointer holds a window that is being dragged: as
+    // shares of its frame's width and height, and pixels further.
+    DragGrip drag_grip = 23;
+    // Keep a window that is being resized as it is, or let the resize
+    // go on.
+    WindowFlag resize_hold = 24;
+    // Minimize a window.
+    uint64 minimize = 25;
+    // Show a minimized window again.
+    uint64 unminimize = 26;
+    // Draw a minimized window anyway, where a present puts it, or
+    // stop: what an overview does to show one as a thumbnail.
+    WindowFlag show_minimized = 27;
+    // Keep a window above every window that is not, stop, or, with
+    // none, turn it round.
+    KeepAbove keep_above = 28;
+    // Ask a window to close. A request: its application may refuse.
+    uint64 close = 29;
+    // An action of a scene's, its data as JSON text: what the scene
+    // sends with `Solium.send`. The first number is an attempt's id
+    // of the window manager's choosing, which `attempts-settled`
+    // names.
+    Act act = 30;
+    // The window frame style every window is drawn in, by its name;
+    // the name `none` draws no frame, and no name is the default
+    // style.
+    OptionalString decoration = 31;
+    // Values every pane style's frames read, as a JSON object.
+    string pane_values = 32;
+    // Values one window's frame reads, as a JSON object.
+    FrameValues frame_values = 33;
+    // Put a scene on the desktop, or change one that is there.
+    Surface surface = 34;
+    // Take a scene away, by its name.
+    string surface_gone = 35;
+    // Turn a monitor's display on or off, by its name; with none,
+    // every monitor's.
+    Power power = 36;
+    // Start a program that opens a window: the program and its
+    // arguments.
+    StringList spawn = 37;
+    // A program run and left to itself, its output not kept.
+    StringList run_detached = 38;
+    // Run a program for its output, which the `runs` event tells.
+    Run run = 39;
+    // Set a timer, which the `timers` event tells.
+    Timer timer = 40;
+    // Cancel a timer, by its id.
+    uint64 timer_cancel = 41;
+    // Read a file, which the `files` event answers.
+    FileRead file_read = 42;
+    // Write a file.
+    FileWrite file_write = 43;
+    // Watch a file for changes, which the `files` event tells.
+    Watch watch = 44;
+    // Stop watching, by the watch's id.
+    uint64 watch_cancel = 45;
+    // A store's content to save, as JSON text, by its name.
+    Store store = 46;
+    // Show a notification of the window manager's own.
+    Notify notify = 47;
+    // Lock the session.
+    Unit lock_now = 48;
+    // Pull the lock screen part of the way down over the desktop,
+    // from 0 to 1, as a finger pulls it; none lets it go back up.
+    OptionalF64 lock_peek = 49;
+    // Take the compositor's shortcuts back from the window holding
+    // them.
+    Unit take_shortcuts_back = 50;
+    // Take the pointer back from the window that locked or confined
+    // it.
+    Unit release_pointer = 51;
+    // Have the configuration loaded again: the compositor answers
+    // with a `reload` message.
+    Unit reload = 52;
+    // End the session.
+    Unit quit = 53;
+  }
+}
+
+// The first message, from the compositor: the protocol it speaks,
+// whether the session runs in debug mode (`solium --debug-mode`), where
+// a window manager may offer what only belongs in a development
+// session, and everything the window manager kept before it was
+// restarted.
+message Hello {
+  // The protocol's version, as `major.minor.patch`. A window manager
+  // built for another major version, or before 1.0 another minor
+  // one, says `goodbye`.
+  string version = 1;
+  // Whether the session runs in debug mode.
+  bool debug = 2;
+  // What the window manager this one takes the place of kept, by
+  // name, as its `keep` commands last said: nothing for the first
+  // of a session.
+  repeated Kept keeps = 3;
+}
+
+// The window manager's reply to `hello`: the protocol it was built
+// for, and the commands that configure the desktop before its first
+// frame (settings, bindings, the events it listens to).
+message HelloAnswer {
+  // The protocol's version the window manager was built for.
+  string version = 1;
+  // Applied before the first frame is drawn.
+  repeated Command commands = 2;
+}
+
+// A view of a session service: its name, and the document of its rows.
+message ServiceView {
+  string name = 1;
+  repeated DocNode document = 2;
+}
+
+// What changed since the last batch. A window or monitor is sent whole
+// when any of it changed; the window manager keeps the latest of each.
+message Change {
+  oneof kind {
+    // A window that is new, or one any field of which changed.
+    Window window = 1;
+    // A window that is no more, by its id.
+    uint64 window_gone = 2;
+    // The windows, top to bottom, when their order changed.
+    U64List stacking = 3;
+    // Every monitor, when one came, went or changed.
+    MonitorList monitors = 4;
+    // The part of the monitor the pointer is on that bars and docks
+    // leave.
+    Rect work_area = 5;
+    // Where the pointer is.
+    Point cursor = 6;
+    // The keyboard: its layouts, the live one, the locks.
+    Keyboard keyboard = 7;
+    // The window holding the compositor's shortcuts, as a virtual
+    // machine or a remote desktop does; none when the bindings have
+    // them.
+    OptionalU64 shortcuts_owner = 8;
+    // The text field that has the keyboard; none when none has.
+    OptionalTextField text_field = 9;
+    // Every problem there is now.
+    ProblemList problems = 10;
+    // Whether the session is locked.
+    bool locked = 11;
+    // A view of a session service, or of the installed applications:
+    // `notifications`, `audio`, `tray`, `media` and `apps`, each a
+    // document of the rows the service has.
+    ServiceView service = 12;
+  }
+}
+
+// A line a run wrote: the run's id, and the line without its newline.
+message RunLine {
+  uint64 id = 1;
+  bytes line = 2;
+}
+
+// How a program run with `run` ended.
+message RunEnded {
+  // The run's id, as the `run` command gave it.
+  uint64 id = 1;
+  // Its exit code, when it exited.
+  optional sint32 code = 2;
+  // The signal that ended it, when one did.
+  optional sint32 signal = 3;
+  // Whether it was stopped for running past its timeout.
+  bool timed_out = 4;
+  // Whether it wrote more than was kept.
+  bool truncated = 5;
+  // What it wrote to its standard output, up to the run's limit.
+  bytes stdout = 6;
+  // What it wrote to its standard error, up to the run's limit.
+  bytes stderr = 7;
+  // Why the program could not be run at all.
+  optional string error = 8;
+}
+
+// A program's output, a line at a time, and how it ended.
+message RunHeard {
+  oneof kind {
+    // A line it wrote to its standard output: the run's id and the
+    // line, without its newline.
+    RunLine stdout = 1;
+    // A line it wrote to its standard error.
+    RunLine stderr = 2;
+    // It ended.
+    RunEnded done = 3;
+  }
+}
+
+// How a `file-write` ended: its id, and why it failed, if it did.
+message WriteEnded {
+  uint64 id = 1;
+  optional string error = 2;
+}
+
+// Bytes, or why there are none.
+message ResultBytes {
+  oneof kind {
+    bytes ok = 1;
+    string error = 2;
+  }
+}
+
+// How a `file-read` ended: its id, and the file's bytes or why it could
+// not be read.
+message ReadEnded {
+  uint64 id = 1;
+  ResultBytes outcome = 2;
+}
+
+// What happened to a watched file.
+enum FileChange {
+  FILE_CHANGE_CHANGED = 0;
+  FILE_CHANGE_CREATED = 1;
+  FILE_CHANGE_REMOVED = 2;
+}
+
+// What a watch saw: its id, what happened, and the path as the `watch`
+// command wrote it.
+message WatchHeard {
+  uint64 id = 1;
+  FileChange change = 2;
+  string path = 3;
+}
+
+// What a file read, write or watch came to.
+message FileHeard {
+  oneof kind {
+    // A `file-read` finished: its id, and the file's bytes or why it
+    // could not be read.
+    ReadEnded read = 1;
+    // A `file-write` that asked for a report finished: its id, and why
+    // it failed, if it did.
+    WriteEnded wrote = 2;
+    // A watched file changed: the watch's id, what happened, and the
+    // path as the `watch` command wrote it.
+    WatchHeard watched = 3;
+    // A watch ended on its own: its directory is gone.
+    uint64 watch_ended = 4;
+  }
+}
+
+// What became of an action sent with `act`.
+message Settled {
+  // The attempt's id, as the `act` command gave it.
+  uint64 attempt = 1;
+  // Whether it was done.
+  bool ok = 2;
+  // Why not, when it was not.
+  optional string reason = 3;
+}
+
+// A window entering or leaving fullscreen or maximised.
+message WindowChange {
+  uint64 id = 1;
+  bool entering = 2;
+}
+
+// The keyboard moving to a window: what moved it, and whether it came
+// from another window or none.
+message FocusMoved {
+  uint64 id = 1;
+  FocusCause cause = 2;
+  bool changed = 3;
+}
+
+// A window asking to be brought forward, and why: `launch` or
+// `request`.
+message Activation {
+  uint64 id = 1;
+  string why = 2;
+}
+
+// The size a window's application took of its own, frame included.
+message WindowSize {
+  uint64 id = 1;
+  Size size = 2;
+}
+
+// The action chosen on a notification the window manager sent: the
+// notification's token, and the action's key.
+message NotifyChosen {
+  uint64 token = 1;
+  string key = 2;
+}
+
+// An action a window's frame sent: its name, and its data as JSON text.
+message FrameAction {
+  uint64 id = 1;
+  string action = 2;
+  string data = 3;
+}
+
+// An action a scene sent: the surface's name, the action's name, and
+// its data as JSON text.
+message SurfaceAction {
+  string surface = 1;
+  string action = 2;
+  string data = 3;
+}
+
+// A timer that fell due, and whether that was its last time.
+message TimerDue {
+  uint64 id = 1;
+  bool last = 2;
+}
+
+// Where a dragged window was let go.
+message Dropped {
+  uint64 id = 1;
+  double x = 2;
+  double y = 3;
+}
+
+// How far the wheel turned, on each axis.
+message Scrolled {
+  double dx = 1;
+  double dy = 2;
+}
+
+// A window's edge moved by its own resize.
+message Resized {
+  // The window.
+  uint64 id = 1;
+  // Where the dragged edge, or corner, now is.
+  double x = 2;
+  double y = 3;
+  // Which vertical edge is dragged: `left` or `right`, if either.
+  optional string horizontal = 4;
+  // Which horizontal edge is dragged: `top` or `bottom`, if either.
+  optional string vertical = 5;
+}
+
+// A window being dragged or resized by the pointer.
+message PointerMove {
+  // The window.
+  uint64 id = 1;
+  // `begin`, `move` or `end`.
+  string phase = 2;
+  // Where the pointer is.
+  double x = 3;
+  double y = 4;
+}
+
+// Something that happened, in the order it happened. A window manager
+// is sent the ones it named in its `listen` command, and a few that
+// need no listening, which that command lists.
+message Event {
+  oneof kind {
+    // The window manager's first moment: it has been started, or has
+    // loaded again, and what it asked for in `hello-answer` or
+    // `reloaded` is applied. The batch tells the desktop as that left
+    // it: every window and monitor there is. Sent without being
+    // listened to.
+    Unit startup = 1;
+    // A key combination the window manager bound was pressed, named
+    // as it wrote it in its `binding`. Sent without being listened
+    // to. An answer that is `handled` keeps the key from the window
+    // under it.
+    string key = 2;
+    // A window's life began. An answer that is `handled` and places
+    // it is where it opens; otherwise the compositor places it
+    // plainly, centred and cascaded.
+    uint64 opened = 3;
+    // A window went fullscreen, or left it: its id, and whether it is
+    // entering. Told once the change is made. The answer's `motion`
+    // is how its picture moves there.
+    WindowChange fullscreen = 4;
+    // A window was maximised, or restored: its id, and whether it is
+    // entering. Told and answered as `fullscreen` is.
+    WindowChange maximize = 5;
+    // A pointer or finger press at this point while the window
+    // manager holds input (`grab`).
+    Point click = 6;
+    // A finger did something. Its down is told before it is delivered,
+    // so the answer can take it with the `touch` command.
+    TouchEvent touch = 7;
+    // The keyboard moved to a window: its id, what moved it, and
+    // whether it came from another window or none.
+    FocusMoved focused = 8;
+    // The live keyboard layout, Caps Lock or Num Lock changed: which,
+    // as `layout`, `caps` or `num`.
+    string keyboard_changed = 9;
+    // The session's lock changed: `locking`, `locked`, `unlocking` or
+    // `unlocked`.
+    string lock_changed = 10;
+    // The focused text field changed: `field` when one took the
+    // keyboard, `caret` when its caret moved, `framed` when its
+    // window started or stopped being drawn in a frame.
+    string text_input = 11;
+    // A window asked to be brought forward: its id, and why, `launch`
+    // when an application already running answered a launch with a
+    // window it had, `request` for anything else.
+    Activation activated = 12;
+    // A window's title, or its application's name, changed: the
+    // window's id. Its row has them.
+    uint64 renamed = 13;
+    // A window's application drew it at a size of its own, not the
+    // one it was given, and the window has taken that size: its id,
+    // and the size, frame included. Told once the application has
+    // answered a `place`, or a fullscreen or a maximise, or has had
+    // long enough to (the setting `resize.patience`); until then the
+    // window is drawn in the rectangle it was given.
+    WindowSize sized = 14;
+    // An edge of a window is being dragged by the window's own
+    // resize. An answer that is `handled` moves a seam of a layout;
+    // otherwise the compositor resizes the window itself.
+    Resized resized = 15;
+    // The window is gone.
+    uint64 closed = 16;
+    // A close was asked for and the window is going.
+    uint64 closing = 17;
+    // A close the compositor asked for has played out, and the
+    // window's application has just been asked to go.
+    uint64 close_landed = 18;
+    // A window's application declined to close, and the window is
+    // back.
+    uint64 refused = 19;
+    // A notification arrived or was replaced, as JSON text. The
+    // answer's `decision` says what becomes of it; with none, it is
+    // shown and kept as the sender asked.
+    string notification = 20;
+    // Something happened to a notification, as JSON text.
+    string notifications = 21;
+    // Something changed in audio, as JSON text.
+    string audio = 22;
+    // Something changed in the tray, as JSON text.
+    string tray = 23;
+    // Something changed in media, as JSON text.
+    string media = 24;
+    // Notifications the window manager sent with `notify` are gone,
+    // by their tokens: nothing more is heard of them. Sent without
+    // being listened to.
+    U64List notify_forget = 25;
+    // An action of a notification the window manager sent with
+    // `notify` was chosen: its token, and the action's key. Sent
+    // without being listened to.
+    NotifyChosen notify_action = 26;
+    // A window was minimized.
+    uint64 minimized = 27;
+    // A minimized window is shown again.
+    uint64 unminimized = 28;
+    // The monitors came, went or changed size, or were announced at
+    // startup or after a reload.
+    Unit monitors_changed = 29;
+    // The problems changed: something broke, or a reload mended it.
+    Unit problems_changed = 30;
+    // This window manager took the place of one that was running:
+    // after a reload or a restart, never at the start of a session.
+    Unit restored = 31;
+    // A window's frame sent an action: the window's id, the action's
+    // name, and its data as JSON text.
+    FrameAction frame_action = 32;
+    // A scene sent an action: the surface's name, the action's name,
+    // and its data as JSON text.
+    SurfaceAction surface_action = 33;
+    // What became of actions the window manager sent with `act`.
+    // Sent without being listened to.
+    SettledList attempts_settled = 34;
+    // What programs the window manager ran with `run` wrote, and how
+    // they ended. Sent without being listened to.
+    RunHeardList runs = 35;
+    // Timers the window manager set with `timer` fell due: each one's
+    // id, and whether it was its last time. Sent without being
+    // listened to.
+    TimerDueList timers = 36;
+    // What the window manager's `file-read`, `file-write` and `watch`
+    // commands came to. Sent without being listened to.
+    FileHeardList files = 37;
+    // The windows the window manager arranges are to be arranged
+    // again: something they stand in changed.
+    Unit relayout = 38;
+    // A window is being moved by the pointer or a finger.
+    PointerMove dragged = 39;
+    // A window's resize by the pointer or a finger began or ended.
+    PointerMove resizing = 40;
+    // A dragged window was let go: its id, and where.
+    Dropped dropped = 41;
+    // The wheel turned with the drag modifier held: by how much, on
+    // each axis. An answer that is `handled` keeps it from the window
+    // under the pointer.
+    Scrolled scrolled = 42;
+    // It is time to save: answered with a `store` for each store that
+    // changed since the last, and a `keep` for each kept document
+    // that did.
+    Unit save_stores = 43;
+  }
+}
+
+// What the compositor tells the window manager at one moment: what
+// changed since the last batch, then what happened.
+message Batch {
+  // Which batch this is: its answer names it.
+  uint64 serial = 1;
+  // The compositor's clock at this batch, in milliseconds: the
+  // clock its timers and its animations run on. Where it starts
+  // means nothing; it only goes forward.
+  double at = 2;
+  // Applied to the window manager's picture of the desktop before
+  // the events are handled.
+  repeated Change changes = 3;
+  repeated Event events = 4;
+}
+
+// What the window manager made of a batch.
+message Answer {
+  // The batch this answers.
+  uint64 serial = 1;
+  // Whether it took the batch's key, press or scroll; one it did not
+  // take goes to the client.
+  bool handled = 2;
+  // Applied in order, all at once.
+  repeated Command commands = 3;
+  // The motion the compositor's own move answering the batch takes,
+  // a fullscreen's or a maximise's, when the window manager set one.
+  optional Motion motion = 4;
+  // A notification's fate, as JSON text, when the batch asked for
+  // one: an object with `banner` and `keep`, each a boolean, each
+  // left out taking the compositor's own rule.
+  optional string decision = 5;
+}
+
+// What a window manager made of a reload: the answer its configuration
+// gave as it loaded again, carrying what it kept, as `hello-answer`'s
+// commands are; or why it would not load, in which case the
+// configuration that was running goes on running.
+message Reloaded {
+  oneof kind {
+    // It loaded. The answer's commands are applied as
+    // `hello-answer`'s are, and must say again what the window
+    // manager declares and listens to: what it said before the
+    // reload is forgotten.
+    Answer loaded = 1;
+    // It did not, and why. Nothing changes.
+    string failed = 2;
+  }
+}
+
+// A point to look under, passing over the window named.
+message WindowAt {
+  double x = 1;
+  double y = 2;
+  optional uint64 passing = 3;
+}
+
+// A store to read: its name, and at most how many bytes of it.
+message StoreRead {
+  string name = 1;
+  uint64 max = 2;
+}
+
+// A question only the compositor can answer, asked by a window
+// manager in the middle of a batch, and answered before anything else.
+message Query {
+  oneof kind {
+    // The topmost window drawn at a point, as the pointer finds it,
+    // passing over the one named.
+    WindowAt window_at = 1;
+    // A store's saved document, read from its file, at most the bytes
+    // given. The compositor keeps the files: one that cannot be used
+    // is set aside as `<name>.json.broken`, and none is the answer.
+    StoreRead store = 2;
+    // Every window frame style there is, from the folders the
+    // compositor looks in: sorted, bundles first, each name once, as
+    // the compositor would resolve it.
+    Unit styles = 3;
+  }
+}
+
+// The answer to a `query`, case for case.
+message Reply {
+  oneof kind {
+    // The window at the point, if one is drawn there.
+    OptionalU64 window = 1;
+    // The store's document as JSON text, or none.
+    OptionalString store = 2;
+    // The frame styles.
+    StyleList styles = 3;
+  }
+}
+
+// A question the window manager asks, and the serial its reply names.
+message Asked {
+  uint64 serial = 1;
+  Query query = 2;
+}
+
+// The answer to the query of that serial.
+message Replied {
+  uint64 serial = 1;
+  Reply reply = 2;
+}
+
+// One frame on the socket.
+message Message {
+  oneof kind {
+    // From the compositor, first.
+    Hello hello = 1;
+    // From the window manager, in answer to `hello`.
+    HelloAnswer hello_answer = 2;
+    // From the compositor: what changed and what happened.
+    Batch batch = 3;
+    // From the window manager: what it made of a batch.
+    Answer answer = 4;
+    // From the window manager, at any time: commands of its own,
+    // asked for by no batch, applied in the order they come.
+    CommandList submit = 5;
+    // From the window manager: a question, and its serial.
+    Asked query = 6;
+    // From the compositor: the answer to the query of that serial.
+    Replied reply = 7;
+    // From the compositor: the configuration at this path is to be
+    // loaded again (the user asked for a reload, or it changed on
+    // disk). Answered with `reloaded`.
+    string reload = 8;
+    // From the window manager, in answer to `reload`.
+    Reloaded reloaded = 9;
+    // Either side is closing the connection, and says why. A window
+    // manager whose configuration would not load says why here, in
+    // place of `hello-answer`.
+    string goodbye = 10;
+  }
+}
+
+// A list, where a list cannot stand as a field of its own.
+message CommandList {
+  repeated Command items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message F32List {
+  repeated float items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message FileHeardList {
+  repeated FileHeard items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message MonitorList {
+  repeated Monitor items = 1;
+}
+
+// A value that may be absent, where `optional` cannot be written.
+message OptionalF64 {
+  optional double value = 1;
+}
+
+// A value that may be absent, where `optional` cannot be written.
+message OptionalString {
+  optional string value = 1;
+}
+
+// A value that may be absent, where `optional` cannot be written.
+message OptionalTextField {
+  optional TextField value = 1;
+}
+
+// A value that may be absent, where `optional` cannot be written.
+message OptionalU64 {
+  optional uint64 value = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message ProblemList {
+  repeated Problem items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message RunHeardList {
+  repeated RunHeard items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message SettledList {
+  repeated Settled items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message StringList {
+  repeated string items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message StyleList {
+  repeated Style items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message TimerDueList {
+  repeated TimerDue items = 1;
+}
+
+// A list, where a list cannot stand as a field of its own.
+message U64List {
+  repeated uint64 items = 1;
+}

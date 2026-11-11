@@ -147,7 +147,19 @@ impl Link {
         answers: &dyn Ask,
     ) -> Result<Option<Message>> {
         loop {
-            let read = self.reader.borrow_mut().next_message();
+            let (read, unknown) = {
+                let mut reader = self.reader.borrow_mut();
+                (reader.next_message(), reader.unknown())
+            };
+            if unknown > 0 {
+                // A window manager built for a newer protocol: what this
+                // compositor has no word for is left out, and said.
+                tracing::warn!(
+                    left_out = unknown,
+                    "the window manager sent what this version of the protocol does not have; \
+                     left out"
+                );
+            }
             match read {
                 Ok(Some(Message::Query(wire::Asked { serial, query }))) => {
                     let reply = answers

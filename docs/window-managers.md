@@ -333,48 +333,74 @@ problem on the overlay with the key named.
 The socket is a Unix stream socket: the window manager's standard input. Both
 directions use it.
 
-A **frame** is a `u32` byte count, little-endian, followed by that many bytes:
-one `message`. A frame of more than 16 MiB closes the connection.
+What is on it is [protobuf](https://protobuf.dev).
+[`crates/wm-protocol/proto/solium_wm.proto`](https://github.com/Lilium-Linux/solium/blob/stage/crates/wm-protocol/proto/solium_wm.proto)
+describes every message. It is generated from the WIT, so it says the same
+thing in the language protobuf's generators read: give it to the generator
+for your language and you have every type on this page, with its encoding.
 
-A value is encoded by its WIT type:
+A **frame** is a byte count as a varint, followed by that many bytes: one
+`Message`. This is protobuf's own "delimited" framing, which most of its
+libraries read and write whole: `ParseDelimitedFrom` and `WriteDelimitedTo`
+in C#, `sizeDelimitedDecodeStream` in protobuf-es, `protodelim` in Go. A frame
+of more than 16 MiB closes the connection.
 
-| WIT type | Bytes |
+How the WIT reads as protobuf:
+
+| WIT | protobuf |
 |---|---|
-| `bool` | One byte, 0 or 1. |
-| `u8` … `u64` | LEB128: seven bits a byte, low bits first, the top bit set on every byte but the last. |
-| `s8` … `s64` | Zigzag (`(n << 1) ^ (n >> 63)`), then LEB128. |
-| `f32`, `f64` | IEEE 754, little-endian. |
-| `char` | Its scalar value, as a `u32`. |
-| `string` | Its length in bytes, as a `u32`, then its UTF-8. |
-| `list<T>` | Its length, as a `u32`, then each item. |
-| `option<T>` | 0 for none; 1, then the value. |
-| `tuple`, `record` | Each element or field, in order. |
-| `variant`, `enum` | The case's index in the order the WIT declares the cases, as a `u32`, then the case's payload if it has one. |
+| `bool` | `bool` |
+| `u8`, `u16`, `u32`, `char` | `uint32` |
+| `u64` | `uint64` |
+| `s8`, `s16`, `s32` | `sint32` |
+| `s64` | `sint64` |
+| `f32`, `f64` | `float`, `double` |
+| `string` | `string` |
+| `list<u8>` | `bytes` |
+| `list<T>` | `repeated T`, numbers packed |
+| `option<T>` | `optional T` |
+| `record` | A message. Its fields are numbered from 1, in the WIT's order. |
+| `variant` | A message with one `oneof kind`. Its cases are numbered from 1, in the WIT's order, and a case that carries nothing is an empty `Unit`. |
+| `enum` | An enum. Its cases are numbered from 0 and named after it, as protobuf's style has them: `FOCUS_CAUSE_CLICK`. |
 
-Lengths and case indices are LEB128 like any `u32`.
+A `oneof` can hold neither a list nor an optional value, so a variant's case
+that is one goes in a small message of its own: `spawn` is a `StringList`
+with `items`, and `decoration` an `OptionalString` with `value`.
 
 For example, this answer:
 
 ```text
-answer { serial: 300, handled: true, commands: [unplace(5), quit], motion: none, decision: none }
+answer { serial: 300, handled: true, commands: [unplace(5), quit] }
 ```
 
-is these ten bytes, and the frame is `0a 00 00 00` and then them:
+is these sixteen bytes, and the frame is `10` and then them:
 
 | Bytes | What |
 |---|---|
-| `03` | `message`'s fourth case, `answer` |
-| `ac 02` | `serial`, 300 |
-| `01` | `handled`, true |
-| `02` | two commands |
-| `0d 05` | `command`'s fourteenth case, `unplace`, and its window, 5 |
-| `34` | `command`'s fifty-third case, `quit` |
-| `00` | no `motion` |
-| `00` | no `decision` |
+| `22 0e` | `message`'s field 4, `answer`: fourteen bytes |
+| `08 ac 02` | field 1, `serial`: 300 |
+| `10 01` | field 2, `handled`: true |
+| `1a 02 70 05` | field 3, a command: its field 14, `unplace`, 5 |
+| `1a 03 aa 03 00` | field 3, a command: its field 53, `quit`, which carries nothing |
 
-Because a case is its position, the protocol's version says which positions
-are meant: build a window manager against the WIT of the version the
-compositor reports in `hello`.
+Its `motion` and `decision` are not set, so they are not sent.
+
+### Older and newer
+
+Either side may be newer than the other:
+
+- A field the reader does not know is passed over.
+- A field that was not sent is its type's default: 0, false, empty text, an
+  empty list, none, a variant's first case. So a `place` needs only what you
+  mean to say; its `motion` left out is no motion.
+- A command, a change or an event in a case the reader does not have is left
+  out of its list, and the rest is read. The compositor says in its log what
+  it left out.
+
+That is why the protocol is only ever added to, at the end of a record, a
+variant or an enum, and why what is there keeps its place. `hello` still says
+the version: a window manager and a compositor of the same major version
+(before 1.0, the same minor one) speak to each other.
 
 ## A window manager in Rust
 
@@ -420,9 +446,9 @@ command = ["/path/to/solium/target/debug/examples/tiny_wm"]
 
 ## A window manager in another language
 
-Nothing above needs Rust. A window manager in another language reads the
-three WIT files, represents each type in its own terms, and encodes and
-decodes them as [the wire format](#the-wire-format) says.
+Nothing above needs Rust. A window manager in another language gives
+`solium_wm.proto` to protobuf's generator for that language, and reads and
+writes frames as [the wire format](#the-wire-format) says.
 
 [`examples/bad-apple`](../examples/bad-apple/README.md) is one in C#. It
 writes its C# types from the WIT with a script of about three hundred lines of
@@ -433,9 +459,9 @@ dark parts with dark ones, by moving and resizing those whose part of the
 picture changed, twenty-four times a second. Its README lists which parts of
 the protocol it uses and why.
 
-A case of a variant is its position in the WIT, counted from 0. The generated
-Rust types keep that order, and `solium_wm_protocol::Event::CASES` and
-`Command::CASES` list the names in it.
+An event is listened to by its name, as the WIT spells it. The generated Rust
+types list the names in the WIT's order: `solium_wm_protocol::Event::CASES`
+and `Command::CASES`.
 
 ## Checking and debugging
 
