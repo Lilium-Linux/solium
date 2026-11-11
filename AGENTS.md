@@ -34,7 +34,8 @@ file is out of date.
 | `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), the types and wire encoding generated from it, a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
 | `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
-| `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
+| `crates/wl-probe/` | A Wayland client that checks protocol support from outside, and `examples/tiles.rs`, which opens as many plain windows as it is asked for |
+| `examples/bad-apple/` | A window manager in C#, which plays a film by moving windows: the protocol used from another language, its types generated from the WIT. Built with `dotnet`, not by the gate |
 | `crates/x11-probe/` | An X11 client that asks the window manager for fullscreen and maximised, from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |

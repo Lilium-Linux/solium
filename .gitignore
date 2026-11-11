@@ -46,3 +46,9 @@ docs/superpowers/
 # The documentation site. dev/docs/generate.py writes these pages from the
 # code on every build, so they are never committed; see book.toml.
 docs/generated/
+
+# What `dotnet build` writes for the C# window manager in examples/bad-apple,
+# its generated protocol types among them, and the films made for it.
+examples/bad-apple/bin/
+examples/bad-apple/obj/
+*.frames

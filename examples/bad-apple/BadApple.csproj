@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>Solium.Wm</RootNamespace>
+    <AssemblyName>bad-apple</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The protocol's WIT, which the C# types are written from. -->
+    <WitDirectory>$(MSBuildProjectDirectory)/../../crates/wm-protocol/wit</WitDirectory>
+    <GeneratedProtocol>$(MSBuildProjectDirectory)/obj/Protocol.g.cs</GeneratedProtocol>
+  </PropertyGroup>
+
+  <!-- The WIT is the protocol's one definition: its types are generated from
+       it before every build, into obj/, and never kept in the repository. -->
+  <Target Name="GenerateProtocol" BeforeTargets="CoreCompile"
+          Inputs="@(WitFile);gen/wit2cs.py" Outputs="$(GeneratedProtocol)">
+    <Exec Command="python3 -B &quot;$(MSBuildProjectDirectory)/gen/wit2cs.py&quot; &quot;$(WitDirectory)&quot; &quot;$(GeneratedProtocol)&quot;" />
+    <ItemGroup>
+      <Compile Include="$(GeneratedProtocol)" />
+    </ItemGroup>
+  </Target>
+
+  <ItemGroup>
+    <WitFile Include="$(WitDirectory)/*.wit" />
+  </ItemGroup>
+
+</Project>

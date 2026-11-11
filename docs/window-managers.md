@@ -22,7 +22,8 @@ Use this guide by task:
 - [Know how long the compositor waits](#how-long-the-compositor-waits) and
   [what it does when a window manager stops](#when-a-window-manager-stops).
 - [Encode and decode the messages](#the-wire-format) without generated code.
-- [Start from an example](#a-window-manager-in-rust).
+- Start from an example, [in Rust](#a-window-manager-in-rust) or
+  [in C#](#a-window-manager-in-another-language).
 
 ## What each side does
 
@@ -371,7 +372,7 @@ nothing of the compositor's. Beside the types it has:
 - `mirror::Mirror`: a copy of the desktop, kept by applying each batch's
   changes.
 
-[`crates/wm-protocol/examples/tiny_wm.rs`](https://github.com/Lilium-Linux/solium/blob/stage/crates/wm-protocol/examples/tiny_wm.rs)
+[`crates/wm-protocol/examples/tiny_wm.rs`](../crates/wm-protocol/examples/tiny_wm.rs)
 is a whole window manager in one file of about two hundred lines: it tiles
 windows into equal columns and binds five keys. Its loop is the whole shape of
 one:
@@ -401,6 +402,23 @@ cargo build -p solium-wm-protocol --example tiny_wm
 ```toml
 command = ["/path/to/solium/target/debug/examples/tiny_wm"]
 ```
+
+## A window manager in another language
+
+Nothing above needs Rust. A window manager in another language reads the
+three WIT files, represents each type in its own terms, and encodes and
+decodes them as [the wire format](#the-wire-format) says.
+
+[`examples/bad-apple`](../examples/bad-apple/README.md) is one in C#. It
+writes its C# types from the WIT with a script of about three hundred lines of
+Python, so nothing the WIT says is written a second time by hand, and the
+rest is about seven hundred lines of C#: it plays a black and white
+film by telling the compositor where to draw a few dozen plain windows, thirty
+times a second. Its README lists which parts of the protocol it uses and why.
+
+A case of a variant is its position in the WIT, counted from 0. The generated
+Rust types keep that order, and `solium_wm_protocol::Event::CASES` and
+`Command::CASES` list the names in it.
 
 ## Checking and debugging
 
