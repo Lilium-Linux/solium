@@ -29,6 +29,10 @@ fn main() {
 
     let mut out = String::new();
     out.push_str("use crate::wire::{DecodeError, Input, Wire, write_leb};\n\n");
+    // What the WIT says nothing about: the documentation is generated from
+    // its comments, so a type or a word of the protocol's vocabulary with
+    // none is one nobody is told the meaning of.
+    let mut undocumented = Vec::new();
     // Every type in the package, in the order the resolver sorted them,
     // which puts each after the types it uses.
     for (id, def) in &resolve.types {
@@ -48,8 +52,30 @@ fn main() {
         {
             continue;
         }
+        if def.docs.contents.is_none() {
+            undocumented.push(name.clone());
+        }
+        if let TypeDefKind::Variant(variant) = &def.kind
+            && VOCABULARY.contains(&name.as_str())
+        {
+            for case in &variant.cases {
+                if case.docs.contents.is_none() {
+                    undocumented.push(format!("{name}.{}", case.name));
+                }
+            }
+        }
         generate(&resolve, id, name, &mut out);
     }
+    out.push_str(
+        "/// The types of the WIT, and the cases of its messages, changes, events,\n\
+         /// commands, queries and replies, that have no documentation: none, which\n\
+         /// `tests::every_word_of_the_protocol_says_what_it_means` holds it to.\n\
+         pub const UNDOCUMENTED: &[&str] = &[\n",
+    );
+    for name in &undocumented {
+        let _ = writeln!(out, "    {name:?},");
+    }
+    out.push_str("];\n");
 
     let target = Path::new(&std::env::var("OUT_DIR").unwrap_or_else(|_| fail("no OUT_DIR")))
         .join("generated.rs");
@@ -57,6 +83,10 @@ fn main() {
         fail(&format!("writing {}: {err}", target.display()));
     }
 }
+
+/// The variants whose every case is a word of the protocol a window manager
+/// reads or writes, and so is documented.
+const VOCABULARY: &[&str] = &["message", "change", "event", "command", "query", "reply"];
 
 fn fail(message: &str) -> ! {
     eprintln!("solium-wm-protocol: {message}");

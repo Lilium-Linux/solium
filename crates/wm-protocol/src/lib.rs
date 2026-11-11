@@ -54,6 +54,23 @@ pub const VERSION: &str = env!("SOLIUM_WM_PROTOCOL_VERSION");
 
 #[cfg(test)]
 mod tests {
+    /// The documentation site's protocol reference is the WIT's comments,
+    /// so a type, a message, a change, an event, a command, a query or a
+    /// reply with none is one a window manager's author is told nothing
+    /// about.
+    #[test]
+    fn every_word_of_the_protocol_says_what_it_means() {
+        assert!(
+            crate::UNDOCUMENTED.is_empty(),
+            "no documentation in wit/ for: {:?}",
+            crate::UNDOCUMENTED
+        );
+        assert!(
+            crate::Event::CASES.len() > 40 && crate::Command::CASES.len() > 50,
+            "the WIT was read"
+        );
+    }
+
     use crate::{
         Answer, Batch, Change, Command, DocNode, DocTable, Easing, Event, FocusCause, Hello, Input,
         Message, Monitor, Motion, Parentage, Place, Rect, Spring, Window, Wire,

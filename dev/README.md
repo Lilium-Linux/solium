@@ -1156,6 +1156,42 @@ Curves live in `crates/animation`, which depends on nothing so it keeps building
 for the browser. Add one there and it is available to scripts by name
 (`sol.animate{ easing = "spring" }`) and to the preview at once.
 
+## The window manager
+
+The window manager is a program of its own. In a session the compositor
+starts `solium-lua`, or the program `~/.config/solium/wm.toml` names, with a
+socket as its standard input, and the two speak the protocol in
+`crates/wm-protocol/wit/` ([docs/window-managers.md](../docs/window-managers.md)).
+
+- **`cargo build` before the command-line tests.** `crates/solium/tests/cli.rs`
+  runs the compositor as a process, which starts `target/debug/solium-lua`
+  and, for one test, `target/debug/examples/tiny_wm`. Only a build of the
+  whole workspace puts them there (`cargo build --workspace --all-targets`,
+  which the gate and CI run first); `cargo test -p solium` alone does not.
+- **The unit tests start no process.** They run the Lua window manager on a
+  thread, over a socket pair (`wm/link.rs`), so every test of the
+  configuration still crosses the protocol. `Hand` in the same file is a
+  window manager played by the test itself, a message at a time, for the
+  timing tests in `script/tests/waits.rs`; `Scripts::played` runs any other
+  one on a thread, as `script/tests/rust_wm.rs` runs the example.
+- **To try another window manager nested**, give the run a configuration
+  directory of its own with a `wm.toml` in it:
+
+  ```sh
+  mkdir -p /tmp/try/solium
+  echo 'command = ["'"$PWD"'/target/debug/examples/tiny_wm"]' > /tmp/try/solium/wm.toml
+  XDG_CONFIG_HOME=/tmp/try timeout -s TERM 20 ./target/debug/solium
+  ```
+
+- **To see what was late**, `RUST_LOG=info,solium::wm=debug` logs each answer
+  the compositor did not wait for, with how long it took. The log line
+  `window manager started pid=… program=…` names the process, which is how a
+  script ends one to watch it being started again: by that PID, never by
+  name.
+- **A new event, command or type** goes in the WIT with its comment. The Rust
+  types are generated from it when `solium-wm-protocol` is built, and the
+  protocol reference page from its comments.
+
 ## Running a shell inside Solium
 
 A shell is hosted in the compositor's own QML engine, as configuration — see

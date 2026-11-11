@@ -280,9 +280,13 @@ SOLIUM_DOCS_IMAGE=localhost/solium-build:fc44 dev/docs.sh   # in the container
   of contents; a new doc goes there too.
 - **The reference pages are generated, and never committed.** The
   configuration comes from `crates/solium/lua/config.lua`, the key bindings
-  from `solium --check`, the Lua API from `crates/solium/lua/meta/sol.lua` and
-  the flags and environment from `crates/solium/environment.txt`. Change the
-  source, not the page.
+  from `solium --check`, the Lua API from `crates/solium/lua/meta/sol.lua`,
+  the window manager protocol from the comments in `crates/wm-protocol/wit/`
+  and the flags and environment from `crates/solium/environment.txt`. Change
+  the source, not the page.
+- **A new message, event, command or type of the protocol needs its comment
+  in the WIT.** The test `every_word_of_the_protocol_says_what_it_means`
+  fails without one.
 - **A new `sol.*` name needs its entry in `sol.lua`, and a new `SOLIUM_*`
   variable or flag its line in `environment.txt`.** The tests
   `sol_lua_documents_exactly_the_api_the_compositor_registers` and

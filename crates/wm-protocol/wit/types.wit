@@ -1,9 +1,10 @@
 package solium:wm@0.1.0;
 
 /// What a window manager is told about the desktop: plain data, no handles.
-/// Every row here mirrors what the compositor's own scripts were told, field
-/// for field, so a window manager in any language sees what `sol.windows()`
-/// shows a Lua one.
+/// A window, a monitor and the rest are rows the compositor sends whole
+/// whenever any of one changes (`messages`, `change`), and a window manager
+/// keeps the latest of each. Every rectangle and point is in the
+/// compositor's one logical space, which every monitor has a place in.
 interface types {
     /// A rectangle in the compositor's logical space.
     record rect { x: f64, y: f64, w: f64, h: f64 }
@@ -16,95 +17,184 @@ interface types {
 
     /// Which window a window belongs to: none named, one named that cannot
     /// be pointed at, or that window.
-    variant parentage { none, unknown, window(u64) }
+    variant parentage {
+        /// It named no parent.
+        none,
+        /// It named a parent that is not a window on screen.
+        unknown,
+        /// The window it belongs to, by its id.
+        window(u64),
+    }
 
-    /// A window, as `sol.windows()` lists it.
+    /// A window.
     record window {
+        /// Its id, which every command about it takes. Never reused in a
+        /// session.
         id: u64,
+        /// Where it lives, frame included: where a layout last put it, or
+        /// where it opened.
         rect: rect,
+        /// What its frame takes of `rect` on each side right now: the
+        /// client is that rectangle less these. All 0 for a window drawn
+        /// bare.
         insets: insets,
+        /// Its title; the program's name until its application arrives.
         title: string,
+        /// Whether it has the keyboard.
         focused: bool,
+        /// The name of the monitor it is on.
         monitor: string,
+        /// Whether it says it is a modal dialog.
         modal: bool,
+        /// The window it belongs to, as a dialog does.
         parent: parentage,
+        /// Whether it is closing: between the events `closing` and `closed`
+        /// or `refused`.
         leaving: bool,
+        /// Whether it is minimized: still mapped and alive, but drawn only
+        /// while a `present` on it plays out or `show-minimized` shows it,
+        /// under no pointer or finger, and never holding the keyboard.
         minimized: bool,
+        /// Whether it is kept above every window that is not (`keep-above`).
         above: bool,
+        /// Where a dock that is its own program shows this window, as that
+        /// program said: what a minimize can fly to.
         icon: option<rect>,
+        /// The application's own name: a Wayland `app_id`, an X11
+        /// `WM_CLASS` class. Empty until the application arrives.
         app-id: string,
+        /// The smallest the application says it can be, frame included.
         min: option<size>,
+        /// The largest the application says it can be, frame included.
         max: option<size>,
+        /// Whether it was last placed with `cramped` set: in a tile smaller
+        /// than its own minimum.
         cramped: bool,
+        /// Whether its application has shown its first frame yet.
         shown: bool,
+        /// Whether the compositor last told it to be fullscreen.
         fullscreen: bool,
+        /// Whether the compositor last told it to be maximised.
         maximized: bool,
+        /// The frame style it is drawn in, or `none` when it is drawn bare.
         style: string,
+        /// Whether its application draws its own titlebar.
         client-side: bool,
+        /// Whether it asked for the background behind part of it to be
+        /// blurred.
         blur-region: bool,
+        /// Its X11 window type, lower case (`normal`, `dialog`, `utility`,
+        /// `splash` and the rest of EWMH's); none for a Wayland window.
         x11-type: option<string>,
+        /// Whether it may ever be given the keyboard: an X11 client can
+        /// say it never takes it.
         accepts-input: bool,
+        /// Its X11 `WM_CLASS` class; none for a Wayland window.
         class: option<string>,
+        /// Its X11 `WM_CLASS` instance; none for a Wayland window.
         instance: option<string>,
+        /// What it says it is showing: `none`, `photo`, `video` or `game`.
         content-type: string,
+        /// The process it belongs to, when that can be told.
         pid: option<u32>,
     }
 
-    /// A monitor, as `sol.monitors()` lists it.
+    /// A monitor.
     record monitor {
+        /// Its connector's name, such as `DP-1`.
         name: string,
+        /// The part of it that bars and docks leave: where windows go.
         area: rect,
+        /// The whole of it: what a wallpaper or a fullscreen window covers.
         whole: rect,
+        /// Device pixels per logical pixel.
         scale: f64,
+        /// Whether the pointer is on it.
         focused: bool,
+        /// Whether it is the primary monitor.
         primary: bool,
+        /// Its rotation: `normal`, `_90`, `_180`, `_270`, `flipped`,
+        /// `flipped90`, `flipped180` or `flipped270`.
         transform: string,
+        /// Whether its display is off. A monitor that is off keeps its
+        /// place, its work area and its windows.
         off: bool,
     }
 
     /// The keyboard: its layouts, the active one, the locks and repeat.
     record keyboard {
+        /// The layouts' names, in order, such as `Russian`.
         layouts: list<string>,
+        /// Their short names, in the same order, such as `RU`.
         short-names: list<string>,
+        /// Which of them is live, counting from 1; 0 before the keymap is
+        /// known.
         active: u32,
+        /// Whether Caps Lock is on.
         caps: bool,
+        /// Whether Num Lock is on.
         num: bool,
+        /// Repeats a second of a held key.
         repeat-rate: s32,
+        /// Milliseconds a key is held before it repeats.
         repeat-delay: s32,
     }
 
     /// A text field that has the keyboard, and where its caret is.
     record text-field {
+        /// The window it is in.
         window: u64,
+        /// The caret's rectangle, where it is drawn, once the application
+        /// has said where its caret is.
         caret: option<rect>,
+        /// Whether the window is drawn in a frame of the compositor's.
         framed: bool,
     }
 
-    /// Something wrong in an effect, a rule or the configuration.
+    /// Something wrong in an effect, a rule or the configuration: what the
+    /// compositor found, for a window manager to show.
     record problem {
+        /// What it is about: an effect's name, `config`, `rules`,
+        /// `settings`, `wm` for the window manager itself, `wm.toml`.
         effect: string,
+        /// The file the problem is in.
         file: string,
+        /// Its line in that file, where one is known.
         line: option<u32>,
+        /// Its column, where one is known.
         column: option<u32>,
+        /// What is wrong.
         message: string,
+        /// `error` or `warning`.
         severity: string,
     }
 
     /// A finger, in the compositor's space, routed to the window manager.
     record touch-event {
+        /// `down`, `motion`, `up` or `cancel`.
         kind: string,
+        /// Which finger, from its down until its up or cancel.
         slot: s32,
+        /// Where it is; where it last was, for an up or a cancel.
         x: f64,
         y: f64,
+        /// The monitor its down was on; empty outside every monitor.
         output: string,
+        /// What its down landed on: `client`, `frame`, `border`, `scene`,
+        /// `script` or `blocked`.
         target: string,
+        /// The window under its down; none over a scene.
         window: option<u64>,
+        /// Whether a control of the window's frame claims the down.
         control: bool,
         /// The edge or corner of the window's frame under the finger, by
         /// the names `touch-action`'s `resize` takes.
         edges: option<string>,
+        /// The device's own time in milliseconds, wrapping at 32 bits.
         time: u32,
+        /// The event's time in seconds, monotonic: differences are exact.
         t: f64,
+        /// The finger's velocity, in logical pixels a second.
         vx: f64,
         vy: f64,
     }
@@ -112,24 +202,35 @@ interface types {
     /// One node of a settings document; a table's children are nodes by
     /// index into the same list, because WIT has no recursive types.
     variant doc-node {
+        /// Nothing: a key that is there and empty.
         nil,
         boolean(bool),
+        /// A whole number.
         integer(s64),
+        /// A number with a fraction.
         number(f64),
         text(string),
+        /// A table of further nodes.
         table(doc-table),
+        /// Something a document cannot carry (a function, say), named by
+        /// its kind so that whoever reads the document can say so.
         other(string),
     }
 
     /// A table: its list part, its named keys and its numbered keys, each
     /// value an index into the document's nodes.
     record doc-table {
+        /// The values at 1, 2, 3 and so on, in order.
         %list: list<u32>,
+        /// The values under names.
         fields: list<tuple<string, u32>>,
+        /// The values under whole numbers that are not part of the list.
         numbered: list<tuple<s64, u32>>,
     }
 
-    /// A settings document: its nodes, the first the root.
+    /// A document: a tree of tables, numbers, text and booleans, as a
+    /// settings section and a kept table are. Its nodes, the first the
+    /// root.
     type doc = list<doc-node>;
 
     /// What a window frame style is: a folder of QML and its parts, or a
@@ -139,7 +240,7 @@ interface types {
         file,
     }
 
-    /// A window frame style this machine can draw, by the name `pane`'s
+    /// A window frame style this machine can draw, by the name the `pane`
     /// settings take.
     record style {
         name: string,
