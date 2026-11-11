@@ -52,8 +52,9 @@ pub struct Host {
     /// What it was started with, which a reload starts with again.
     pub setup: Setup,
     /// The desktop as the scripts know it: what `sol.windows()` and the
-    /// other reads answer from.
-    pub mirror: solium_wm_protocol::mirror::Mirror,
+    /// other reads answer from. Shared with the Lua state while a batch is
+    /// handled, and changed in place between batches.
+    pub mirror: std::rc::Rc<solium_wm_protocol::mirror::Mirror>,
 }
 
 /// What the Lua host is started with: where the shipped Lua is, which a

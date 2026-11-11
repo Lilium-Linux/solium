@@ -77,13 +77,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "text_input",
         lua.create_function(|lua, ()| {
-            let Some(field) = mirror(lua).text_field else {
+            let mirror = mirror(lua);
+            let Some(field) = &mirror.text_field else {
                 return Ok(Value::Nil);
             };
             let table = lua.create_table()?;
             table.set("window", field.window)?;
             table.set("framed", field.framed)?;
-            if let Some(caret) = field.caret {
+            if let Some(caret) = &field.caret {
                 table.set("x", caret.x)?;
                 table.set("y", caret.y)?;
                 table.set("w", caret.w)?;

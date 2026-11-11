@@ -595,7 +595,7 @@ impl Scripts {
                 let mut mirror = solium_wm_protocol::mirror::Mirror::new();
                 mirror.apply_all(changes);
                 let lua = &wm.host().lua;
-                lua.set_app_data(mirror);
+                lua.set_app_data(std::rc::Rc::new(mirror));
                 lua.set_app_data(crate::script::lua::Asker(wm.asks()));
                 lua.load(&chunk)
                     .eval::<String>()

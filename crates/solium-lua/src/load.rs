@@ -37,7 +37,7 @@ impl Host {
             Self {
                 lua,
                 setup,
-                mirror: solium_wm_protocol::mirror::Mirror::new(),
+                mirror: std::rc::Rc::default(),
             },
             loaded,
         ))

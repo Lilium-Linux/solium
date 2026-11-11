@@ -4,6 +4,7 @@
 //! snapshot crossing the socket every time.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use solium_wm_protocol as wire;
 use wire::Change;
@@ -25,6 +26,30 @@ pub(crate) struct Told {
     problems: Option<Vec<wire::Problem>>,
     locked: Option<bool>,
     services: HashMap<&'static str, wire::Doc>,
+    views: Views,
+}
+
+/// The services' views, and the installed applications, as they were when
+/// each was last made into a document.
+///
+/// A view is shared from one snapshot to the next for as long as nothing in
+/// it changes, and a snapshot is taken for every event. So the same view is
+/// neither made into a document nor compared again: the installed
+/// applications alone are hundreds of rows, and were most of what an event
+/// cost.
+#[derive(Debug, Default)]
+struct Views {
+    notifications: Option<Rc<crate::services::notifications::View>>,
+    tray: Option<Rc<crate::services::tray::View>>,
+    audio: Option<Rc<crate::services::audio::View>>,
+    apps: Option<Rc<Vec<crate::apps::Entry>>>,
+    media: Option<crate::services::media::Seen>,
+}
+
+/// Whether `now` is the view `then` was: the same shared value, not one
+/// that reads the same.
+fn same<T>(then: Option<&Rc<T>>, now: &Rc<T>) -> bool {
+    then.is_some_and(|then| Rc::ptr_eq(then, now))
 }
 
 impl Told {
@@ -109,13 +134,47 @@ impl Told {
             self.locked = Some(snapshot.locked);
             changes.push(Change::Locked(snapshot.locked));
         }
-        for (name, view) in convert::services(snapshot) {
-            if self.services.get(name) != Some(&view) {
-                self.services.insert(name, view.clone());
-                changes.push(Change::Service((name.to_owned(), view)));
-            }
+        if !same(self.views.notifications.as_ref(), &snapshot.notifications) {
+            self.views.notifications = Some(Rc::clone(&snapshot.notifications));
+            let view = convert::notifications(&snapshot.notifications);
+            self.service("notifications", view, &mut changes);
+        }
+        if !same(self.views.tray.as_ref(), &snapshot.tray) {
+            self.views.tray = Some(Rc::clone(&snapshot.tray));
+            let view = convert::tray(&snapshot.tray);
+            self.service("tray", view, &mut changes);
+        }
+        // A player that is playing is somewhere else each time it is
+        // looked at: the same players are the same document only when
+        // there are none, or at the same moment.
+        let media = &snapshot.media;
+        if !self.views.media.as_ref().is_some_and(|then| {
+            Rc::ptr_eq(&then.view, &media.view)
+                && (media.view.players.is_empty() || then.now == media.now)
+        }) {
+            self.views.media = Some(media.clone());
+            let view = convert::media(media);
+            self.service("media", view, &mut changes);
+        }
+        if !same(self.views.audio.as_ref(), &snapshot.audio) {
+            self.views.audio = Some(Rc::clone(&snapshot.audio));
+            let view = convert::audio(&snapshot.audio);
+            self.service("audio", view, &mut changes);
+        }
+        if !same(self.views.apps.as_ref(), &snapshot.apps) {
+            self.views.apps = Some(Rc::clone(&snapshot.apps));
+            let view = convert::apps(&snapshot.apps);
+            self.service("apps", view, &mut changes);
         }
         changes
+    }
+
+    /// A service's view as it is now: told when it is not what was told.
+    fn service(&mut self, name: &'static str, view: wire::Doc, changes: &mut Vec<Change>) {
+        if self.services.get(name) != Some(&view) {
+            self.services.insert(name, view.clone());
+            changes.push(Change::Service((name.to_owned(), view)));
+        }
     }
 }
 
@@ -186,6 +245,51 @@ mod tests {
         assert!(matches!(&changes[0], Change::Window(window) if window.id == 2));
         mirror.apply_all(changes);
         assert_mirrors(&mirror, &renamed);
+    }
+
+    /// **A view nothing changed in is not looked at again.** The services'
+    /// views and the installed applications are shared from one snapshot
+    /// to the next while they stand, so the same one is neither made into
+    /// a document nor told; one that was replaced is told when it reads
+    /// differently, and only then.
+    #[test]
+    fn a_view_is_told_when_it_is_another_and_reads_differently() {
+        let app = |name: &str| crate::apps::Entry {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            untranslated_name: name.to_owned(),
+            generic_name: String::new(),
+            icon: String::new(),
+            exec: name.to_owned(),
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            terminal: false,
+            path: None,
+            source: std::path::PathBuf::new(),
+        };
+        let apps_told = |changes: &[Change]| {
+            changes
+                .iter()
+                .filter(|change| matches!(change, Change::Service((name, _)) if name == "apps"))
+                .count()
+        };
+        let mut desk = snapshot(&[(1, "a")]);
+        desk.apps = std::rc::Rc::new(vec![app("foot")]);
+        let mut told = Told::new();
+        assert_eq!(apps_told(&told.changes(&desk)), 1, "told at first");
+        assert_eq!(apps_told(&told.changes(&desk)), 0, "the same one");
+
+        // Scanned again and found the same: another value that reads alike.
+        desk.apps = std::rc::Rc::new(vec![app("foot")]);
+        assert_eq!(apps_told(&told.changes(&desk)), 0);
+
+        desk.apps = std::rc::Rc::new(vec![app("foot"), app("kitty")]);
+        let changes = told.changes(&desk);
+        assert_eq!(apps_told(&changes), 1, "one more installed");
+        let mut mirror = Mirror::new();
+        mirror.apply_all(changes);
+        assert!(mirror.services.contains_key("apps"));
+        assert_eq!(apps_told(&told.changes(&desk)), 0);
     }
 
     #[test]

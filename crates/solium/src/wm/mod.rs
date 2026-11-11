@@ -13,6 +13,7 @@ pub(crate) mod rows;
 mod scripts;
 mod settings;
 pub(crate) mod stores;
+mod timing;
 mod wake;
 
 pub(crate) use chosen::Chosen;

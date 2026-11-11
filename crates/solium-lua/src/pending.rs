@@ -2,6 +2,8 @@
 //! the Lua state's app data for the length of the dispatch.
 
 use mlua::{Lua, Value};
+use std::rc::Rc;
+
 use solium_wm_protocol::mirror::Mirror;
 
 use crate::*;
@@ -69,15 +71,18 @@ pub fn size_table(lua: &Lua, size: Option<&solium_wm_protocol::Size>) -> mlua::R
 
 /// The desktop as this window manager's mirror has it: the windows, the
 /// monitors and the rest the compositor told it, as the protocol's rows.
-pub fn mirror(lua: &Lua) -> Mirror {
-    lua.app_data_ref::<Mirror>()
-        .map(|mirror| mirror.clone())
+///
+/// Shared, never copied: a handler reads it many times a batch, and it
+/// holds every window and the list of installed applications.
+pub fn mirror(lua: &Lua) -> Rc<Mirror> {
+    lua.app_data_ref::<Rc<Mirror>>()
+        .map(|mirror| Rc::clone(&mirror))
         .unwrap_or_default()
 }
 
 /// The window with the keyboard, as the mirror has it.
 pub fn focused_id(lua: &Lua) -> Option<u64> {
-    lua.app_data_ref::<Mirror>()
+    lua.app_data_ref::<Rc<Mirror>>()
         .and_then(|mirror| mirror.focused().map(|window| window.id))
 }
 

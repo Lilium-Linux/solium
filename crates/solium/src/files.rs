@@ -897,6 +897,11 @@ pub(crate) fn settle_at(state: &mut Solium, now: Duration) {
 pub(crate) fn finish(state: &mut Solium) {
     save_stores_at_last(state);
     state.files.wait_for_writes();
+    // The session's last word on its window manager: how long it took to
+    // answer, all told.
+    if let Some(scripts) = &state.scripts {
+        scripts.say_timing();
+    }
 }
 
 /// Ask the configuration for the stores that changed, and save them.

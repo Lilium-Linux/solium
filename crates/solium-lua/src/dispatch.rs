@@ -28,8 +28,13 @@ impl Host {
     /// each event's listeners in order, and answer. Each event is its own
     /// dispatch, under the deadline, answering for what moved it.
     pub fn handle(&mut self, batch: wire::Batch, ask: Box<dyn Ask>) -> wire::Answer {
-        self.mirror.apply_all(batch.changes);
-        self.lua.set_app_data(self.mirror.clone());
+        // The mirror is changed in place: the Lua state lets go of it
+        // first, so the batch's changes cost what changed and not a copy of
+        // every window there is.
+        self.lua
+            .remove_app_data::<std::rc::Rc<wire::mirror::Mirror>>();
+        std::rc::Rc::make_mut(&mut self.mirror).apply_all(batch.changes);
+        self.lua.set_app_data(std::rc::Rc::clone(&self.mirror));
         self.lua.set_app_data(Asker(ask));
         let mut answer = wire::Answer {
             serial: batch.serial,

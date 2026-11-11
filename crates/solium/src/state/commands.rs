@@ -1290,6 +1290,7 @@ impl Solium {
             return;
         };
         let why = scripts.why_down().unwrap_or("stopped").to_owned();
+        scripts.say_timing();
         // What it kept, as it last said, for the one started in its place:
         // a tiled desk comes back split for split.
         let keeps = scripts.take_keeps();

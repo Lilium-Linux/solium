@@ -35,6 +35,9 @@ use solium_wm_protocol::Ask;
 #[derive(Debug)]
 struct Pending {
     serial: u64,
+    /// The event the batch was, by its name: what its answer's time is
+    /// counted under.
+    event: &'static str,
     sent: Instant,
     /// Who answers what the window manager asks while it handles the batch:
     /// the compositor, over the desktop as the batch found it.
@@ -137,6 +140,8 @@ pub(crate) struct Scripts {
     /// Each bound combination the window manager wrote in a spelling of
     /// its own, by its one spelling.
     spellings: std::collections::HashMap<String, String>,
+    /// How long its answers took.
+    timing: crate::wm::timing::Timing,
 }
 
 /// What a window manager kept, by name, as the compositor holds it.
@@ -268,6 +273,7 @@ impl Scripts {
             keeps: std::collections::BTreeMap::new(),
             listens: std::collections::BTreeSet::new(),
             spellings: std::collections::HashMap::new(),
+            timing: crate::wm::timing::Timing::default(),
         };
         scripts.declarations_in(&loaded);
         scripts.listens_in(&loaded);
@@ -300,6 +306,7 @@ impl Scripts {
             return None;
         }
         let serial = batch.serial;
+        let event = batch.events.first().map_or("nothing", wire::Event::case);
         if let Err(err) = self.link.send(&Message::Batch(batch)) {
             self.failed(&err);
             return None;
@@ -307,6 +314,7 @@ impl Scripts {
         let behind = !self.pending.is_empty();
         self.pending.push_back(Pending {
             serial,
+            event,
             sent: Instant::now(),
             answers,
             at_the_lock,
@@ -363,7 +371,10 @@ impl Scripts {
                         continue;
                     };
                     let (decision, outcome) = self.arrived(&pending, answer);
-                    if awaited == Awaited::Answer(serial) {
+                    let in_time = awaited == Awaited::Answer(serial);
+                    self.timing
+                        .answered(pending.event, pending.sent.elapsed(), !in_time);
+                    if in_time {
                         return Some(Heard::Answer(decision, outcome));
                     }
                     tracing::debug!(
@@ -468,6 +479,14 @@ impl Scripts {
         let mut outcome = crate::wm::events::outcome_of(answer);
         outcome.commands.splice(0..0, self.stores.take_read());
         (decision, outcome)
+    }
+
+    /// Say in the log how long this window manager's answers took: as a
+    /// session ends, and as a window manager is replaced.
+    pub(crate) fn say_timing(&self) {
+        if let Some(said) = self.timing.said() {
+            tracing::info!("window manager: {said}");
+        }
     }
 
     /// The window manager stopped, `err` being how: nothing more is sent,

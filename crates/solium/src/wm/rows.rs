@@ -256,13 +256,9 @@ fn owner(
     }
 }
 
-/// The views a window manager mirrors, by name, each as `sol.<name>()`
-/// answers it.
-pub(crate) fn services(snapshot: &crate::script::Snapshot) -> Vec<(&'static str, wire::Doc)> {
-    let mut views = Vec::new();
-
+/// The notifications' view, as the document a window manager mirrors.
+pub(crate) fn notifications(view: &crate::services::notifications::View) -> wire::Doc {
     let mut doc = DocBuilder::default();
-    let view = &snapshot.notifications;
     doc.table(|doc, table| {
         table.field("available", doc.boolean(view.available));
         table.field("serving", doc.boolean(view.serving));
@@ -277,10 +273,12 @@ pub(crate) fn services(snapshot: &crate::script::Snapshot) -> Vec<(&'static str,
         }
         owner(doc, table, view.owner.as_ref());
     });
-    views.push(("notifications", doc.finish()));
+    doc.finish()
+}
 
+/// The tray's view, as the document a window manager mirrors.
+pub(crate) fn tray(view: &crate::services::tray::View) -> wire::Doc {
     let mut doc = DocBuilder::default();
-    let view = &snapshot.tray;
     doc.table(|doc, table| {
         table.field("available", doc.boolean(view.available));
         table.field("serving", doc.boolean(view.serving));
@@ -292,14 +290,20 @@ pub(crate) fn services(snapshot: &crate::script::Snapshot) -> Vec<(&'static str,
         table.field("items", items);
         owner(doc, table, view.owner.as_ref());
     });
-    views.push(("tray", doc.finish()));
+    doc.finish()
+}
 
+/// The media players, each where it is playing now, as the document a
+/// window manager mirrors.
+pub(crate) fn media(seen: &crate::services::media::Seen) -> wire::Doc {
     let mut doc = DocBuilder::default();
-    doc.json(&snapshot.media.to_json());
-    views.push(("media", doc.finish()));
+    doc.json(&seen.to_json());
+    doc.finish()
+}
 
+/// Audio's view, as the document a window manager mirrors.
+pub(crate) fn audio(view: &crate::services::audio::View) -> wire::Doc {
     let mut doc = DocBuilder::default();
-    let view = &snapshot.audio;
     doc.table(|doc, table| {
         table.field("available", doc.boolean(view.available));
         table.field("ready", doc.boolean(view.ready));
@@ -327,11 +331,14 @@ pub(crate) fn services(snapshot: &crate::script::Snapshot) -> Vec<(&'static str,
         });
         table.field("windows", windows);
     });
-    views.push(("audio", doc.finish()));
+    doc.finish()
+}
 
+/// The installed applications, as the document a window manager mirrors.
+pub(crate) fn apps(apps: &[crate::apps::Entry]) -> wire::Doc {
     let mut doc = DocBuilder::default();
     doc.table(|doc, list| {
-        for app in snapshot.apps.iter() {
+        for app in apps {
             let entry = doc.table(|doc, entry| {
                 entry.field("id", doc.text(&app.id));
                 entry.field("name", doc.text(&app.name));
@@ -347,7 +354,5 @@ pub(crate) fn services(snapshot: &crate::script::Snapshot) -> Vec<(&'static str,
             list.item(entry);
         }
     });
-    views.push(("apps", doc.finish()));
-
-    views
+    doc.finish()
 }
