@@ -19,4 +19,4 @@ mod wake;
 pub(crate) use chosen::Chosen;
 pub(crate) use scripts::{Keeps, Late, Scripts};
 pub(crate) use settings::{Restarts, Settings, Start, Wait};
-pub(crate) use wake::{Watch, settle};
+pub(crate) use wake::{Watch, before_frame, settle};

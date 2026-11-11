@@ -84,7 +84,7 @@ impl Scripts {
 
     /// A finger, routed to the scripts.
     pub(crate) fn touch(&mut self, event: TouchEvent, snapshot: Snapshot) -> Outcome {
-        self.send(
+        self.notice(
             snapshot,
             wire::Event::Touch(wire::TouchEvent {
                 kind: event.kind.to_owned(),
@@ -155,7 +155,7 @@ impl Scripts {
 
     /// A window's title, or its application's name, changed.
     pub(crate) fn renamed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Renamed(id))
+        self.notice(snapshot, wire::Event::Renamed(id))
     }
 
     /// A window's application drew it at a size of its own, and the window
@@ -242,19 +242,19 @@ impl Scripts {
         event: &crate::json::Json,
         snapshot: Snapshot,
     ) -> Outcome {
-        self.send(snapshot, wire::Event::Notifications(event.render()))
+        self.notice(snapshot, wire::Event::Notifications(event.render()))
     }
 
     pub(crate) fn audio_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Audio(event.render()))
+        self.notice(snapshot, wire::Event::Audio(event.render()))
     }
 
     pub(crate) fn tray_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Tray(event.render()))
+        self.notice(snapshot, wire::Event::Tray(event.render()))
     }
 
     pub(crate) fn media_event(&mut self, event: &crate::json::Json, snapshot: Snapshot) -> Outcome {
-        self.send(snapshot, wire::Event::Media(event.render()))
+        self.notice(snapshot, wire::Event::Media(event.render()))
     }
 
     /// The notifications of the configuration's own that are gone, whose
@@ -393,12 +393,12 @@ impl Scripts {
                 }),
             })
             .collect();
-        self.send(snapshot, wire::Event::Runs(heard))
+        self.notice(snapshot, wire::Event::Runs(heard))
     }
 
     /// The timers due, each with whether this is its last time.
     pub(crate) fn timers_due(&mut self, due: &[(u64, bool)], snapshot: Snapshot) -> Outcome {
-        self.send(
+        self.notice(
             snapshot,
             wire::Event::Timers(
                 due.iter()
@@ -445,7 +445,7 @@ impl Scripts {
                 Heard::WatchEnded { id } => wire::FileHeard::WatchEnded(*id),
             })
             .collect();
-        self.send(snapshot, wire::Event::Files(heard))
+        self.notice(snapshot, wire::Event::Files(heard))
     }
 
     pub(crate) fn relayout(&mut self, snapshot: Snapshot) -> Outcome {
@@ -461,7 +461,7 @@ impl Scripts {
         y: f64,
         snapshot: Snapshot,
     ) -> Outcome {
-        self.send(
+        self.notice(
             snapshot,
             wire::Event::Dragged(wire::PointerMove {
                 id,
@@ -481,7 +481,7 @@ impl Scripts {
         y: f64,
         snapshot: Snapshot,
     ) -> Outcome {
-        self.send(
+        self.notice(
             snapshot,
             wire::Event::Resizing(wire::PointerMove {
                 id,
@@ -536,6 +536,21 @@ impl Scripts {
         .unwrap_or_default()
     }
 
+    /// Tell an event nothing waits on (the module's notices): it goes out
+    /// with the next batch of them, and what the window manager asks for
+    /// in answer is applied when it comes. A test, which waits for every
+    /// answer, is told it at once instead.
+    fn notice(&mut self, snapshot: Snapshot, event: wire::Event) -> Outcome {
+        #[cfg(test)]
+        if self.patient {
+            return self.send(snapshot, event);
+        }
+        if self.hears(&event) && !self.down() {
+            self.queue(snapshot, event);
+        }
+        Outcome::default()
+    }
+
     /// Send one event, with what changed since the last batch: its answer,
     /// or an empty one when it is late.
     fn send(&mut self, snapshot: Snapshot, event: wire::Event) -> Outcome {
@@ -569,19 +584,10 @@ impl Scripts {
         if !self.hears(&event) {
             return Some((None, Outcome::default()));
         }
-        self.serial += 1;
-        if let Some(snapshot) = &snapshot {
-            self.at = snapshot.now.as_secs_f64() * 1000.0;
-        }
-        let batch = wire::Batch {
-            serial: self.serial,
-            at: self.at,
-            changes: snapshot
-                .as_ref()
-                .map(|snapshot| self.told.changes(snapshot))
-                .unwrap_or_default(),
-            events: vec![event],
-        };
+        // The notices before it go first, in a batch of their own: the
+        // answer to this one is about this event alone.
+        self.fly();
+        let batch = self.batch_of(snapshot.as_ref(), vec![event]);
         let answers = self.answers(snapshot);
         self.send_batch(batch, answers, at_the_lock, change, wait)
     }

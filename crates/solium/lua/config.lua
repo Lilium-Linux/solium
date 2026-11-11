@@ -767,6 +767,11 @@ local defaults = {
         -- into the focused window, a new window is placed plainly), applies
         -- the answer when it comes, and waits for no other until the window
         -- manager has caught up. One frame at 260 Hz. Above 0.
+        --
+        -- What comes many times a frame (a finger, a drag, a timer) is not
+        -- waited for where it happens. It goes out with the rest of the
+        -- loop's pass, and a frame about to be drawn waits this long for the
+        -- answer, once; not at all after a batch that took longer.
         ask_ms = 4,
         -- The hard deadline, in milliseconds. A window manager that says
         -- nothing for `strikes` of them running, while an event waits for

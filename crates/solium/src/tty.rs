@@ -867,6 +867,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // reported it. See `settle_resize`.
             // And a move drag's last motion, told once (#452).
             crate::input::grab::settle_drags(&mut state.solium, false);
+            // What this pass told the window manager without waiting (its
+            // fingers, its drags), sent, and answered in time for the
+            // frame when one is about to be drawn: `wm::before_frame`.
+            let drawable = state.drawable_now(crate::pacing::monotonic_now());
+            crate::wm::before_frame(&mut state.solium, drawable);
             state.solium.settle_resize();
             // What the focused text field said since the last pass, told to the
             // configuration once, so a pill it moves to the caret is in this

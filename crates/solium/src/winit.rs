@@ -880,6 +880,10 @@ pub(crate) fn run() -> Result<()> {
         // And a move drag's last motion, told once (#452). Before the
         // resize, so a window a listener restores is placed in this frame.
         crate::input::grab::settle_drags(&mut state, false);
+        // What this pass told the window manager without waiting (its
+        // fingers, its drags), sent, and answered in time for the frame:
+        // `wm::before_frame`.
+        crate::wm::before_frame(&mut state, true);
         state.settle_resize();
         // What the focused text field said since the last pass, told to the
         // configuration once, so a pill it moves to the caret is in this

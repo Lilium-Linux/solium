@@ -88,9 +88,31 @@ pub(crate) fn settle(state: &mut Solium) {
         return;
     };
     scripts.hear_ready();
+    // The notices this pass left: out now, so the window manager works on
+    // them while the loop sleeps.
+    scripts.flush();
     scripts.stalled(std::time::Instant::now());
     if scripts.down() {
         state.restart_wm();
+    }
+    state.apply_late();
+}
+
+/// Once the pass's drags are told, and before anything goes on from where
+/// they left the windows: the notices of this pass are sent, and when a
+/// screen can be drawn now (`drawable`), the window manager is given a
+/// frame's wait to answer them, so a window it moves for a finger or a
+/// drag is there in the frame about to be drawn
+/// ([`crate::wm::Scripts::before_frame`]). What it answered is applied
+/// either way.
+pub(crate) fn before_frame(state: &mut Solium, drawable: bool) {
+    let Some(scripts) = state.scripts.as_mut() else {
+        return;
+    };
+    if drawable {
+        scripts.before_frame();
+    } else {
+        scripts.flush();
     }
     state.apply_late();
 }

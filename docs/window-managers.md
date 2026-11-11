@@ -235,12 +235,21 @@ ends, waits a second for the window manager to exit, and then stops it.
 
 ## How long the compositor waits
 
-A window manager that is slow never holds a frame.
+A window manager that is slow never holds a frame. The compositor tells an
+event in one of two ways.
 
-- The compositor waits **one frame** for an answer: `wm.ask_ms`, 4 ms, which
-  is a frame at 260 Hz. The socket itself takes about 20 microseconds there
-  and back, so how long an answer takes is how long the window manager works
-  on it, and one that is late is a window manager that is busy or stuck.
+### What it asks
+
+Some events decide what the compositor does next, or a handler goes on from
+their answer: a bound key, a window opening or closing, a fullscreen or a
+maximise, a notification, a press while the window manager holds input, a
+modified wheel turn, a window's own resize, a scene's or a frame's action.
+Each is sent at once, in a batch of its own, and its answer is waited for:
+
+- The compositor waits **one frame**: `wm.ask_ms`, 4 ms, which is a frame at
+  260 Hz. The socket itself takes about 20 microseconds there and back, so
+  how long an answer takes is how long the window manager works on it, and
+  one that is late is a window manager that is busy or stuck.
 - When the answer is late the compositor goes on, and does what it would do
   with no window manager:
 
@@ -255,16 +264,44 @@ A window manager that is slow never holds a frame.
 
 - The late answer is **applied when it comes**. A window the compositor placed
   plainly then moves to where the window manager wanted it.
-- While an answer is owed, **no later batch is waited for at all**. So a slow
-  window manager costs one frame once, not one frame for each event. Once it
-  has answered everything, the next batch is waited for again.
+- While an answer has been owed for that long, **no later batch is waited
+  for at all**. So a slow window manager costs one frame once, not one frame
+  for each event. Once it has answered everything, the next batch is waited
+  for again.
+
+### What it only tells
+
+Other events can come many times a frame, and nothing waits on one where it
+happens: `touch`, `dragged`, `resizing`, `timers`, `runs`, `files`, `renamed`,
+and the services' `notifications`, `audio`, `tray` and `media`. These are
+notices:
+
+- **They are sent together.** The notices of one pass of the compositor's
+  loop are one batch, so a batch's `events` can hold several. Answer it once,
+  as any batch.
+- **Only one batch of them is unanswered at a time.** While it is, the next
+  ones wait for its answer, and a later position takes the place of an
+  earlier one: a `touch` of kind `motion` for the same finger, a `dragged` or
+  a `resizing` of phase `move` for the same window, a `renamed` for the same
+  window. A finger going down or lifting, and a drag's beginning and end, are
+  each told. So a window manager that is slow is sent fewer batches, and
+  never a backlog: what it reads is where the finger is, not where it was.
+- **A frame waits for them once.** Before a frame is drawn the compositor
+  gives the window manager what is left of `wm.ask_ms` to answer the batch
+  in flight, so a window it moves for a finger is there in that frame. When
+  the last batch took longer than `wm.ask_ms`, the next is not waited for:
+  the answer is drawn a frame later, and the frames keep their time.
+
+A window manager on a slow machine, or in a language that stops now and then
+to collect its garbage, is therefore late with a window by a frame or two,
+and never the reason a frame was missed.
 
 The window manager sets these with the `wm` settings section
 (`configure("wm", …)`):
 
 | Key | Default | What it is |
 |---|---|---|
-| `ask_ms` | 4 | How long an answer is waited for. |
+| `ask_ms` | 4 | How long an answer is waited for, and how long a frame waits for a batch of notices. |
 | `hard_ms` | 1000 | How long without a word, with a batch unanswered, counts once against the window manager. |
 | `strikes` | 3 | How many of those in a row mean it has stopped. |
 | `load_ms` | 10000 | How long `hello` and `reload` are waited for. |

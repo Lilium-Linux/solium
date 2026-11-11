@@ -374,9 +374,14 @@ fn an_event_nobody_listens_to_is_not_sent() {
     hand.answer(2, true, Vec::new());
     let outcome = scripts.key("super+t", empty_snapshot());
     assert!(outcome.handled, "{outcome:?}");
+    // A timer is a notice: it goes out with the pass, and its answer is
+    // kept for when it comes.
     hand.answer(3, false, quit());
-    let outcome = scripts.timers_due(&[(4, true)], empty_snapshot());
-    assert!(asked_to_quit(&outcome), "{outcome:?}");
+    scripts.timers_due(&[(4, true)], empty_snapshot());
+    scripts.flush();
+    scripts.hear_ready();
+    let late = scripts.late.pop_front().expect("the timer's answer");
+    assert!(asked_to_quit(&late.outcome), "{late:?}");
 
     let sent: Vec<wire::Event> = (0..3)
         .flat_map(|_| match hand.read() {
@@ -515,5 +520,215 @@ fn a_window_manager_is_told_when_it_starts_and_what_is_there() {
         ),
         "{:?}",
         batch.changes
+    );
+}
+
+/// The events of a batch, read off the socket.
+fn events_of(hand: &mut Hand) -> (u64, Vec<wire::Event>) {
+    match hand.read() {
+        Message::Batch(batch) => (batch.serial, batch.events),
+        other => panic!("not a batch: {other:?}"),
+    }
+}
+
+fn finger(kind: &'static str, slot: i32, x: f64) -> TouchEvent {
+    TouchEvent {
+        kind,
+        slot,
+        x,
+        y: 0.0,
+        output: String::new(),
+        target: "window",
+        window: None,
+        control: false,
+        edges: None,
+        time: 0,
+        t: 0.0,
+        velocity: (0.0, 0.0),
+    }
+}
+
+fn listening(events: &[&str]) -> (Scripts, Hand) {
+    Hand::with(vec![wire::Command::Listen(
+        events.iter().map(|event| (*event).to_owned()).collect(),
+    )])
+}
+
+/// **Notices go out together**: an event nothing waits on is not sent
+/// where it happens. The ones of a pass are one batch, in their order, and
+/// the compositor did not stop for any of them.
+#[test]
+fn the_notices_of_a_pass_are_one_batch() {
+    let (mut scripts, mut hand) = listening(&["renamed", "touch"]);
+    scripts.settings.ask = Duration::from_millis(150);
+    let told = Instant::now();
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    scripts.renamed(7, empty_snapshot());
+    scripts.touch(finger("down", 0, 10.0), empty_snapshot());
+    assert_eq!(scripts.serial, 0, "nothing is sent where it happens");
+    scripts.flush();
+    assert!(
+        told.elapsed() < Duration::from_millis(150),
+        "and nothing was waited for: {:?}",
+        told.elapsed()
+    );
+    let (serial, events) = events_of(&mut hand);
+    assert_eq!(serial, 1);
+    assert_eq!(
+        events.iter().map(wire::Event::case).collect::<Vec<_>>(),
+        ["timers", "renamed", "touch"]
+    );
+}
+
+/// **A slow window manager is sent fewer batches, never a backlog**: while
+/// a batch of notices is unanswered the next ones wait, and a finger's or a
+/// drag's later position takes the place of its earlier one. What is told
+/// each time it happens is still told each time: a finger going down, a
+/// drag beginning, a timer.
+#[test]
+fn notices_wait_for_the_batch_before_them_and_a_later_position_replaces_an_earlier() {
+    let (mut scripts, mut hand) = listening(&["touch", "dragged", "renamed"]);
+    scripts.touch(finger("down", 0, 0.0), empty_snapshot());
+    scripts.flush();
+    assert_eq!(events_of(&mut hand).0, 1);
+
+    // The window manager is working on that one. Meanwhile:
+    for x in [1.0, 2.0, 3.0] {
+        scripts.touch(finger("motion", 0, x), empty_snapshot());
+        scripts.touch(finger("motion", 1, x * 10.0), empty_snapshot());
+    }
+    scripts.dragged(7, "begin", 0.0, 0.0, empty_snapshot());
+    scripts.dragged(7, "move", 5.0, 5.0, empty_snapshot());
+    scripts.dragged(7, "move", 6.0, 6.0, empty_snapshot());
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    scripts.renamed(7, empty_snapshot());
+    scripts.renamed(7, empty_snapshot());
+    scripts.touch(finger("up", 0, 3.0), empty_snapshot());
+    scripts.touch(finger("down", 0, 9.0), empty_snapshot());
+    scripts.touch(finger("motion", 0, 9.5), empty_snapshot());
+    scripts.flush();
+    assert_eq!(scripts.serial, 1, "they wait: the first is unanswered");
+
+    hand.answer(1, false, Vec::new());
+    scripts.hear_ready();
+    let (serial, events) = events_of(&mut hand);
+    assert_eq!(serial, 2, "its answer sends them");
+    let told: Vec<String> = events
+        .iter()
+        .map(|event| match event {
+            wire::Event::Touch(touch) => format!("{} {} {}", touch.kind, touch.slot, touch.x),
+            wire::Event::Dragged(drag) => format!("drag {} {}", drag.phase, drag.x),
+            other => other.case().to_owned(),
+        })
+        .collect();
+    assert_eq!(
+        told,
+        [
+            "motion 0 3",
+            "motion 1 30",
+            "drag begin 0",
+            "drag move 6",
+            "timers",
+            "timers",
+            "renamed",
+            "up 0 3",
+            "down 0 9",
+            "motion 0 9.5",
+        ]
+    );
+}
+
+/// **An event that is waited for comes after the notices before it**, each
+/// in a batch of its own, so the answer to the key is about the key.
+#[test]
+fn a_key_goes_after_the_notices_before_it() {
+    let bound = wire::Command::Declare(wire::Declarations {
+        bindings: vec![wire::Binding {
+            combo: "super+t".to_owned(),
+            ..wire::Binding::default()
+        }],
+        ..wire::Declarations::default()
+    });
+    let (mut scripts, mut hand) = Hand::with(vec![bound]);
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    hand.answer(1, false, vec![wire::Command::Status("timer".to_owned())]);
+    hand.answer(2, true, quit());
+    let outcome = scripts.key("super+t", empty_snapshot());
+    assert!(
+        outcome.handled && asked_to_quit(&outcome),
+        "the key's own answer, waited for though the notices' batch was unanswered: {outcome:?}"
+    );
+    assert_eq!(
+        scripts
+            .late
+            .front()
+            .and_then(|late| late.outcome.status.as_deref()),
+        Some("timer"),
+        "and the timer's, kept to be applied before it"
+    );
+    assert_eq!(events_of(&mut hand).1.len(), 1);
+    assert!(matches!(
+        events_of(&mut hand).1.as_slice(),
+        [wire::Event::Key(_)]
+    ));
+}
+
+/// **Before a frame the batch in flight is waited for**, so what the
+/// window manager asks for a finger is in the frame about to be drawn; and
+/// **a slow window manager is not**: once a batch took longer than an
+/// answer is waited for, the next frame does not stop for the next one.
+#[test]
+fn a_frame_waits_for_the_notices_of_a_window_manager_that_keeps_up() {
+    let (mut scripts, mut hand) = Hand::with(Vec::new());
+    let wait = Duration::from_millis(120);
+    scripts.settings.ask = wait;
+
+    // It answers at once: its answer is there to apply before the frame.
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    hand.answer(1, false, quit());
+    scripts.before_frame();
+    let late = scripts.late.pop_front().expect("answered before the frame");
+    assert!(asked_to_quit(&late.outcome), "{late:?}");
+
+    // It does not: the frame waits for it as long as an answer is waited
+    // for, once.
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    let told = Instant::now();
+    scripts.before_frame();
+    assert!(told.elapsed() >= wait, "{:?}", told.elapsed());
+    assert!(scripts.late.is_empty());
+    let told = Instant::now();
+    scripts.before_frame();
+    assert!(
+        told.elapsed() < wait / 2,
+        "the same batch is not waited for twice: {:?}",
+        told.elapsed()
+    );
+    hand.answer(2, false, quit());
+    scripts.hear_ready();
+    assert_eq!(scripts.late.len(), 1, "applied when it came");
+    scripts.late.clear();
+
+    // And the next frame does not wait for the next batch at all.
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    let told = Instant::now();
+    scripts.before_frame();
+    assert!(
+        told.elapsed() < wait / 2,
+        "a window manager that was slow costs the frame nothing: {:?}",
+        told.elapsed()
+    );
+    // Until it keeps up again.
+    hand.answer(3, false, Vec::new());
+    scripts.hear_ready();
+    scripts.late.clear();
+    scripts.timers_due(&[(4, false)], empty_snapshot());
+    hand.answer(4, false, quit());
+    scripts.before_frame();
+    assert_eq!(
+        scripts.late.len(),
+        1,
+        "it answered in time, so it is waited for again"
     );
 }

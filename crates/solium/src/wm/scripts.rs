@@ -12,6 +12,19 @@
 //! waiting for is kept in [`Scripts::late`], which
 //! [`crate::state::Solium::apply`] empties before anything else.
 //!
+//! That is for an event the compositor does something different by the
+//! answer to, or that a handler goes on from: a key, a window opening, a
+//! scene's action. Some events are neither, and come many times a frame: a
+//! finger moving, a drag, a timer, a child's output, a title. Those are
+//! **notices**. Nothing waits on one where it happens: it is kept in the
+//! [`Outbox`] and sent with the others in one batch, at the end of the
+//! loop's pass or once the pass's drags are told, whichever is first. Only one
+//! batch of notices is unanswered at a time; while it is, the next ones
+//! wait, and a finger's or a drag's later position takes the place of its
+//! earlier one. So a window manager that is slow is sent fewer batches and
+//! never a backlog, and the compositor's loop stops for it once a frame at
+//! most ([`Scripts::before_frame`]), not once an event.
+//!
 //! A test waits for every answer however long it takes, so what it asserts
 //! has happened by the time it looks; `script::tests::waits` keeps the
 //! session's time.
@@ -47,6 +60,9 @@ struct Pending {
     at_the_lock: bool,
     /// A window going fullscreen or maximised, or leaving either.
     change: bool,
+    /// A batch of notices: nothing waited for its answer, so one that
+    /// comes with nobody waiting is not late.
+    notice: bool,
 }
 
 /// An answer that came with nobody waiting for it.
@@ -56,6 +72,46 @@ pub(crate) struct Late {
     /// It answers a window's fullscreen or maximise, and is applied as one:
     /// a listener that turns the change back is not told it again.
     pub(crate) change: bool,
+}
+
+/// The notices waiting to be sent: events nothing waits on, which go out
+/// together in one batch.
+#[derive(Debug, Default)]
+struct Outbox {
+    events: Vec<wire::Event>,
+    /// The desktop as the last of them found it, which the batch's changes
+    /// are told from.
+    snapshot: Option<Snapshot>,
+}
+
+/// Whether two notices are of one stream: the same finger, the same drag,
+/// the same window's title.
+fn same_stream(held: &wire::Event, new: &wire::Event) -> bool {
+    use wire::Event as E;
+    match (held, new) {
+        (E::Touch(held), E::Touch(new)) => held.slot == new.slot,
+        (E::Dragged(held), E::Dragged(new)) | (E::Resizing(held), E::Resizing(new)) => {
+            held.id == new.id
+        }
+        (E::Renamed(held), E::Renamed(new)) => held == new,
+        _ => false,
+    }
+}
+
+/// Whether a notice makes the last one of its stream stale: a position
+/// that has moved on, a title that changed again. Never
+/// a finger going down or lifting, or a drag's beginning or end: each of
+/// those is told.
+fn replaces(held: &wire::Event, new: &wire::Event) -> bool {
+    use wire::Event as E;
+    match (held, new) {
+        (E::Touch(held), E::Touch(new)) => held.kind == "motion" && new.kind == "motion",
+        (E::Dragged(held), E::Dragged(new)) | (E::Resizing(held), E::Resizing(new)) => {
+            held.phase == "move" && new.phase == "move"
+        }
+        (E::Renamed(_), E::Renamed(_)) => true,
+        _ => false,
+    }
 }
 
 /// What [`Scripts::hear`] reads for.
@@ -98,6 +154,14 @@ pub(crate) struct Scripts {
     pending: VecDeque<Pending>,
     /// The answers that came with nobody waiting for them, oldest first.
     pub(crate) late: VecDeque<Late>,
+    /// The notices not sent yet.
+    outbox: Outbox,
+    /// The batch of notices that is unanswered, by its serial: the next
+    /// ones wait for its answer.
+    flying: Option<u64>,
+    /// The last batch of notices took longer to answer than an answer is
+    /// waited for, so the next is not waited for before a frame.
+    slow: bool,
     /// How long each kind of message is waited for: `wm`.
     pub(crate) settings: Settings,
     /// Whether every answer is waited for, as a test does.
@@ -249,6 +313,9 @@ impl Scripts {
             serial: 0,
             pending: VecDeque::new(),
             late: VecDeque::new(),
+            outbox: Outbox::default(),
+            flying: None,
+            slow: false,
             settings: Settings::default(),
             #[cfg(test)]
             patient: true,
@@ -307,6 +374,28 @@ impl Scripts {
         change: bool,
         wait: Wait,
     ) -> Option<(Option<String>, Outcome)> {
+        let behind = self.behind();
+        let serial = self.post(batch, answers, at_the_lock, change, false)?;
+        let within = self.within(wait, behind);
+        if within.is_zero() {
+            return None;
+        }
+        match self.hear(Awaited::Answer(serial), Some(Instant::now() + within)) {
+            Some(Heard::Answer(decision, outcome)) => Some((decision, outcome)),
+            _ => None,
+        }
+    }
+
+    /// Send `batch` and keep it as unanswered: its serial, or none when the
+    /// window manager has stopped or the socket failed.
+    fn post(
+        &mut self,
+        batch: wire::Batch,
+        answers: Answers,
+        at_the_lock: bool,
+        change: bool,
+        notice: bool,
+    ) -> Option<u64> {
         if self.down() {
             return None;
         }
@@ -316,7 +405,6 @@ impl Scripts {
             self.failed(&err);
             return None;
         }
-        let behind = !self.pending.is_empty();
         self.pending.push_back(Pending {
             serial,
             event,
@@ -324,14 +412,113 @@ impl Scripts {
             answers,
             at_the_lock,
             change,
+            notice,
         });
-        let within = self.within(wait, behind);
-        if within.is_zero() {
-            return None;
+        Some(serial)
+    }
+
+    /// Whether the window manager is behind: the oldest batch it has not
+    /// answered has waited as long as an answer is waited for. One it was
+    /// sent a moment ago, such as a batch of notices, does not make it so.
+    fn behind(&self) -> bool {
+        self.pending
+            .front()
+            .is_some_and(|oldest| oldest.sent.elapsed() >= self.settings.ask)
+    }
+
+    /// The batch `events` make, with what changed on the desktop since the
+    /// last one when there is a snapshot to tell it from.
+    pub(crate) fn batch_of(
+        &mut self,
+        snapshot: Option<&Snapshot>,
+        events: Vec<wire::Event>,
+    ) -> wire::Batch {
+        self.serial += 1;
+        if let Some(snapshot) = snapshot {
+            self.at = snapshot.now.as_secs_f64() * 1000.0;
         }
-        match self.hear(Awaited::Answer(serial), Some(Instant::now() + within)) {
-            Some(Heard::Answer(decision, outcome)) => Some((decision, outcome)),
-            _ => None,
+        wire::Batch {
+            serial: self.serial,
+            at: self.at,
+            changes: snapshot
+                .map(|snapshot| self.told.changes(snapshot))
+                .unwrap_or_default(),
+            events,
+        }
+    }
+
+    /// Keep a notice to go out with the next batch of them, in place of
+    /// the one of its stream it makes stale.
+    pub(crate) fn queue(&mut self, snapshot: Snapshot, event: wire::Event) {
+        let waiting = &mut self.outbox.events;
+        let last = waiting
+            .iter()
+            .rposition(|held| same_stream(held, &event))
+            .and_then(|at| waiting.get_mut(at))
+            .filter(|held| replaces(held, &event));
+        match last {
+            Some(held) => *held = event,
+            None => waiting.push(event),
+        }
+        self.outbox.snapshot = Some(snapshot);
+    }
+
+    /// Send the notices waiting, unless a batch of them is unanswered:
+    /// then they wait for its answer, and go when it comes.
+    pub(crate) fn flush(&mut self) {
+        if self.flying.is_none() {
+            self.fly();
+        }
+    }
+
+    /// Send the notices waiting now, whatever is unanswered: before an
+    /// event that is waited for, so that it comes after them.
+    pub(crate) fn fly(&mut self) {
+        if self.outbox.events.is_empty() {
+            return;
+        }
+        let events = std::mem::take(&mut self.outbox.events);
+        let snapshot = self.outbox.snapshot.take();
+        let batch = self.batch_of(snapshot.as_ref(), events);
+        let answers = self.answers(snapshot);
+        if let Some(serial) = self.post(batch, answers, false, false, true) {
+            self.flying = Some(serial);
+        }
+    }
+
+    /// Before a frame is drawn: send the notices waiting, and give the
+    /// window manager what is left of `wm.ask_ms` to answer the batch of
+    /// them in flight, so that what it asks for is in this frame. The
+    /// answer is kept in [`Self::late`] for the caller to apply.
+    ///
+    /// Not when its last batch took longer than that: a window manager
+    /// that is slow has its answers drawn a frame later, and the frame
+    /// does not wait for it.
+    pub(crate) fn before_frame(&mut self) {
+        self.flush();
+        let Some(serial) = self.flying else {
+            return;
+        };
+        if self.slow || self.down() {
+            return;
+        }
+        let Some(sent) = self
+            .pending
+            .iter()
+            .find(|pending| pending.serial == serial)
+            .map(|pending| pending.sent)
+        else {
+            return;
+        };
+        let until = sent + self.settings.ask;
+        if Instant::now() >= until {
+            return;
+        }
+        if let Some(Heard::Answer(_, outcome)) = self.hear(Awaited::Answer(serial), Some(until)) {
+            self.late.push_back(Late {
+                outcome,
+                change: false,
+            });
         }
     }
 
@@ -377,8 +564,16 @@ impl Scripts {
                     };
                     let (decision, outcome) = self.arrived(&pending, answer);
                     let in_time = awaited == Awaited::Answer(serial);
+                    let took = pending.sent.elapsed();
                     self.timing
-                        .answered(pending.event, pending.sent.elapsed(), !in_time);
+                        .answered(pending.event, took, !in_time && !pending.notice);
+                    // The batch of notices in flight has landed: the ones
+                    // that waited behind it go now.
+                    if self.flying.is_some_and(|flying| flying <= serial) {
+                        self.flying = None;
+                        self.slow = took > self.settings.ask;
+                        self.fly();
+                    }
                     if in_time {
                         return Some(Heard::Answer(decision, outcome));
                     }
@@ -505,6 +700,8 @@ impl Scripts {
             self.link.abandon();
         }
         self.pending.clear();
+        self.outbox = Outbox::default();
+        self.flying = None;
     }
 
     /// Whether the window manager has stopped: gone, or not answering.
