@@ -19,10 +19,12 @@
 //
 // It keeps no clock of its own. The compositor's timers tick on the clock
 // its animations run on, and the film is played from one: a tick, a frame.
+// Every batch says what that clock read, which is what the panel's rates
+// are worked out by.
 //
 // What it shows of the protocol:
 //   - the handshake, and what a window manager says before the first frame;
-//   - `listen`: it hears three events, and beyond them only its own keys
+//   - `listen`: it hears four events, and beyond them only its own keys
 //     and timers;
 //   - `declare`: its keys are its own, and the compositor knows without
 //     asking;
@@ -95,9 +97,9 @@ internal sealed class Player
 
     /// <summary>
     /// The two timers. One falls due twice a second, always: that is how
-    /// often the panel's numbers are worked out, and how this program
-    /// hears what changed while the terminals start. The other falls due
-    /// once for each frame of the film while it plays.
+    /// often the panel's numbers are worked out, and what the terminals'
+    /// standing ready is counted in. The other falls due once for each
+    /// frame of the film while it plays.
     /// </summary>
     private const ulong Measure = 1;
     private const ulong Frame = 2;
@@ -113,13 +115,6 @@ internal sealed class Player
     /// </summary>
     private const double Arranged = 500;
     private const double Faded = 300;
-
-    /// <summary>
-    /// How long, in milliseconds, a terminal is held in the rectangle a
-    /// frame put it in: time enough for any terminal to have drawn the
-    /// size (`Lay`).
-    /// </summary>
-    private const double Held = 250;
 
     private readonly Connection _solium;
     private readonly Film _film;
@@ -141,12 +136,16 @@ internal sealed class Player
     private int _shown = -1;
     private int _settled;
 
-    // What the panel says, counted since it last said it, and whether the
-    // film played right through that time.
+    // The compositor's clock, in milliseconds, as the batch being answered
+    // read it. And what the panel says, counted since it last said it:
+    // when that was, whether the film played right through since, and
+    // what this program had used of a processor at each of the last few.
+    private double _now;
+    private double _said;
     private int _frames;
     private int _moved;
     private bool _played;
-    private readonly Queue<TimeSpan> _used = new();
+    private readonly Queue<(double At, TimeSpan Used)> _used = new();
 
     public Player(Connection solium, Film film, List<string> open)
     {
@@ -177,7 +176,9 @@ internal sealed class Player
                     },
                 },
             },
-            new Command.Listen { Value = { "opened", "closed", "monitors-changed" } },
+            // `renamed` for the terminals' titles: a shell names its window
+            // as it prints its prompt, and no other event says so.
+            new Command.Listen { Value = { "opened", "closed", "monitors-changed", "renamed" } },
             // The frame every window wears: a border and no titlebar, so
             // a terminal a cell wide still has room for its prompt.
             new Command.Decoration { Value = "border" },
@@ -186,11 +187,6 @@ internal sealed class Player
             // film plays: the session is not locked, and the screens are
             // not turned off, for want of one. Nought is never.
             new Command.Configure { Value = ("idle", Section(("lock_after", 0L), ("screens_off_after", 0L))) },
-            // What changed on the desktop comes only with a batch, and a
-            // batch only with an event. A shell printing its prompt is no
-            // event, but it is a change: the window's title. So a timer is
-            // the event, and each time it falls due brings the titles that
-            // changed.
             Every(Measure, MeasuredMs),
         };
         if (_playing && !_paused)
@@ -290,6 +286,7 @@ internal sealed class Player
     private Answer Handle(Batch batch)
     {
         var answer = new Answer { Serial = batch.Serial };
+        _now = batch.At;
         foreach (var change in batch.Changes)
         {
             switch (change)
@@ -416,35 +413,32 @@ internal sealed class Player
     /// <summary>
     /// `place`: where a window lives from now on, and how large. Its
     /// application is told the size, and the compositor takes it there
-    /// over `ms`. Nothing is said of a terminal that is there already, and
-    /// whether anything was said is the answer.
+    /// over `ms`, drawing it in its rectangle from the picture the
+    /// application has drawn so far until it has drawn the size. Nothing
+    /// is said of a terminal that is there already.
     /// </summary>
-    private bool Put(Terminal terminal, (int X, int Y, int W, int H) at, double ms, Easing easing,
+    private void Put(Terminal terminal, (int X, int Y, int W, int H) at, double ms, Easing easing,
         List<Command> commands)
     {
         if (terminal.At == at || !terminal.Open)
         {
-            return false;
+            return;
         }
         terminal.At = at;
         _moved++;
-        commands.Add(Placed(terminal, ms, easing));
-        return true;
-    }
-
-    /// <summary>The `place` that has a terminal where it is, over `ms`.</summary>
-    private static Command Placed(Terminal terminal, double ms, Easing easing) => new Command.Place
-    {
-        Value = new Place
+        commands.Add(new Command.Place
         {
-            Id = terminal.Id,
-            Rect = new Rect { X = terminal.At.X, Y = terminal.At.Y, W = terminal.At.W, H = terminal.At.H },
-            Motion = new Motion { DurationMs = ms, Easing = easing },
-            // Cut to its rectangle: a terminal still drawn larger does not
-            // lie over its neighbours.
-            Tile = true,
-        },
-    };
+            Value = new Place
+            {
+                Id = terminal.Id,
+                Rect = new Rect { X = at.X, Y = at.Y, W = at.W, H = at.H },
+                Motion = new Motion { DurationMs = ms, Easing = easing },
+                // Cut to its rectangle: a terminal still drawn larger
+                // does not lie over its neighbours.
+                Tile = true,
+            },
+        });
+    }
 
     /// <summary>
     /// `present`: how a window is drawn, apart from where it lives. Here
@@ -578,19 +572,11 @@ internal sealed class Player
     /// names, placed where the rectangle is, and a terminal the frame does
     /// not name is no longer drawn.
     ///
-    /// A terminal is placed twice. The first `place` has no motion: the
-    /// window is in its rectangle on the next frame the compositor draws.
-    /// But a window that has arrived is drawn at the size its application
-    /// has drawn, and a terminal takes a moment over a new size, so for
-    /// that moment it would be its old size in its new place, with a gap
-    /// beside it or a neighbour under it. A window on its way is drawn in
-    /// the rectangle it is passing through, from whatever its application
-    /// has drawn. So the second `place` is to the same rectangle over
-    /// `Held`: it moves the window nowhere, and for that long the
-    /// compositor draws it there whole, while the terminal draws the size.
-    ///
-    /// Out of the rows, into the film's `first` frame, the terminals take
-    /// their time instead, and those it has no use for fade.
+    /// A terminal is placed with no motion: it is in its rectangle on the
+    /// next frame the compositor draws, whole, from the picture it last
+    /// drew, and stays so while it draws the new size. Out of the rows,
+    /// into the film's `first` frame, the terminals take their time
+    /// instead, and those it has no use for fade.
     /// </summary>
     private void Lay(List<Terminal> terminals, Box[] boxes, bool first, List<Command> commands)
     {
@@ -614,18 +600,16 @@ internal sealed class Player
                 continue;
             }
             Show(terminal, true, 0, commands);
-            if (Put(terminal, at, 0, new Easing.Linear(), commands))
-            {
-                commands.Add(Placed(terminal, Held, new Easing.Linear()));
-            }
+            Put(terminal, at, 0, new Easing.Linear(), commands);
         }
     }
 
     /// <summary>
     /// The panel: a few numbers, said each time the first timer falls due,
-    /// in a scene of this program's own that the compositor draws. The
-    /// time between two is the timer's, so a second here is a second of
-    /// the compositor's clock.
+    /// in a scene of this program's own that the compositor draws. How
+    /// long it has been since the last is read off the compositor's
+    /// clock, which every batch carries: a timer that fell due late is
+    /// not taken for half a second.
     /// </summary>
     private void Say(List<Command> commands)
     {
@@ -633,16 +617,18 @@ internal sealed class Player
         {
             return;
         }
-        var seconds = MeasuredMs / 1000;
+        var seconds = _said > 0 && _now > _said ? (_now - _said) / 1000 : MeasuredMs / 1000;
+        _said = _now;
         // What this program has used of a processor over the last two
         // seconds: the system counts it in steps too coarse for half of one.
-        _used.Enqueue(Process.GetCurrentProcess().TotalProcessorTime);
+        _used.Enqueue((_now, Process.GetCurrentProcess().TotalProcessorTime));
         while (_used.Count > 5)
         {
             _used.Dequeue();
         }
-        var cpu = _used.Count > 1
-            ? (_used.Last() - _used.Peek()).TotalSeconds / ((_used.Count - 1) * seconds) * 100
+        var (since, used) = _used.Peek();
+        var cpu = _now > since
+            ? (_used.Last().Used - used).TotalSeconds / ((_now - since) / 1000) * 100
             : 0;
         var rows = new[]
         {

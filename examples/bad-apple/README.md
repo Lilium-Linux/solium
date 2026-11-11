@@ -127,9 +127,11 @@ What it uses of the protocol:
   version, and answers with what it wants before the first frame.
 - **`declare`.** Its three keys are declared, so the compositor knows they are
   its own without asking, and nothing under them is typed into.
-- **`listen`.** It listens to `opened`, `closed` and `monitors-changed`.
-  Beyond those it is woken only for what it asked for itself, its keys and
-  its timer, however much happens on the desktop.
+- **`listen`.** It listens to `opened`, `closed`, `monitors-changed` and
+  `renamed`. Beyond those it is woken only for what it asked for itself, its
+  keys and its timers, however much happens on the desktop. `renamed` is how
+  it knows a terminal is ready: the shell's prompt titles its window `ready`
+  as it is printed.
 - **`configure`.** One setting: the session is not locked for want of a key
   while a film plays.
 - **`decoration`.** Every window wears a plain border, from a style the
@@ -139,20 +141,14 @@ What it uses of the protocol:
 - **`timer`.** It keeps no clock of its own: the compositor's timers tick on
   the clock its animations run on, and this program sets two. One falls due
   for each frame of the film while it plays, and its answer to that is the
-  frame. The other falls due twice a second, always. What changed on the
-  desktop comes only with a batch, and a batch only with an event, so while
-  the terminals start that timer is the event that brings the window titles
-  that changed, and a terminal's title is how this program knows its shell
-  has printed its prompt. It is also the panel's clock.
+  frame. The other falls due twice a second, always, for the panel. Every
+  batch says what the compositor's clock read, so the panel's rates are
+  worked out by that clock too.
 - **`place`.** Each terminal is put in its row in the answer to its `opened`
   event. Then, for each frame, every terminal whose rectangle changed is
-  placed twice: once with no motion, which has it there on the next frame the
-  compositor draws, and once more to the same rectangle over a quarter of a
-  second, which moves it nowhere. A window that has arrived is drawn at the
-  size its application has drawn, and a terminal takes a moment over a new
-  size; a window on its way is drawn in the rectangle it is passing through,
-  from whatever its application has drawn. So for that quarter of a second
-  the terminal is whole in its new rectangle while it draws the size.
+  placed where it is now, with no motion. The compositor draws it there from
+  the next frame, whole, from the picture the terminal last drew, and keeps
+  it so while the terminal draws the new size.
 - **`present` and `clear`.** Whether a terminal is drawn. One no rectangle
   needs stays open, where it was, with no opacity, and `clear` takes that
   away when a rectangle needs it again.
