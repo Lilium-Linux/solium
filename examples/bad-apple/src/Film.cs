@@ -1,23 +1,15 @@
-// The film: each frame as the rectangles that are lit in it.
+// The film: each frame as a grid of cells, each light or dark.
 
-using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 
 namespace Solium.Wm;
 
-/// <summary>A rectangle of a frame, in cells of the film's grid.</summary>
-public readonly record struct Cells(int X, int Y, int W, int H)
-{
-    public double CentreX => X + W / 2.0;
-    public double CentreY => Y + H / 2.0;
-}
-
 /// <summary>
-/// What <c>frames.py</c> writes: a few lines saying the grid, the frames a
-/// second and the most rectangles any frame has, and then a line a frame,
-/// its rectangles as <c>x y w h</c> separated by <c>;</c>.
+/// What <c>frames.py</c> writes: a few lines saying the grid and the frames
+/// a second, and then a line a frame, a <c>1</c> for each light cell and a
+/// <c>0</c> for each dark one, row by row.
 /// </summary>
 public sealed class Film
 {
@@ -25,21 +17,22 @@ public sealed class Film
     public int Rows { get; private init; }
     public double FramesASecond { get; private init; }
 
-    /// <summary>The most rectangles a frame has: how many windows it takes.</summary>
-    public int Most { get; private init; }
+    /// <summary>How many cells a frame has: how many terminals of each theme it takes.</summary>
+    public int Cells => Columns * Rows;
 
-    public List<Cells[]> Frames { get; } = new();
+    /// <summary>Each frame: whether each cell is light, row by row.</summary>
+    public List<bool[]> Frames { get; } = new();
 
     public static Film Load(string path)
     {
         using var reader = new StreamReader(path);
-        int columns = 0, rows = 0, most = 0;
+        int columns = 0, rows = 0;
         double rate = 0;
         string? line;
         // The header ends at the line that says how many frames follow.
         while ((line = reader.ReadLine()) is not null)
         {
-            var words = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var words = line.Split(' ', System.StringSplitOptions.RemoveEmptyEntries);
             if (words.Length == 0)
             {
                 continue;
@@ -53,33 +46,28 @@ public sealed class Film
             {
                 rate = double.Parse(words[1], CultureInfo.InvariantCulture);
             }
-            else if (words[0] == "most")
-            {
-                most = int.Parse(words[1], CultureInfo.InvariantCulture);
-            }
             else if (words[0] == "frames")
             {
                 break;
             }
         }
-        if (columns <= 0 || rows <= 0 || rate <= 0 || most <= 0)
+        if (columns <= 0 || rows <= 0 || rate <= 0)
         {
             throw new InvalidDataException($"{path} is not a film frames.py wrote");
         }
-        var film = new Film { Columns = columns, Rows = rows, FramesASecond = rate, Most = most };
+        var film = new Film { Columns = columns, Rows = rows, FramesASecond = rate };
         while ((line = reader.ReadLine()) is not null)
         {
-            var lit = new List<Cells>();
-            foreach (var each in line.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            if (line.Length != film.Cells)
             {
-                var n = each.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                lit.Add(new Cells(
-                    int.Parse(n[0], CultureInfo.InvariantCulture),
-                    int.Parse(n[1], CultureInfo.InvariantCulture),
-                    int.Parse(n[2], CultureInfo.InvariantCulture),
-                    int.Parse(n[3], CultureInfo.InvariantCulture)));
+                continue;
             }
-            film.Frames.Add(lit.ToArray());
+            var light = new bool[film.Cells];
+            for (var cell = 0; cell < light.Length; cell++)
+            {
+                light[cell] = line[cell] == '1';
+            }
+            film.Frames.Add(light);
         }
         if (film.Frames.Count == 0)
         {

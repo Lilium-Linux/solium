@@ -138,6 +138,11 @@ an `answer` naming the batch's serial:
 The first batch is `startup`, sent once `hello-answer`'s commands are applied:
 its changes are the whole desktop, every window and monitor there is.
 
+A window is the window manager's to place from its `opened` event, and the
+answer to that event is where to place it. A window's row can come in an
+earlier batch, while its application has not drawn yet (`shown` says whether
+it has): a `place` sent then is overridden when the window opens.
+
 A window manager's picture of the desktop is as fresh as the last batch. What
 changed comes only with a batch, and a batch is sent only for an event it
 listens to, so one that wants to know of every window listens to `opened` and
@@ -412,9 +417,10 @@ decodes them as [the wire format](#the-wire-format) says.
 [`examples/bad-apple`](../examples/bad-apple/README.md) is one in C#. It
 writes its C# types from the WIT with a script of about three hundred lines of
 Python, so nothing the WIT says is written a second time by hand, and the
-rest is about seven hundred lines of C#: it plays a black and white
-film by telling the compositor where to draw a few dozen plain windows, thirty
-times a second. Its README lists which parts of the protocol it uses and why.
+rest is about nine hundred lines of C#: it plays a black and white film with
+a grid of real terminals, a light one and a dark one in every cell, by telling
+the compositor which of the two to draw, twenty-four times a second. Its
+README lists which parts of the protocol it uses and why.
 
 A case of a variant is its position in the WIT, counted from 0. The generated
 Rust types keep that order, and `solium_wm_protocol::Event::CASES` and

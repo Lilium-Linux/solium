@@ -27,6 +27,8 @@
 
   <ItemGroup>
     <WitFile Include="$(WitDirectory)/*.wit" />
+    <!-- The panel's scene, beside the program that names it. -->
+    <None Include="Stats.qml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
