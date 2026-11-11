@@ -287,6 +287,11 @@ SOLIUM_DOCS_IMAGE=localhost/solium-build:fc44 dev/docs.sh   # in the container
 - **A new message, event, command or type of the protocol needs its comment
   in the WIT.** The test `every_word_of_the_protocol_says_what_it_means`
   fails without one.
+- **The protocol is only added to, at the end.** A field's place in its
+  record, and a case's in its variant or enum, is its number on the wire, so
+  nothing is put in the middle, moved or taken out: a window manager built
+  last month has to read what today's compositor sends. The diff of
+  `crates/wm-protocol/proto/solium_wm.proto` shows what a change does.
 - **A new `sol.*` name needs its entry in `sol.lua`, and a new `SOLIUM_*`
   variable or flag its line in `environment.txt`.** The tests
   `sol_lua_documents_exactly_the_api_the_compositor_registers` and

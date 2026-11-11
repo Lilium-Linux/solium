@@ -78,9 +78,11 @@ that is slow, hangs or crashes never holds a frame: the compositor waits one
 frame for an answer, applies a late one when it comes, and starts a window
 manager that stopped again with the state it kept.
 
-The protocol is defined once, in WIT, in `crates/wm-protocol/wit/`. That
-crate's Rust types and their encoding are generated from those files, and the
-[protocol reference](generated/reference/protocol.md) is their comments. In
+The protocol is defined once, in WIT, in `crates/wm-protocol/wit/`. What is
+on the wire is protobuf. That crate's Rust types and their encoding are
+generated from the WIT, and so is `proto/solium_wm.proto`, which says the same
+in protobuf's own language for a window manager in any other; the
+[protocol reference](generated/reference/protocol.md) is the WIT's comments. In
 the compositor, `wm/` holds the connection (`link.rs`), who is waited for and
 for how long (`scripts.rs`), what a window manager is told (`events.rs`,
 `diff.rs`) and what `wm.toml` chose (`chosen.rs`); `script/` holds the

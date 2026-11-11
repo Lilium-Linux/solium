@@ -442,7 +442,7 @@ the version: a window manager and a compositor of the same major version
 ## A window manager in Rust
 
 The crate `solium-wm-protocol` (`crates/wm-protocol`) is the WIT as Rust
-types, with their encoding, generated from the same files. It depends on
+types, with their encoding as protobuf, generated from the same files. It depends on
 nothing of the compositor's. Beside the types it has:
 
 - `client::Client`: the conversation. `hello`, `ready`, `next`, `reply`,
@@ -483,22 +483,62 @@ command = ["/path/to/solium/target/debug/examples/tiny_wm"]
 
 ## A window manager in another language
 
-Nothing above needs Rust. A window manager in another language gives
-`solium_wm.proto` to protobuf's generator for that language, and reads and
-writes frames as [the wire format](#the-wire-format) says.
+Nothing above needs Rust. Any language with a protobuf library can speak
+the protocol, and there is one for nearly every language:
 
-[`examples/bad-apple`](../examples/bad-apple/README.md) is one in C#. It
-writes its C# types from the WIT with a script of about three hundred lines of
-Python, so nothing the WIT says is written a second time by hand, and the
-rest is about a thousand lines of C#: it plays a black and white film with
-real terminals, the light parts of each frame covered with light ones and the
-dark parts with dark ones, by moving and resizing those whose part of the
-picture changed, twenty-four times a second. Its README lists which parts of
-the protocol it uses and why.
+1. Give
+   [`solium_wm.proto`](https://github.com/Lilium-Linux/solium/blob/stage/crates/wm-protocol/proto/solium_wm.proto)
+   to protobuf's generator for your language. That is every type on this
+   page, with its encoding, and nothing to write by hand.
+2. Open file descriptor 0 as a socket: it is one, and it is used both ways.
+   In Python that is `socket.socket(fileno=0)`, in Node
+   `new net.Socket({ fd: 0 })`, in Go `net.FileConn(os.Stdin)`. Standard
+   output and standard error stay yours to print to.
+3. Read and write `Message`s, each with its length before it as a varint,
+   which your protobuf library has a call for
+   ([the wire format](#the-wire-format)).
+4. Answer `hello` with a `hello_answer`, and from then on every `batch` with
+   an `answer` of the same serial, having applied its changes to your own
+   copy of the desktop first.
 
-An event is listened to by its name, as the WIT spells it. The generated Rust
-types list the names in the WIT's order: `solium_wm_protocol::Event::CASES`
-and `Command::CASES`.
+What a field you do not set means is its default, so a command is as short
+as what you mean to say.
+
+### C#
+
+[`sdk/csharp`](https://github.com/Lilium-Linux/solium/tree/stage/sdk/csharp)
+is steps 1 to 4 done: the generated types, the connection, the desktop kept
+current, and the conversation. A window manager derives from `WindowManager`
+and writes two methods, what it asks for and what it does with a batch.
+[`Tiny`](https://github.com/Lilium-Linux/solium/blob/stage/sdk/csharp/Tiny/Program.cs)
+there is the same window manager as `tiny_wm.rs`, in about a hundred lines.
+
+[`examples/bad-apple`](../examples/bad-apple/README.md) is a larger one on
+the same package: it plays a black and white film with real terminals, the
+light parts of each frame covered with light ones and the dark parts with
+dark ones, by moving and resizing those whose part of the picture changed,
+twenty-four times a second. Its README lists which parts of the protocol it
+uses and why.
+
+### How fast a window manager has to be
+
+Not very. The compositor never waits for one longer than a frame
+([how long the compositor waits](#how-long-the-compositor-waits)), what
+happens many times a frame is sent to it together, and while it is busy it
+is sent the latest position of a finger or a drag, not every one. A window
+manager that takes a millisecond to answer costs a millisecond a frame at
+most, and one that takes ten is a frame or two behind the finger and holds
+nothing up.
+
+A language that compiles as it runs is slow the first time it handles each
+kind of event. The C# window managers here answer their first batch in a
+tenth to a third of a second and settle to well under a millisecond; until
+then the compositor places a window plainly and moves it when the answer
+comes.
+
+An event is listened to by its name, as the WIT spells it (`monitors-changed`).
+The generated Rust types list the names in the WIT's order:
+`solium_wm_protocol::Event::CASES` and `Command::CASES`.
 
 ## Checking and debugging
 

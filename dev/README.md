@@ -1202,9 +1202,19 @@ socket as its standard input, and the two speak the protocol in
 - The log line `window manager started pid=… program=…` names the process,
   which is how a script ends one to watch it being started again: by that
   PID, never by name.
-- **A new event, command or type** goes in the WIT with its comment. The Rust
-  types are generated from it when `solium-wm-protocol` is built, and the
-  protocol reference page from its comments.
+- **A new event, command or type** goes in the WIT with its comment, **at the
+  end** of its record, variant or enum. A field's place is its number on the
+  wire, and a window manager built before must still read what it is sent:
+  nothing is put in the middle, moved or taken out. The Rust types are
+  generated from the WIT when `solium-wm-protocol` is built, the protocol
+  reference page from its comments, and `proto/solium_wm.proto` beside them.
+  That file is checked in, and the test
+  `the_proto_file_is_the_one_the_wit_generates` fails until it is the
+  generated one: run it with `SOLIUM_WRITE_PROTO=1`, and read the diff. A
+  number that changed there is a break.
+- **The encoding is held to protobuf's own.** `crates/wm-protocol/proto/golden/`
+  has messages in protobuf's text format and the bytes `protoc` makes of
+  them; `make.sh` there makes them again when a message they hold changes.
 
 ## Running a shell inside Solium
 
