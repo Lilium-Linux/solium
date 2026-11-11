@@ -4,24 +4,34 @@
 // it with a socket as its standard input, and everything it does, it does
 // by sending messages over that socket: it draws nothing itself.
 //
-// The film is a grid of cells, each light or dark. For every cell it opens
-// two real terminals, one with a light theme and one with a dark one, each
-// with a shell and its prompt, and stands them both in the cell. Then, for
-// each frame, it has the compositor show the one whose colour the cell
-// needs. No terminal is ever resized or redrawn for it: which windows are
-// drawn, and where, is the whole of the picture.
+// The film is a black and white one, each frame cut into rectangles: the
+// light parts into some, the dark parts into others. Every rectangle is a
+// real terminal with a shell and its prompt, light-themed or dark-themed,
+// and a rectangle lives from frame to frame as a window does, so playing
+// the film is managing windows: each frame, the terminals whose rectangles
+// changed are placed where they are now, which moves them and resizes
+// them, and a terminal no rectangle needs is not drawn.
+//
+// A terminal does not redraw itself at a new size the instant it is asked
+// to, and it does not have to. The compositor draws a window in the
+// rectangle it is on its way to at once, from the picture its application
+// last drew, and the application catches up when it can.
+//
+// It keeps no clock of its own. The compositor's timers tick on the clock
+// its animations run on, and the film is played from one: a tick, a frame.
 //
 // What it shows of the protocol:
 //   - the handshake, and what a window manager says before the first frame;
 //   - `listen`: it hears three events, and beyond them only its own keys
-//     and timer;
+//     and timers;
 //   - `declare`: its keys are its own, and the compositor knows without
 //     asking;
 //   - `configure`: a setting of the compositor's, as a document;
-//   - `place`: where a window lives, said in the answer to its opening;
-//   - `present`: how a window is drawn, apart from where it lives;
-//   - `timer`: woken on the compositor's clock, to hear what changed;
-//   - `submit`: commands sent on its own clock, with no event asking;
+//   - `timer`: woken on the compositor's clock, for each frame of the film
+//     and for what it measures;
+//   - `place`: where a window lives and how large, and how it gets there;
+//   - `present` and `clear`: how a window is drawn, apart from where it
+//     lives, and that taken away again;
 //   - `surface`: a scene of its own on the desktop, for what it measures.
 
 using System;
@@ -59,12 +69,14 @@ public static class Program
 }
 
 /// <summary>
-/// One terminal: its window, whether it is drawn, and whether it is still
-/// open. One that somebody closed keeps its cell, which stays empty.
+/// One terminal: its window, where it was last placed, whether it is
+/// drawn, and whether it is still open. One that somebody closed is left
+/// out of every frame after, and its rectangles stay empty.
 /// </summary>
 internal sealed class Terminal
 {
     public ulong Id;
+    public (int X, int Y, int W, int H) At;
     public bool Shown = true;
     public bool Open = true;
 }
@@ -81,15 +93,33 @@ internal sealed class Player
     /// </summary>
     private const string Ready = "ready";
 
-    /// <summary>The timer that wakes this program while the terminals start, and how often.</summary>
-    private const ulong Watch = 1;
-    private const double WatchedMs = 250;
+    /// <summary>
+    /// The two timers. One falls due twice a second, always: that is how
+    /// often the panel's numbers are worked out, and how this program
+    /// hears what changed while the terminals start. The other falls due
+    /// once for each frame of the film while it plays.
+    /// </summary>
+    private const ulong Measure = 1;
+    private const ulong Frame = 2;
+    private const double MeasuredMs = 500;
 
-    /// <summary>How long the terminals stand in their grid, all ready, before the film.</summary>
-    private static readonly TimeSpan Gathered = TimeSpan.FromSeconds(5);
+    /// <summary>How many times the first timer falls due with the terminals in their rows, all ready, before the film.</summary>
+    private const int Gathered = 10;
 
-    /// <summary>How often the panel's numbers are worked out again.</summary>
-    private static readonly TimeSpan Measured = TimeSpan.FromMilliseconds(500);
+    /// <summary>
+    /// How long, in milliseconds, a terminal takes into its row and out of
+    /// it into the film's first frame, and how long one the first frame has
+    /// no use for takes to fade.
+    /// </summary>
+    private const double Arranged = 500;
+    private const double Faded = 300;
+
+    /// <summary>
+    /// How long, in milliseconds, a terminal is held in the rectangle a
+    /// frame put it in: time enough for any terminal to have drawn the
+    /// size (`Lay`).
+    /// </summary>
+    private const double Held = 250;
 
     private readonly Connection _solium;
     private readonly Film _film;
@@ -97,24 +127,26 @@ internal sealed class Player
 
     // What it has been told of the desktop: the monitors and the windows,
     // and of those, the terminals of each theme, in the order they opened:
-    // the terminal that opened nth of its theme stands in the nth cell.
+    // the one that opened nth of its theme is the film's nth of that colour.
     private List<Monitor> _monitors = new();
     private readonly Dictionary<ulong, Window> _windows = new();
     private readonly List<Terminal> _light = new();
     private readonly List<Terminal> _dark = new();
 
-    private readonly Stopwatch _clock = Stopwatch.StartNew();
-    private bool _watching = true;
-    private TimeSpan? _gathered;
-    private TimeSpan? _began;
-    private TimeSpan? _paused;
+    // Where the film is: whether it plays, whether it is held, and the
+    // frame last shown. And how many times the first timer has fallen due
+    // since a terminal last opened or printed its prompt.
+    private bool _playing;
+    private bool _paused;
     private int _shown = -1;
+    private int _settled;
 
-    // What the panel says, counted since it last said it.
-    private TimeSpan _measuredAt;
+    // What the panel says, counted since it last said it, and whether the
+    // film played right through that time.
     private int _frames;
-    private int _changed;
-    private readonly Queue<(TimeSpan At, TimeSpan Used)> _cpu = new();
+    private int _moved;
+    private bool _played;
+    private readonly Queue<TimeSpan> _used = new();
 
     public Player(Connection solium, Film film, List<string> open)
     {
@@ -125,8 +157,8 @@ internal sealed class Player
 
     /// <summary>
     /// What it tells the compositor before the first frame, and again after
-    /// a reload: which keys are its own, which events it wants to hear, and
-    /// that every window is drawn with a plain border.
+    /// a reload: which keys are its own, which events it wants to hear,
+    /// that every window is drawn with a plain border, and its timers.
     /// </summary>
     private List<Command> Setup()
     {
@@ -141,36 +173,38 @@ internal sealed class Player
                     {
                         Key("escape", "end the session"),
                         Key("space", "pause, and go on"),
-                        Key("r", "the chequerboard, and the film from the beginning"),
+                        Key("r", "the rows, and the film from the beginning"),
                     },
                 },
             },
             new Command.Listen { Value = { "opened", "closed", "monitors-changed" } },
-            // The frame every window wears from the moment it opens. Not
-            // changed after: a frame of another size is another size for
-            // the application in it, and a terminal takes its time over
-            // that.
+            // The frame every window wears: a border and no titlebar, so
+            // a terminal a cell wide still has room for its prompt.
             new Command.Decoration { Value = "border" },
             // A setting, as any window manager sets one: a section's name
             // and a document of its keys. Nobody touches a key while a
             // film plays: the session is not locked, and the screens are
             // not turned off, for want of one. Nought is never.
             new Command.Configure { Value = ("idle", Section(("lock_after", 0L), ("screens_off_after", 0L))) },
-        };
-        if (_watching)
-        {
             // What changed on the desktop comes only with a batch, and a
             // batch only with an event. A shell printing its prompt is no
-            // event, but it is a change: the window's title. So until the
-            // film begins a timer is the event, four times a second, and
-            // each brings the titles that changed.
-            commands.Add(new Command.Timer
-            {
-                Value = new Timer { Id = Watch, AfterMs = WatchedMs, PeriodMs = WatchedMs },
-            });
+            // event, but it is a change: the window's title. So a timer is
+            // the event, and each time it falls due brings the titles that
+            // changed.
+            Every(Measure, MeasuredMs),
+        };
+        if (_playing && !_paused)
+        {
+            commands.Add(Every(Frame, 1000 / _film.FramesASecond));
         }
         return commands;
     }
+
+    /// <summary>`timer`: woken every so often, by the clock the compositor's animations run on.</summary>
+    private static Command Every(ulong id, double ms) => new Command.Timer
+    {
+        Value = new Timer { Id = id, AfterMs = ms, PeriodMs = ms },
+    };
 
     /// <summary>
     /// A settings document of plain values. A document is a tree,
@@ -217,9 +251,11 @@ internal sealed class Player
             Value = new HelloAnswer { Version = Protocol.Version, Commands = Setup() },
         });
 
+        // From here it only answers: everything it does is its answer to
+        // something the compositor told it.
         while (true)
         {
-            switch (_solium.Receive(UntilSomethingIsDue()))
+            switch (_solium.Receive(TimeSpan.FromMinutes(1)))
             {
                 case Message.Batch batch:
                     _solium.Send(new Message.Answer { Value = Handle(batch.Value) });
@@ -234,16 +270,6 @@ internal sealed class Player
                     break;
                 case Message.Goodbye:
                     return 0;
-            }
-            // What follows nobody asked for: it is sent as a `submit`, on
-            // this program's own clock.
-            var commands = new List<Command>();
-            Gather(commands);
-            Play(commands);
-            Measure(commands);
-            if (commands.Count > 0)
-            {
-                _solium.Send(new Message.Submit { Value = commands });
             }
         }
     }
@@ -270,10 +296,12 @@ internal sealed class Player
             {
                 case Change.Monitors monitors:
                     _monitors = monitors.Value;
-                    // Every cell is somewhere else on another screen.
-                    foreach (var (terminal, cell) in Everyone().Where(each => each.Terminal.Open))
+                    // Everything is somewhere else on another screen: the
+                    // rows now, and the film's frame when the next is
+                    // shown.
+                    if (!_playing)
                     {
-                        answer.Commands.Add(Put(terminal.Id, Cell(cell), 0, new Easing.Linear()));
+                        Arrange(0, answer.Commands);
                     }
                     break;
                 case Change.Window window:
@@ -284,13 +312,13 @@ internal sealed class Player
                     if (window.Value.Title == Ready
                         && !(_windows.TryGetValue(window.Value.Id, out var before) && before.Title == Ready))
                     {
-                        _gathered = _clock.Elapsed;
+                        _settled = 0;
                     }
                     _windows[window.Value.Id] = window.Value;
                     break;
                 case Change.WindowGone gone:
                     _windows.Remove(gone.Value);
-                    foreach (var (terminal, _) in Everyone().Where(each => each.Terminal.Id == gone.Value))
+                    foreach (var (terminal, _, _) in Everyone().Where(each => each.Terminal.Id == gone.Value))
                     {
                         terminal.Open = false;
                     }
@@ -302,35 +330,47 @@ internal sealed class Player
             switch (each)
             {
                 case Event.Startup:
-                    // The terminals of each theme, one for every cell. Run
-                    // and left to themselves: a window manager starts
-                    // nothing itself, and each window they open is told as
-                    // an `opened`.
-                    foreach (var which in new[] { "light", "dark" })
+                    // The terminals of each theme, as many as the film
+                    // needs. Run and left to themselves: a window manager
+                    // starts nothing itself, and each window they open is
+                    // told as an `opened`.
+                    foreach (var (which, count) in new[] { ("light", _film.Light), ("dark", _film.Dark) })
                     {
                         answer.Commands.Add(new Command.RunDetached
                         {
-                            Value = _open.Append(which).Append(_film.Cells.ToString()).ToList(),
+                            Value = _open.Append(which).Append(count.ToString()).ToList(),
                         });
                     }
                     break;
                 case Event.Opened opened when _windows.TryGetValue(opened.Value, out var window):
                     // Placed in the answer to its opening, which is where a
                     // window manager places a window. The compositor glides
-                    // it to its cell from where it opened.
-                    var theme = window.AppId == Light ? _light : window.AppId == Dark ? _dark : null;
-                    if (theme is null || theme.Count >= _film.Cells)
+                    // it to its place in the rows from where it opened.
+                    var light = window.AppId == Light;
+                    var theme = light ? _light : window.AppId == Dark ? _dark : null;
+                    if (theme is null || theme.Count >= (light ? _film.Light : _film.Dark))
                     {
                         break;
                     }
-                    var cell = theme.Count;
                     var terminal = new Terminal { Id = opened.Value };
                     theme.Add(terminal);
                     answer.Handled = true;
-                    answer.Commands.Add(Put(terminal.Id, Cell(cell), 500, new Easing.OutCubic()));
-                    // Before the film, a chequerboard: both themes seen.
-                    Show(terminal, (theme == _light) == Chequered(cell), answer.Commands);
-                    _gathered = _clock.Elapsed;
+                    Put(terminal, Standing(light, theme.Count - 1), Arranged, new Easing.OutCubic(), answer.Commands);
+                    _settled = 0;
+                    break;
+                case Event.Timers timers:
+                    foreach (var (id, _) in timers.Value)
+                    {
+                        if (id == Frame)
+                        {
+                            Play(answer.Commands);
+                        }
+                        else if (id == Measure)
+                        {
+                            Say(answer.Commands);
+                            Gather(answer.Commands);
+                        }
+                    }
                     break;
                 case Event.Key key:
                     answer.Handled = true;
@@ -343,22 +383,23 @@ internal sealed class Player
 
     private void Pressed(string combo, List<Command> commands)
     {
-        var now = _clock.Elapsed;
         switch (combo)
         {
             case "escape":
                 commands.Add(new Command.Quit());
                 break;
-            case "space" when _paused is { } since && _began is { } began:
+            case "space" when _playing && _paused:
                 // On from where it stopped.
-                _began = began + (now - since);
-                _paused = null;
+                _paused = false;
+                _played = false;
+                commands.Add(Every(Frame, 1000 / _film.FramesASecond));
                 break;
-            case "space" when _began is not null:
-                _paused = now;
+            case "space" when _playing:
+                _paused = true;
+                commands.Add(new Command.TimerCancel { Value = Frame });
                 break;
-            case "r" when _began is not null:
-                Stand(now, commands);
+            case "r" when _playing:
+                Stand(commands);
                 break;
         }
     }
@@ -367,183 +408,258 @@ internal sealed class Player
     private bool IsReady(Terminal terminal) =>
         _windows.TryGetValue(terminal.Id, out var window) && window.Title == Ready;
 
-    /// <summary>Every terminal, with the cell it stands in.</summary>
-    private IEnumerable<(Terminal Terminal, int Cell)> Everyone() =>
-        _light.Select((terminal, cell) => (terminal, cell))
-            .Concat(_dark.Select((terminal, cell) => (terminal, cell)));
+    /// <summary>Every terminal, with its theme and which of that theme it is.</summary>
+    private IEnumerable<(Terminal Terminal, bool Light, int Nth)> Everyone() =>
+        _light.Select((terminal, nth) => (terminal, true, nth))
+            .Concat(_dark.Select((terminal, nth) => (terminal, false, nth)));
 
-    /// <summary>Whether a cell is a light square of the chequerboard the terminals stand in before the film.</summary>
-    private bool Chequered(int cell) => (cell % _film.Columns + cell / _film.Columns) % 2 == 0;
+    /// <summary>
+    /// `place`: where a window lives from now on, and how large. Its
+    /// application is told the size, and the compositor takes it there
+    /// over `ms`. Nothing is said of a terminal that is there already, and
+    /// whether anything was said is the answer.
+    /// </summary>
+    private bool Put(Terminal terminal, (int X, int Y, int W, int H) at, double ms, Easing easing,
+        List<Command> commands)
+    {
+        if (terminal.At == at || !terminal.Open)
+        {
+            return false;
+        }
+        terminal.At = at;
+        _moved++;
+        commands.Add(Placed(terminal, ms, easing));
+        return true;
+    }
+
+    /// <summary>The `place` that has a terminal where it is, over `ms`.</summary>
+    private static Command Placed(Terminal terminal, double ms, Easing easing) => new Command.Place
+    {
+        Value = new Place
+        {
+            Id = terminal.Id,
+            Rect = new Rect { X = terminal.At.X, Y = terminal.At.Y, W = terminal.At.W, H = terminal.At.H },
+            Motion = new Motion { DurationMs = ms, Easing = easing },
+            // Cut to its rectangle: a terminal still drawn larger does not
+            // lie over its neighbours.
+            Tile = true,
+        },
+    };
 
     /// <summary>
     /// `present`: how a window is drawn, apart from where it lives. Here
-    /// only whether it is drawn at all: a terminal whose colour its cell
-    /// does not need stays a window, open and in its place, with no
-    /// opacity. Nothing is said of one that is already as it is wanted.
+    /// only whether it is drawn at all: a terminal no rectangle needs stays
+    /// a window, open and where it was, with no opacity, and `clear` takes
+    /// that away again. Nothing is said of one that is already as wanted.
     /// </summary>
-    private static void Show(Terminal terminal, bool shown, List<Command> commands)
+    private static void Show(Terminal terminal, bool shown, double ms, List<Command> commands)
     {
         if (terminal.Shown == shown || !terminal.Open)
         {
             return;
         }
         terminal.Shown = shown;
-        commands.Add(new Command.Present
-        {
-            Value = new Present
+        var motion = new Motion { DurationMs = ms, Easing = new Easing.Linear() };
+        commands.Add(shown
+            ? new Command.Clear { Value = (terminal.Id, motion) }
+            : new Command.Present
             {
-                Id = terminal.Id,
-                Opacity = shown ? 1f : 0f,
-                Pivot = (0.5f, 0.5f),
-                Motion = new Motion { DurationMs = 0, Easing = new Easing.Linear() },
-            },
-        });
+                Value = new Present { Id = terminal.Id, Opacity = 0f, Pivot = (0.5f, 0.5f), Motion = motion },
+            });
     }
 
-    /// <summary>How long to wait for the compositor before something of this program's own is due.</summary>
-    private TimeSpan UntilSomethingIsDue()
+    /// <summary>
+    /// Where a terminal stands while no film plays: all of them in rows,
+    /// light and dark by turns.
+    /// </summary>
+    private (int X, int Y, int W, int H) Standing(bool light, int nth)
     {
-        var now = _clock.Elapsed;
-        var due = _measuredAt + Measured;
-        if (_began is { } began && _paused is null)
-        {
-            var frame = began + TimeSpan.FromSeconds((_shown + 1) / _film.FramesASecond);
-            due = frame < due ? frame : due;
-        }
-        return due > now ? due - now : TimeSpan.Zero;
+        var paired = Math.Min(_film.Light, _film.Dark);
+        var place = nth < paired ? 2 * nth + (light ? 0 : 1) : paired + nth;
+        var all = _film.Light + _film.Dark;
+        var stage = Stage();
+        var columns = (int)Math.Ceiling(Math.Sqrt(all * stage.W / stage.H));
+        // An odd number across, so the colours take turns down a column as
+        // well as along a row.
+        columns += 1 - columns % 2;
+        var rows = (all + columns - 1) / columns;
+        return Span(place % columns, place / columns, 1, 1, columns, rows);
     }
 
-    /// <summary>Where a cell of the film is on the screen.</summary>
-    private Rect Cell(int cell)
+    /// <summary>
+    /// Where a rectangle of a grid is on the screen, in whole pixels. Each
+    /// edge is rounded by itself, so two rectangles that share an edge in
+    /// the grid share it on the screen.
+    /// </summary>
+    private (int X, int Y, int W, int H) Span(int x, int y, int w, int h, int columns, int rows)
     {
         var stage = Stage();
-        var (w, h) = (stage.W / _film.Columns, stage.H / _film.Rows);
-        return new Rect
-        {
-            X = stage.X + cell % _film.Columns * w,
-            Y = stage.Y + cell / _film.Columns * h,
-            W = w,
-            H = h,
-        };
+        int Across(int at) => (int)Math.Round(stage.X + stage.W * at / columns);
+        int Down(int at) => (int)Math.Round(stage.Y + stage.H * at / rows);
+        return (Across(x), Down(y), Across(x + w) - Across(x), Down(y + h) - Down(y));
     }
 
     /// <summary>
     /// Once every terminal has opened, the shell in each has printed its
-    /// prompt, and they have stood so a while, begin.
+    /// prompt, and they have stood so a while, begin: the film's timer is
+    /// set, and each time it falls due is a frame.
     /// </summary>
     private void Gather(List<Command> commands)
     {
-        var now = _clock.Elapsed;
-        if (_began is not null || _gathered is not { } gathered
-            || _light.Count < _film.Cells || _dark.Count < _film.Cells
+        if (_playing || _light.Count < _film.Light || _dark.Count < _film.Dark
             || !Everyone().All(each => !each.Terminal.Open || IsReady(each.Terminal)))
         {
             return;
         }
-        if (now - gathered >= Gathered)
+        if (++_settled < Gathered)
         {
-            if (_watching)
-            {
-                // Nothing more to wait for: the film is on this program's
-                // own clock.
-                _watching = false;
-                commands.Add(new Command.TimerCancel { Value = Watch });
-            }
-            _began = now;
-            _shown = -1;
-            // For whoever puts the film's sound to a recording of this.
-            Console.Error.WriteLine($"bad-apple: the film began at {DateTime.UtcNow:O}");
+            return;
         }
+        _playing = true;
+        _paused = false;
+        _played = false;
+        _shown = -1;
+        commands.Add(Every(Frame, 1000 / _film.FramesASecond));
+        // For whoever puts the film's sound to a recording of this.
+        Console.Error.WriteLine($"bad-apple: the film began at {DateTime.UtcNow:O}");
     }
 
     /// <summary>
-    /// The chequerboard the terminals stand in while no film plays: as they
-    /// stood before it, when it ends, and when it is asked for from the
-    /// beginning. The film begins from here (`Gather`).
+    /// No film: every terminal back in the rows, as they stood before it.
+    /// So it is when the film ends and when it is asked for from the
+    /// beginning, and the film begins from here (`Gather`).
     /// </summary>
-    private void Stand(TimeSpan now, List<Command> commands)
+    private void Stand(List<Command> commands)
     {
-        _began = null;
-        _paused = null;
-        _gathered = now;
-        for (var cell = 0; cell < _film.Cells; cell++)
+        if (!_paused)
         {
-            Show(_light[cell], Chequered(cell), commands);
-            Show(_dark[cell], !Chequered(cell), commands);
+            commands.Add(new Command.TimerCancel { Value = Frame });
+        }
+        _playing = false;
+        _paused = false;
+        _settled = 0;
+        Arrange(Arranged, commands);
+    }
+
+    /// <summary>Every terminal to its place in the rows, and drawn.</summary>
+    private void Arrange(double ms, List<Command> commands)
+    {
+        foreach (var (terminal, light, nth) in Everyone())
+        {
+            Put(terminal, Standing(light, nth), ms, new Easing.OutCubic(), commands);
+            Show(terminal, true, Math.Min(ms, Faded), commands);
         }
     }
 
-    /// <summary>Show the frame that is due, if it is not the one showing.</summary>
+    /// <summary>The film's timer fell due: the next frame.</summary>
     private void Play(List<Command> commands)
     {
-        var now = _clock.Elapsed;
-        if (_began is not { } began || _paused is not null || now < began)
+        if (!_playing || _paused)
         {
             return;
         }
-        var index = (int)((now - began).TotalSeconds * _film.FramesASecond);
+        var index = _shown + 1;
         if (index >= _film.Frames.Count)
         {
-            // The end: the chequerboard again, and after a while the film
-            // again.
-            Stand(now, commands);
+            // The end: the rows again, and after a while the film again.
+            Stand(commands);
             return;
         }
-        if (index == _shown)
-        {
-            return;
-        }
-        // The frame: in each cell, the terminal whose theme is the colour
-        // the cell has now. Only the cells that changed are spoken of.
-        var before = commands.Count;
         var frame = _film.Frames[index];
-        for (var cell = 0; cell < frame.Length; cell++)
-        {
-            Show(_light[cell], frame[cell], commands);
-            Show(_dark[cell], !frame[cell], commands);
-        }
-        _changed += (commands.Count - before) / 2;
+        var first = _shown < 0;
+        Lay(_light, frame.Light, first, commands);
+        Lay(_dark, frame.Dark, first, commands);
         _frames++;
         _shown = index;
     }
 
     /// <summary>
-    /// The panel: a few numbers, said twice a second in a scene of this
-    /// program's own that the compositor draws.
+    /// One colour of a frame: each of its rectangles is the terminal it
+    /// names, placed where the rectangle is, and a terminal the frame does
+    /// not name is no longer drawn.
+    ///
+    /// A terminal is placed twice. The first `place` has no motion: the
+    /// window is in its rectangle on the next frame the compositor draws.
+    /// But a window that has arrived is drawn at the size its application
+    /// has drawn, and a terminal takes a moment over a new size, so for
+    /// that moment it would be its old size in its new place, with a gap
+    /// beside it or a neighbour under it. A window on its way is drawn in
+    /// the rectangle it is passing through, from whatever its application
+    /// has drawn. So the second `place` is to the same rectangle over
+    /// `Held`: it moves the window nowhere, and for that long the
+    /// compositor draws it there whole, while the terminal draws the size.
+    ///
+    /// Out of the rows, into the film's `first` frame, the terminals take
+    /// their time instead, and those it has no use for fade.
     /// </summary>
-    private void Measure(List<Command> commands)
+    private void Lay(List<Terminal> terminals, Box[] boxes, bool first, List<Command> commands)
     {
-        var now = _clock.Elapsed;
-        if (now - _measuredAt < Measured || _monitors.Count == 0)
+        var wanted = new Box?[terminals.Count];
+        foreach (var box in boxes)
+        {
+            wanted[box.Terminal] = box;
+        }
+        for (var nth = 0; nth < terminals.Count; nth++)
+        {
+            var terminal = terminals[nth];
+            if (wanted[nth] is not { } rectangle)
+            {
+                Show(terminal, false, first ? Faded : 0, commands);
+                continue;
+            }
+            var at = Span(rectangle.X, rectangle.Y, rectangle.W, rectangle.H, _film.Columns, _film.Rows);
+            if (first)
+            {
+                Put(terminal, at, Arranged, new Easing.OutCubic(), commands);
+                continue;
+            }
+            Show(terminal, true, 0, commands);
+            if (Put(terminal, at, 0, new Easing.Linear(), commands))
+            {
+                commands.Add(Placed(terminal, Held, new Easing.Linear()));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The panel: a few numbers, said each time the first timer falls due,
+    /// in a scene of this program's own that the compositor draws. The
+    /// time between two is the timer's, so a second here is a second of
+    /// the compositor's clock.
+    /// </summary>
+    private void Say(List<Command> commands)
+    {
+        if (_monitors.Count == 0)
         {
             return;
         }
-        var seconds = (now - _measuredAt).TotalSeconds;
+        var seconds = MeasuredMs / 1000;
         // What this program has used of a processor over the last two
         // seconds: the system counts it in steps too coarse for half of one.
-        _cpu.Enqueue((now, Process.GetCurrentProcess().TotalProcessorTime));
-        while (_cpu.Count > 5)
+        _used.Enqueue(Process.GetCurrentProcess().TotalProcessorTime);
+        while (_used.Count > 5)
         {
-            _cpu.Dequeue();
+            _used.Dequeue();
         }
-        var (since, used) = _cpu.Peek();
-        var cpu = now > since
-            ? (Process.GetCurrentProcess().TotalProcessorTime - used).TotalSeconds / (now - since).TotalSeconds * 100
+        var cpu = _used.Count > 1
+            ? (_used.Last() - _used.Peek()).TotalSeconds / ((_used.Count - 1) * seconds) * 100
             : 0;
-        // The film's numbers are said only of a half second it played
-        // right through.
-        var played = _began is { } began && _paused is null && began <= _measuredAt;
         var rows = new[]
         {
-            new { name = "FPS", value = played ? $"{_frames / seconds:0}" : "–" },
+            // How many frames of the film were shown: fewer than the film
+            // has when the compositor took longer than a frame over one.
+            new { name = "FPS", value = _played ? $"{_frames / seconds:0}" : "–" },
             new { name = "Terminals", value = $"{Everyone().Count(each => each.Terminal.Open)}" },
-            new { name = "Changes", value = played ? $"{_changed / seconds:N0} / s" : "–" },
+            // Terminals placed anew: moved, resized, or both.
+            new { name = "Moves", value = _played ? $"{_moved / seconds:N0} / s" : "–" },
             // Of one processor, all this program used: the film, the
             // protocol and the runtime under them.
             new { name = "WM CPU", value = $"{cpu:0.0} %" },
         };
-        _measuredAt = now;
-        _frames = _changed = 0;
+        // The film's numbers are said only of a time it played right
+        // through.
+        _played = _playing && !_paused;
+        _frames = _moved = 0;
 
         var whole = Whole();
         commands.Add(new Command.Surface
@@ -577,19 +693,4 @@ internal sealed class Player
         var (w, h) = (_film.Columns * scale, _film.Rows * scale);
         return new Rect { X = whole.X + (whole.W - w) / 2, Y = whole.Y + (whole.H - h) / 2, W = w, H = h };
     }
-
-    /// <summary>
-    /// `place`: where a window lives from now on. Its application is told
-    /// the size, and the compositor takes it there over `ms`.
-    /// </summary>
-    private static Command Put(ulong id, Rect at, double ms, Easing easing) => new Command.Place
-    {
-        Value = new Place
-        {
-            Id = id,
-            Rect = at,
-            Motion = new Motion { DurationMs = ms, Easing = easing },
-            Tile = true,
-        },
-    };
 }

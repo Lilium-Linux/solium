@@ -1,19 +1,20 @@
 # Bad Apple, played by a window manager
 
 A window manager for Solium, written in C#, that plays a black and white film
-with real terminals. The film is cut down to a grid of cells. In every cell
-stand two terminals, one with a light theme and one with a dark one, each with
-a shell and its prompt, and for each frame the window manager has the
-compositor draw the one whose colour the cell needs. Nothing is drawn by this
-program: every cell on screen is a terminal window, and which windows are
-drawn is the whole of the picture.
+by managing windows. Each frame of the film is cut into rectangles, the light
+parts into some and the dark parts into others, and every rectangle is a real
+terminal with a shell and its prompt, light-themed or dark-themed. A rectangle
+lives from frame to frame as a window does, so playing the film is moving and
+resizing terminals: twenty-four times a second the window manager places the
+ones whose rectangles changed. Nothing is drawn by this program: every part of
+the picture is a terminal window, put there by Solium.
 
 It is here to show that a window manager is an ordinary program in any
 language. It links nothing of Solium's. It reads the protocol's WIT files,
 writes its own C# types from them, and talks to the compositor over the socket
 it is started with. [Writing a window manager](../../docs/window-managers.md)
-describes that conversation; this is one, start to finish, in about nine
-hundred lines of C#, six hundred of them the window manager itself.
+describes that conversation; this is one, start to finish, in about a
+thousand lines of C#, seven hundred of them the window manager itself.
 
 The name is the tradition it joins: the shadow-art film for *Bad Apple!!* has
 been played on oscilloscopes, in spreadsheets and in file managers. The film
@@ -24,9 +25,11 @@ white video.
 
 - A build of Solium: `cargo build`.
 - The .NET SDK, 8 or later.
-- [kitty](https://sw.kovidgoyal.net/kitty/), for the terminals. One kitty
-  process holds all the windows of a theme, so a few hundred of them fit in a
-  few gigabytes. To use another terminal, change `terminals.sh`.
+- [foot](https://codeberg.org/dnkl/foot), for the terminals. One foot server
+  holds all the windows of a theme. To use another terminal, change
+  `terminals.sh`; it has to be one that draws a new size as soon as it is
+  given one. kitty waits for a resize to be over before it draws, and so is a
+  size behind for the whole film.
 - Python 3 and ffmpeg, to turn a video into a film.
 
 ## Build it
@@ -48,8 +51,18 @@ python3 frames.py ~/Videos/bad-apple.mp4 bad-apple.frames
 
 | Option | What it does | Default |
 |---|---|---|
-| `--grid 16x12` | Cells across and down. Each cell is two terminals, so 16x12 is 384 windows. A finer grid is a truer picture, smaller terminals and more for the compositor to hold. | `16x12` |
+| `--grid 32x24` | Cells across and down. A finer grid is a truer picture, smaller terminals and more of them. The smallest terminal is one cell, which at 32x24 on a 1600x900 screen still holds a prompt. | `32x24` |
 | `--fps 24` | Frames a second. | `24` |
+
+Each frame is cut down to the grid, and each colour's cells are covered with
+rectangles. A rectangle is carried from one frame to the next: it keeps what
+is still its colour, grows into what has become so, joins a neighbour it
+makes a rectangle with, takes in the smaller ones along its edges a line a
+frame, and is gone only when nothing of it is left. So most of a frame is the
+windows of the frame before, a few of them moved or resized. `frames.py` says
+how many terminals of each colour the film needs: for the whole of
+*Bad Apple!!* at 32x24, 69 light and 73 dark, about 43 of them on screen at a
+time.
 
 ## Play it
 
@@ -74,30 +87,32 @@ XDG_CONFIG_HOME=/tmp/apple ./target/debug/solium
 Nothing else is read: with `wm.toml` naming this program, the Lua window
 manager and its configuration are not started at all.
 
-The terminals open and glide into a chequerboard, each in a plain border.
-Once the shell in every one of them has printed its prompt the film begins;
-when it ends, the chequerboard comes back, and the film starts again.
+The terminals open and glide into rows, light and dark by turns, each in a
+plain border. Once the shell in every one of them has printed its prompt, and
+they have stood so for five seconds, the film begins: the terminals a frame
+needs take their rectangles, and the rest are not drawn. When it ends the rows
+come back, and the film starts again.
 
 | Key | What it does |
 |---|---|
 | `space` | Pause, and go on. |
-| `r` | Back to the chequerboard, and the film from the beginning. |
+| `r` | Back to the rows, and the film from the beginning. |
 | `escape` | End the session. |
 
 A panel in the corner says how it is going:
 
 | Row | What it is |
 |---|---|
-| `FPS` | Frames of the film shown in the last half second, as a rate. |
+| `FPS` | Frames of the film shown, a second: fewer than the film has when the compositor took longer than a frame over one. |
 | `Terminals` | How many terminal windows are open. |
-| `Changes` | Cells that changed colour, a second. |
+| `Moves` | Terminals moved or resized, a second. |
 | `WM CPU` | What this program uses of one processor. |
 
 ## How it works
 
 | File | What is in it |
 |---|---|
-| `src/Program.cs` | The window manager: the handshake, the batches it answers, and the frames it sends. |
+| `src/Program.cs` | The window manager: the handshake, and the batches it answers, a frame of the film among them twenty-four times a second. |
 | `src/Connection.cs` | The socket and the frames on it: a length, then a message. |
 | `src/Wire.cs` | The encoding of each kind of value. |
 | `src/Film.cs` | Reading a film. |
@@ -121,21 +136,30 @@ What it uses of the protocol:
   compositor ships.
 - **`run-detached`.** It asks the compositor to start the terminals. A window
   manager starts nothing itself.
-- **`place`.** Each terminal is put in its cell in the answer to its `opened`
-  event, once. It is never moved or resized again: a real application cannot
-  be resized twenty-four times a second, and need not be.
-- **`present`.** Whether a terminal is drawn. The one whose theme its cell
-  does not need stays open, in its place, with no opacity; its application is
-  told nothing and does no work.
-- **`timer`.** What changed on the desktop comes only with a batch, and a
-  batch only with an event. While the terminals start, a timer on the
-  compositor's clock is that event, four times a second: each brings the
-  window titles that changed, and a terminal's title is how this program
-  knows its shell has printed its prompt. The timer is cancelled when the
-  film begins.
-- **`submit`.** Frames are sent on this program's own clock, with no event
-  asking for them. In a whole session it answers one batch for each terminal
-  that opens, each tick of that timer, and its keys; every frame of the film
-  is a `submit`.
+- **`timer`.** It keeps no clock of its own: the compositor's timers tick on
+  the clock its animations run on, and this program sets two. One falls due
+  for each frame of the film while it plays, and its answer to that is the
+  frame. The other falls due twice a second, always. What changed on the
+  desktop comes only with a batch, and a batch only with an event, so while
+  the terminals start that timer is the event that brings the window titles
+  that changed, and a terminal's title is how this program knows its shell
+  has printed its prompt. It is also the panel's clock.
+- **`place`.** Each terminal is put in its row in the answer to its `opened`
+  event. Then, for each frame, every terminal whose rectangle changed is
+  placed twice: once with no motion, which has it there on the next frame the
+  compositor draws, and once more to the same rectangle over a quarter of a
+  second, which moves it nowhere. A window that has arrived is drawn at the
+  size its application has drawn, and a terminal takes a moment over a new
+  size; a window on its way is drawn in the rectangle it is passing through,
+  from whatever its application has drawn. So for that quarter of a second
+  the terminal is whole in its new rectangle while it draws the size.
+- **`present` and `clear`.** Whether a terminal is drawn. One no rectangle
+  needs stays open, where it was, with no opacity, and `clear` takes that
+  away when a rectangle needs it again.
 - **`surface`.** The panel is a QML scene of its own, which it hands new
   numbers twice a second.
+
+It never sends a `submit`: everything it does is its answer to something the
+compositor told it. That is also what lets a capture slow the film down with
+everything else: `SOLIUM_CLOCK_RATE` ([dev/README.md](../../dev/README.md),
+"The knobs") slows the compositor's clock, and the film is on it.

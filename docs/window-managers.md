@@ -417,10 +417,11 @@ decodes them as [the wire format](#the-wire-format) says.
 [`examples/bad-apple`](../examples/bad-apple/README.md) is one in C#. It
 writes its C# types from the WIT with a script of about three hundred lines of
 Python, so nothing the WIT says is written a second time by hand, and the
-rest is about nine hundred lines of C#: it plays a black and white film with
-a grid of real terminals, a light one and a dark one in every cell, by telling
-the compositor which of the two to draw, twenty-four times a second. Its
-README lists which parts of the protocol it uses and why.
+rest is about a thousand lines of C#: it plays a black and white film with
+real terminals, the light parts of each frame covered with light ones and the
+dark parts with dark ones, by moving and resizing those whose part of the
+picture changed, twenty-four times a second. Its README lists which parts of
+the protocol it uses and why.
 
 A case of a variant is its position in the WIT, counted from 0. The generated
 Rust types keep that order, and `solium_wm_protocol::Event::CASES` and

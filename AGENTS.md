@@ -35,7 +35,7 @@ file is out of date.
 | `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
-| `examples/bad-apple/` | A window manager in C#, which plays a film with a grid of real terminals: the protocol used from another language, its types generated from the WIT. Built with `dotnet`, not by the gate |
+| `examples/bad-apple/` | A window manager in C#, which plays a film by moving and resizing real terminals: the protocol used from another language, its types generated from the WIT. Built with `dotnet`, not by the gate |
 | `crates/x11-probe/` | An X11 client that asks the window manager for fullscreen and maximised, from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |
