@@ -1540,7 +1540,7 @@ loaded by `init.lua`, and the shipped one does not know about yours, so copy the
 shipped `init.lua` to `~/.config/solium/init.lua` — it is
 `share/solium/lua/init.lua` under the prefix Solium was installed to (`/usr`
 for the Fedora package, `~/.local` for `dev/install.sh`), and
-`crates/solium/lua/init.lua` in a checkout — and add `require("mymode")` after
+`crates/solium-lua/lua/init.lua` in a checkout — and add `require("mymode")` after
 its `require("scrolling")`. Your copy then replaces the shipped file entirely:
 it keeps what it had when you copied it and does not pick up what a later
 version adds, so compare the two after an update.

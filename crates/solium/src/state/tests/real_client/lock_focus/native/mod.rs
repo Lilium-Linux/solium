@@ -423,7 +423,7 @@ const EVERY_SOL_FUNCTION: &str = r#"
 /// nothing that holds the digits.
 #[test]
 fn no_lua_function_unlocks_a_native_lock() {
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
     let script = format!(
         "package.path = {shipped:?} .. \"/?.lua\"\n\
          dofile({shipped:?} .. \"/init.lua\")\n{EVERY_SOL_FUNCTION}"

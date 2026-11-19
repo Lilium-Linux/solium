@@ -1,4 +1,5 @@
-//! Solium — a configurable Wayland compositor with Lua scripting and QML scenes.
+//! Solium — a Wayland compositor whose window manager is a program of its
+//! own, in any language, and whose look is QML scenes.
 //!
 //! See `docs/architecture.md`. Layout and presentation are deliberately not in
 //! the protocol handlers; every mode is a transform over window textures.

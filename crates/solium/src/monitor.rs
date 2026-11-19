@@ -1,6 +1,6 @@
 //! Where the monitors are, relative to each other.
 //!
-//! Every rect in the compositor — a pane's slot, a script's `sol.place`, the
+//! Every rect in the compositor — a pane's slot, a script's `place`, the
 //! pointer — lives in one **global logical space**. An output is a window onto
 //! a region of it, and that is the whole of what multi-monitor means here:
 //! there is no per-screen coordinate system to convert between, so a window
@@ -22,7 +22,7 @@
 //! ## The configuration
 //!
 //! ```lua
-//! sol.monitors({
+//! monitors({
 //!     { name = "DP-1", x = 0, y = 0 },
 //!     { name = "HDMI-A-1", x = 2560, y = 180 },
 //! })

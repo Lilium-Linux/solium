@@ -735,7 +735,7 @@ fn render_node() -> Option<PathBuf> {
 /// eglfs does not *need* master and cannot take one by asking. The kernel gives
 /// it away implicitly, to whoever opens the card node while nobody holds it —
 /// and Qt starts here, which on the hardware backend is before `open_gpu`: the
-/// scripts load first, and a `sol.surface` in a user's configuration builds a
+/// scripts load first, and a `surface` in a user's configuration builds a
 /// scene, which starts Qt. Qt's fd becomes master, logind's `SetMaster` then
 /// returns `EBUSY`, and the only thing said out loud about it is Smithay's
 /// `unable to become drm master`, which `tty.rs` correctly documents as benign

@@ -371,7 +371,7 @@ install -m755 "$built_wm" "$wm"
 # session. dev/install-check.sh diffs the copy against the checkout and asserts
 # there are no symlinks in it.
 rm -rf "$share/qml" "$share/lua" "$share/effects" "$share/default-config"
-cp -RL "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+cp -RL "$root/crates/solium/qml" "$root/crates/solium-lua/lua" "$root/crates/solium/effects" \
     "$root/crates/solium/default-config" "$share/"
 
 # The default configuration (#418): a whole desktop, written as configuration

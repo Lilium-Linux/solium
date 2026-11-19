@@ -47,7 +47,7 @@ pub(crate) fn parse(
     Ok((config, shortcuts_policy))
 }
 
-/// Validate protocol policy before emitting any commands from `sol.input`.
+/// Validate protocol policy before emitting any commands from `input`.
 pub(crate) fn shortcuts(table: &Doc) -> Result<crate::shortcuts_inhibit::Settings, String> {
     use crate::shortcuts_inhibit::{Allow, Settings};
     let refused = |why: &str| format!("input.shortcuts_inhibit: {why}");

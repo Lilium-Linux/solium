@@ -462,8 +462,7 @@ pub(crate) fn run() -> Result<()> {
     // triggered immediately. One that will not start is replaced by the
     // shipped configuration rather than refusing to start
     // (`Solium::first_scripts`).
-    let config = Scripts::config_path();
-    let scripts = state.first_scripts(&config);
+    let scripts = state.first_scripts(crate::wm::Which::Chosen);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
@@ -1386,7 +1385,7 @@ pub(crate) fn run() -> Result<()> {
         crate::logind::settle(&mut state);
         // What the services' threads heard, and their timers: `services`.
         crate::services::settle(&mut state);
-        // What `sol.run{}`'s children said, and the timers due, on the
+        // What `run{}`'s children said, and the timers due, on the
         // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
         crate::runs::settle(&mut state);
         crate::timers::settle(&mut state);

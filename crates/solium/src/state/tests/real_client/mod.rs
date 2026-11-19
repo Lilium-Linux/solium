@@ -6115,7 +6115,7 @@ fn a_layout_leaves_a_fullscreen_or_maximised_window_where_it_is() {
              require(\"workspaces\")\n\
              require(\"tiling\")\n\
              require(\"direction\")\n",
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     )
     .expect("writing the entry point");
@@ -6295,7 +6295,7 @@ fn shipped_with(state: &mut Solium, name: &str, more: &str) {
              require(\"workspaces\")\n\
              require(\"tiling\")\n\
              require(\"direction\")\n{more}",
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     )
     .expect("writing the entry point");
@@ -6592,7 +6592,7 @@ fn a_tiled_window_leaving_fullscreen_stays_in_front_while_it_shrinks() {
              require(\"tiling\")\n\
              require(\"fullscreen\")\n\
              require(\"direction\")\n",
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     )
     .expect("writing the entry point");
@@ -6695,7 +6695,7 @@ fn start_the_shipped_layouts(state: &mut Solium, tag: &str) {
              require(\"tiling\")\n\
              require(\"scrolling\")\n\
              require(\"direction\")\n",
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     )
     .expect("writing the entry point");

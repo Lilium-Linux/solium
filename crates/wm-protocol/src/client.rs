@@ -80,10 +80,10 @@ impl From<io::Error> for ClientError {
 pub enum Heard {
     /// What changed and what happened: answer it, once, with its serial.
     Batch(Batch),
-    /// The configuration at this path is to be loaded again: answer with
-    /// [`Client::reloaded`]. A window manager with no configuration of its
-    /// own to read answers that it loaded.
-    Reload(String),
+    /// Load the configuration again, from wherever this window manager
+    /// found it: answer with [`Client::reloaded`]. A window manager with no
+    /// configuration of its own to read answers that it loaded.
+    Reload,
     /// The compositor is closing the connection, and why; or it closed it.
     Goodbye(String),
 }
@@ -161,11 +161,13 @@ impl Client {
     }
 
     /// Answer `hello`: the commands that set the desktop up before its
-    /// first frame.
-    pub fn ready(&self, commands: Vec<Command>) -> io::Result<()> {
+    /// first frame, and the file its configuration is in, when it has one,
+    /// which a problem with what it asked for names.
+    pub fn ready(&self, commands: Vec<Command>, source: Option<String>) -> io::Result<()> {
         self.send(&Message::HelloAnswer(HelloAnswer {
             version: crate::VERSION.to_owned(),
             commands,
+            source,
         }))
     }
 
@@ -192,7 +194,7 @@ impl Client {
             };
             match message {
                 Message::Batch(batch) => return Ok(Heard::Batch(batch)),
-                Message::Reload(path) => return Ok(Heard::Reload(path)),
+                Message::Reload => return Ok(Heard::Reload),
                 Message::Goodbye(why) => return Ok(Heard::Goodbye(why)),
                 // A reply nobody waits for any more, or a message that is
                 // not the compositor's to send: nothing to do with either.
@@ -372,6 +374,7 @@ mod tests {
             version: version.to_owned(),
             debug: false,
             keeps: Vec::new(),
+            safe: false,
         })
     }
 
@@ -393,7 +396,7 @@ mod tests {
         let heard = client.hello().expect("hello");
         assert_eq!(heard.version, crate::VERSION);
         client
-            .ready(vec![Command::Status("up".to_owned())])
+            .ready(vec![Command::Status("up".to_owned())], None)
             .expect("sent");
         let Message::HelloAnswer(answer) = compositor.hear() else {
             panic!("not hello-answer");
@@ -417,11 +420,8 @@ mod tests {
             (1, true, &[Command::Close(4)][..])
         );
 
-        compositor.say(&Message::Reload("/some/where".to_owned()));
-        let Heard::Reload(path) = client.next().expect("a reload") else {
-            panic!("not a reload");
-        };
-        assert_eq!(path, "/some/where");
+        compositor.say(&Message::Reload);
+        assert!(matches!(client.next().expect("a reload"), Heard::Reload));
         client
             .reloaded(Reloaded::Failed("no".to_owned()))
             .expect("sent");

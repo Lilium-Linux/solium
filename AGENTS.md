@@ -18,7 +18,7 @@ file is out of date.
 4. [dev/README.md](dev/README.md): the instruments. Building, running nested,
    driving and recording a run without a keyboard, the checks, the TTY.
 5. For settings, [docs/ricing.md](docs/ricing.md) and
-   [crates/solium/lua/config.lua](crates/solium/lua/config.lua), which holds
+   [crates/solium-lua/lua/config.lua](crates/solium-lua/lua/config.lua), which holds
    every setting with its documentation.
 
 ## The map
@@ -26,13 +26,12 @@ file is out of date.
 | Path | What is there |
 |---|---|
 | `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `wm/` is the connection to the window manager, and `script/` its commands and settings as the compositor's own types; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
-| `crates/solium/lua/` | The shipped configuration. `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, and `meta/sol.lua` documents the Lua API |
 | `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
-| `crates/animation/`, `crates/layout/`, `crates/effects/` | Crates with no compositor in them: curves and springs, the window arrangements, and the effect format |
+| `crates/animation/`, `crates/layout/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the window arrangements, the effect format, and where a program of Solium's finds its shipped files and the user's |
 | `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
-| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms. The compositor does not link it; its tests do, to run it on a thread |
+| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
 | `sdk/csharp/` | The package a window manager in C# is built on: the protocol's types, generated from the `.proto` by protobuf's own generator, the connection, the desktop kept current, and a whole window manager on it (`Tiny/`). Built with `dotnet`, not by the gate |
@@ -110,7 +109,8 @@ Most review findings are one of these.
   search for the feature's name in `crates/solium/src` should find nothing.
 - **The window manager is another process.** The compositor runs none of its
   code and links none: what the two say to each other is the protocol in
-  `crates/wm-protocol/wit/`, and a new event, command or type is added there,
+  `crates/wm-protocol/wit/`, and the compositor names nothing of the Lua
+  window manager (a test refuses it). A new event, command or type is added there,
   at the end of its record, variant or enum (its place is its number on the
   wire, which a window manager built before still reads), with its comment,
   which is its documentation. The compositor never waits

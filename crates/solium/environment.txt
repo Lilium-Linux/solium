@@ -86,8 +86,10 @@ line; with none it starts a compositor: nested, as a window, when
 ## Running a session
 
 SOLIUM_LUA_INIT=<path>
-    Load this configuration instead of `~/.config/solium/init.lua` or the
-    shipped `init.lua`.
+    The shipped window manager, `solium-lua`, loads this configuration
+    instead of `~/.config/solium/init.lua` or its shipped `init.lua`, and the
+    compositor reloads it when a file beside it changes. Read by `solium-lua`,
+    not by the compositor; started safe, it is not read.
 
 SOLIUM_TERMINAL=<command line>
     The terminal `super+return` opens, split on spaces. Unset, the shipped

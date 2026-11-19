@@ -294,7 +294,7 @@ leaves the running configuration in place and reports the error in the log.
 
 Continue with [configuring Solium](docs/ricing.md), the
 [settings reference](https://lilium-linux.github.io/solium/generated/reference/settings.html)
-and the documented [defaults](crates/solium/lua/config.lua).
+and the documented [defaults](crates/solium-lua/lua/config.lua).
 
 ## How it is built
 

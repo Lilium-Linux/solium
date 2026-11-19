@@ -37,7 +37,7 @@ pub(crate) fn packed(bound: &[(String, Value)], limit: usize) -> Result<Params, 
             Value::Vec4(four) => numbers.extend(four.iter().map(|each| *each as f32)),
             Value::Word(_) => {
                 return Err(format!(
-                    "its param `{name}` is a word, and a `sol.present` blends its params between two presents, which a word cannot"
+                    "its param `{name}` is a word, and a `present` blends its params between two presents, which a word cannot"
                 ));
             }
         }
@@ -153,7 +153,7 @@ impl MeshKey {
 }
 
 /// A pane's last grids and their keys, one per warp piece (the pane and its
-/// popups), and the version a `sol.present` geometry began with, pinned
+/// popups), and the version a `present` geometry began with, pinned
 /// while `effects.present.on_reload = "keep"` holds it.
 /// `tests::a_mesh_is_not_rebuilt_when_neither_progress_nor_an_anchor_changed`.
 #[derive(Debug, Default)]

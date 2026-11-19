@@ -279,8 +279,8 @@ SOLIUM_DOCS_IMAGE=localhost/solium-build:fc44 dev/docs.sh   # in the container
 - **A doc in `docs/` is a page as it stands.** `docs/SUMMARY.md` is the table
   of contents; a new doc goes there too.
 - **The reference pages are generated, and never committed.** The
-  configuration comes from `crates/solium/lua/config.lua`, the key bindings
-  from `solium --check`, the Lua API from `crates/solium/lua/meta/sol.lua`,
+  configuration comes from `crates/solium-lua/lua/config.lua`, the key bindings
+  from `solium --check`, the Lua API from `crates/solium-lua/lua/meta/sol.lua`,
   the window manager protocol from the comments in `crates/wm-protocol/wit/`
   and the flags and environment from `crates/solium/environment.txt`. Change
   the source, not the page.

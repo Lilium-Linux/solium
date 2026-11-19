@@ -73,7 +73,7 @@ impl CompositorHandler for Solium {
                 // commit, as a window nothing holds is.
                 self.settle_answer_of(&window);
                 // Ahead of the first show, so that a window launched with
-                // `sol.spawn` whose first limits come with its first frame is
+                // `spawn` whose first limits come with its first frame is
                 // still one that has not been shown when the layouts hear of
                 // them -- which is when `tiling.lua` may place it again. For
                 // a window its application opened, the show is its `open`, and
@@ -583,7 +583,7 @@ impl XdgShellHandler for Solium {
     }
 
     /// A client asking to be minimized: `xdg_toplevel.set_minimized`, its
-    /// own button for it. Done as `sol.minimize` does it (#30). xdg has no
+    /// own button for it. Done as `minimize` does it (#30). xdg has no
     /// request to come back; a minimized window is shown again by
     /// focusing it or by a script.
     /// `tests::real_client::reflow_on_close::minimize::a_client_asking_to_be_minimized_is_minimized`.

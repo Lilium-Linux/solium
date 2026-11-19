@@ -25,6 +25,22 @@ public abstract class WindowManager
     protected Desktop Desktop { get; } = new();
 
     /// <summary>
+    /// Whether this window manager was started in place of one that kept
+    /// stopping (<c>hello.safe</c>): it should read none of the user's own
+    /// configuration, so the session has keys that work. Known before
+    /// <see cref="Setup"/> is first asked.
+    /// </summary>
+    protected bool Safe { get; private set; }
+
+    /// <summary>
+    /// The file this window manager's configuration is in, when it has one:
+    /// a problem with what it asked for names it, and the compositor
+    /// reloads it when that file's directory changes. Asked after
+    /// <see cref="Setup"/>.
+    /// </summary>
+    protected virtual string? ConfigurationFile => null;
+
+    /// <summary>
     /// What the window manager asks for before the first frame, and again
     /// when it is told to reload: the keys that are its own, the events it
     /// listens to, its settings.
@@ -83,10 +99,13 @@ public abstract class WindowManager
             });
             return 1;
         }
-        solium.Send(new Message
+        Safe = hello.Hello.Safe;
+        var answer = new HelloAnswer { Version = Protocol.Version, Commands = { Setup() } };
+        if (ConfigurationFile is { } file)
         {
-            HelloAnswer = new HelloAnswer { Version = Protocol.Version, Commands = { Setup() } },
-        });
+            answer.Source = file;
+        }
+        solium.Send(new Message { HelloAnswer = answer });
         while (true)
         {
             var message = _waiting.Count > 0 ? _waiting.Dequeue() : solium.Receive(TimeSpan.FromMinutes(1));

@@ -226,7 +226,7 @@ impl Desk {
                  require(\"direction\")\n\
                  require(\"floating\")\n\
                  {after}\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -405,7 +405,7 @@ impl Desk {
     /// What `Solium::reload` does, with the desk as it is.
     fn reload(&mut self) {
         self.scripts
-            .reload(&self.entry)
+            .reload_from(&self.entry)
             .expect("reloading the scripts");
         let mut commands = self.scripts.restored(self.snapshot()).commands;
         commands.extend(self.scripts.monitors_changed(self.snapshot()).commands);

@@ -4,7 +4,7 @@
 //! **The password lives here and nowhere else.** A key pressed while Solium
 //! holds the lock goes from the keyboard filter into a [`Secret`], the
 //! zeroised, locked page `solium-auth` shares ([`Solium::secret_edit`]). It
-//! never becomes a Qt key event, a `String`, a log line, or anything Lua or an
+//! never becomes a Qt key event, a `String`, a log line, or anything the window manager or an
 //! input method sees. A keypad key is hit-tested by the compositor, and the
 //! press or finger on it never reaches its scene ([`Solium::keypad_down`]).
 //! What QML is told is how many characters there are, whether they are
@@ -19,7 +19,7 @@
 //! the check under way is the one thing here that calls
 //! [`Solium::unlock_natively`]. logind's `Unlock`, the administrator's way
 //! out, is the only other caller. A scene can ask to submit or to clear, and
-//! the request carries nothing; Lua can do neither.
+//! the request carries nothing; the window manager can do neither.
 //! `tests::nothing_in_qml_can_unlock_or_read_the_secret`.
 //!
 //! **The states**, as `Lock.state` names them:
@@ -29,7 +29,7 @@
 //!   typed meanwhile is the password's as in any other state; the state is
 //!   the entry's until it ends.
 //! * `peeking`: no lock at all. The configuration is pulling the scenes down
-//!   over the unlocked desktop with a finger (`sol.lock_peek`), and
+//!   over the unlocked desktop with a finger (`lock-peek`), and
 //!   `Lock.progress` says how far; nothing typed reaches the field, which is
 //!   not armed until a lock is taken. Ended without one, the scenes go back
 //!   up reading `unlocking` for `lock.exit_ms` at most (`lock_scene.rs`).
@@ -107,7 +107,7 @@ use crate::{
 };
 
 /// `lock.*` for Solium's own lock: how a password is checked. Handed over by
-/// `sol.lock`, beside the locker settings `logind.rs` reads.
+/// `lock`, beside the locker settings `logind.rs` reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     /// When a run of wrong passwords shuts the field, and for how long.

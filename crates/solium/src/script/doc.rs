@@ -1,6 +1,6 @@
 //! A setting as written, in no language.
 //!
-//! A section of settings (`sol.idle{...}`, `sol.effects{...}`) arrives as a
+//! A section of settings (`idle{...}`, `effects{...}`) arrives as a
 //! tree of plain values, and its parser reads that tree, not a Lua table: the
 //! same parser serves a configuration written in Lua and a window manager
 //! written in anything else that sends the same document. Effect rules are

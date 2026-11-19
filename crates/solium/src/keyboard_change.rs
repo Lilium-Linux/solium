@@ -1,16 +1,16 @@
 //! Telling the configuration and the scenes when the keyboard's layout or a
-//! lock changes: `sol.on("keyboard", function(state, changed) end)`, and the
+//! lock changes: `keyboard-changed end)`, and the
 //! `Keyboard` singleton's `changed(what)`.
 //!
 //! Told on a real change of the xkb group, Caps Lock or Num Lock, from a key
-//! or from `sol.keyboard{ ... }`, and never for ordinary typing:
+//! or from `keyboard{ ... }`, and never for ordinary typing:
 //! `tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
 //! Nor while the session is locked, to the configuration:
 //! `state::tests::real_client::lock_focus::a_caps_toggle_at_the_lock_screen_is_not_told_to_the_configuration`.
 
 use crate::state::Solium;
 
-/// What changed, as `sol.on("keyboard")`'s `changed` and the `Keyboard`
+/// What changed, as `keyboard-changed`'s `changed` and the `Keyboard`
 /// singleton's `changed(what)` name it.
 /// `tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ impl Told {
 
 impl Solium {
     /// Wherever the xkb state may have changed: after every key, and after
-    /// every `sol.keyboard{ ... }`. Refreshes the cached keyboard, and tells
+    /// every `keyboard{ ... }`. Refreshes the cached keyboard, and tells
     /// what changed since the last look, layout first.
     /// `tests::a_layout_switch_and_a_caps_toggle_by_key_are_told_once_each_with_russian_active`,
     /// `tests::sol_keyboard_active_is_told_as_a_layout_change`.
@@ -221,7 +221,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// **`sol.keyboard{ active = 2 }` from a binding is told as a layout
+    /// **`keyboard{ active = 2 }` from a binding is told as a layout
     /// change**, and asking for the layout already live is told nothing.
     #[test]
     fn sol_keyboard_active_is_told_as_a_layout_change() {

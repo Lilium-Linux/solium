@@ -190,7 +190,7 @@ pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
     unsafe { ffi::solium_qml_rows_apply(model as c_int, ops.as_ptr()) != 0 }
 }
 
-/// What `Solium.status` reads: the text `sol.status` set. Whether Qt took
+/// What `Solium.status` reads: the text `status` set. Whether Qt took
 /// it. `tests::the_workspaces_model_its_list_and_its_facades`,
 /// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
@@ -417,7 +417,7 @@ pub(crate) fn set_arrangement(json: &str) -> bool {
 
 impl Scene {
     /// A window frame's layer, hosted on no monitor (#417): `Solium.send`
-    /// queues what it sends, for `sol.on("frame")`, a `Grab` holds the
+    /// queues what it sends, for `frame-action`, a `Grab` holds the
     /// pointer and the keys for it, and its window is active, so an item
     /// with `focus: true` hears the keys it is given. `Solium.monitor` reads
     /// the absent row an unhosted scene reads.
@@ -4063,7 +4063,7 @@ pub(crate) mod tests {
 
     /// **`WorkspaceList` is the group of its monitor, `showing(monitor)` is a
     /// stable facade for what that monitor shows, `current` what the monitor
-    /// in front shows, and `Solium.status` is what `sol.status` set**
+    /// in front shows, and `Solium.status` is what `status` set**
     /// (Ruling 19); with no rows, the facades are empty.
     #[test]
     fn the_workspaces_model_its_list_and_its_facades() {

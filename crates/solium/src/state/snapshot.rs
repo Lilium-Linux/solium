@@ -190,7 +190,7 @@ impl Solium {
     /// None at all, both ways, where the user has said not to believe it:
     /// `floating.client_limits = "ignore"`, or its application named in
     /// `tiling.client_size_ignore`, which `sizes.lua` hands over with
-    /// `sol.client_sizes`. See [`crate::script::ClientSizes`], and
+    /// `client_sizes`. See [`crate::script::ClientSizes`], and
     /// `real_client::client_sizes::a_floating_drag_of_an_application_not_believed_is_not_held`.
     pub(crate) fn outer_limits(&self, window: &Window) -> (Size<i32, Logical>, Size<i32, Logical>) {
         if !self.client_sizes.believes(&self.script_app_id(window)) {
@@ -226,7 +226,7 @@ impl Solium {
     /// one its application opened, before that application's first frame. The
     /// `open` carries the limits in the window's row, and a `layout` ahead of
     /// it would be a pass for a window no layout has heard of. A window
-    /// launched with `sol.spawn` had its `open` at the launch, so its first
+    /// launched with `spawn` had its `open` at the launch, so its first
     /// limits are told like any change -- and that is the `layout` in which
     /// `tiling.lua` places it again if the tile it was given cannot hold it.
     /// `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`
@@ -473,7 +473,7 @@ impl Solium {
                     // Read live rather than from what the layouts were last
                     // told, so the `open` of a window whose client said so
                     // before its first buffer -- every X11 window, and an xdg
-                    // one launched outside `sol.spawn` -- is decided with its
+                    // one launched outside `spawn` -- is decided with its
                     // limits in hand. A pane with no client has said nothing.
                     // `real_client::client_sizes::a_window_that_opens_with_a_minimum_hears_it_once`.
                     min: pane.client().and_then(|window| {

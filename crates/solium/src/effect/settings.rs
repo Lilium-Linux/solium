@@ -1,6 +1,6 @@
 //! The engine's own numbers and policies, each a key under `effects` with
 //! today's value as its default (Ruling 28): what an effect's Lua may spend
-//! as it loads, how many params an effect may pack, and what a `sol.present`
+//! as it loads, how many params an effect may pack, and what a `present`
 //! geometry draws when it cannot be drawn.
 //! `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::script::{Doc, DocTable};
 
-/// What `sol.effects` reads: an unknown key is refused by name, so a typo
+/// What `effects` reads: an unknown key is refused by name, so a typo
 /// never means "the default". Task 30 adds `timing`, Task 27b `geometry` (and
 /// `mesh_ms` and `revive` to `sandbox`'s list in [`parse`]), Task 31 `on`;
 /// FX3's Task 43 adds `xray` and `memo` ([`OWN_TABLES`]).
@@ -184,7 +184,7 @@ impl Default for Limits {
     }
 }
 
-/// `effects.present`: a `sol.present` geometry's policies, each also a
+/// `effects.present`: a `present` geometry's policies, each also a
 /// `deform` key.
 /// `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -336,7 +336,7 @@ const TABLES: [(&str, &[&str]); 3] = [
 /// `script::tests::sol_effects_reads_xray_and_memo`.
 const OWN_TABLES: [&str; 2] = ["xray", "memo"];
 
-/// `sol.effects`' options as a [`Doc`], a number that is not finite kept
+/// `effects`' options as a [`Doc`], a number that is not finite kept
 /// where [`Doc::plain`] drops it (directly under `effects`, in
 /// [`TABLES`], and in [`OWN_TABLES`] and their lists), so `load_ms = 1/0`
 /// is refused for its bounds rather than read as the default,
@@ -359,7 +359,7 @@ pub(crate) fn tree_of(options: &Doc) -> Doc {
     tree
 }
 
-/// `sol.effects`' options, beside `rules`: every key checked, each table's
+/// `effects`' options, beside `rules`: every key checked, each table's
 /// key a table, each number within its bounds and each word one of its
 /// words, or the whole set refused naming the key; `xray` and `memo` read
 /// by their own modules' `parse`.

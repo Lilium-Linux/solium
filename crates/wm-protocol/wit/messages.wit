@@ -28,6 +28,13 @@ interface messages {
         /// name, as its `keep` commands last said: nothing for the first
         /// of a session.
         keeps: list<kept>,
+        /// Whether this window manager is started in place of one that
+        /// kept stopping, or would not start. It reads none of the user's
+        /// own configuration, so the session has keys that work and the
+        /// user can mend what stopped the last one; a reload tries theirs
+        /// again. The compositor starts its shipped window manager so,
+        /// whatever `wm.toml` names.
+        safe: bool,
     }
 
     /// The window manager's reply to `hello`: the protocol it was built
@@ -38,6 +45,10 @@ interface messages {
         version: string,
         /// Applied before the first frame is drawn.
         commands: list<command>,
+        /// Where the window manager's configuration is, when it has one:
+        /// the file a problem with what it asked for names, such as a
+        /// setting the compositor refused.
+        source: option<string>,
     }
 
     /// A view of a session service: its name, and the document of its rows.
@@ -520,10 +531,10 @@ interface messages {
         query(asked),
         /// From the compositor: the answer to the query of that serial.
         reply(replied),
-        /// From the compositor: the configuration at this path is to be
-        /// loaded again (the user asked for a reload, or it changed on
-        /// disk). Answered with `reloaded`.
-        reload(string),
+        /// From the compositor: load the configuration again, from wherever
+        /// the window manager found it (the user asked for a reload, or a
+        /// file under the configuration changed). Answered with `reloaded`.
+        reload,
         /// From the window manager, in answer to `reload`.
         reloaded(reloaded),
         /// Either side is closing the connection, and says why. A window

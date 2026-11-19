@@ -288,7 +288,7 @@ impl Solium {
     /// workspace other than the one its monitor is showing.
     ///
     /// **Asked of the selections directly**, because that is what a hidden
-    /// workspace is. `workspaces.lua` parks a desk with `sol.present_group`
+    /// workspace is. `workspaces.lua` parks a desk with `present-group`
     /// and clears the shift of the desk in view, so the compositor -- which
     /// knows no workspaces -- can still tell a window on a desk nobody is
     /// looking at from one on the desk in front of them, wherever either one's

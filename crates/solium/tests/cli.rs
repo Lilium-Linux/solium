@@ -264,7 +264,6 @@ assert(user.shell.scene == here .. "/shell/Shell.qml", "shell.scene is " .. user
 #[test]
 fn check_runs_the_window_manager_wm_toml_names() {
     let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("solium-lua");
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
     let write = |dir: &Path, toml: &str| {
         std::fs::write(
             dir.join("init.lua"),
@@ -297,7 +296,7 @@ fn check_runs_the_window_manager_wm_toml_names() {
         write(
             dir,
             &format!(
-                "command = [{:?}, {:?}, {shipped:?}]\n",
+                "command = [{:?}, {:?}]\n",
                 wm.display().to_string(),
                 dir.join("named.lua").display().to_string(),
             ),

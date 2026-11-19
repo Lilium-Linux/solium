@@ -113,7 +113,7 @@ pub(crate) struct Match {
     pub(crate) surface: Option<Glob>,
     pub(crate) layer_shell: Option<Glob>,
     /// `values = { key = value }`: what the configuration handed the window
-    /// with `sol.frame(id, { ... })`, each key given equal to the value
+    /// with `frame-values(id, { ... })`, each key given equal to the value
     /// given, and `false` matching a key never handed too (#454). The
     /// configuration's own way to tag a window for a rule, a snapped one say,
     /// with no word of it in the compositor.
@@ -922,7 +922,7 @@ pub(crate) struct Facts<'a> {
     pub(crate) blur_region: bool,
     pub(crate) surface: &'a str,
     pub(crate) layer_shell: &'a str,
-    /// The window's own values, `sol.frame(id, { ... })`; none for a part
+    /// The window's own values, `frame-values(id, { ... })`; none for a part
     /// that is not a window's.
     pub(crate) values: Option<&'a std::collections::BTreeMap<String, crate::json::Json>>,
 }
@@ -1026,7 +1026,7 @@ impl Rules {
         self.lists.iter().all(Vec::is_empty)
     }
 
-    /// The user's rules, as `sol.effects` gave them: what a rebind after the
+    /// The user's rules, as `effects` gave them: what a rebind after the
     /// formats probe binds again.
     /// `state::tests::the_formats_probe_rebinds_the_rules_after_the_frame`.
     pub(crate) fn user(&self) -> &[Rule] {

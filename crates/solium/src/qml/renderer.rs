@@ -137,7 +137,7 @@ pub(crate) fn flag(arguments: impl IntoIterator<Item = String>) -> Option<String
     None
 }
 
-/// What the configuration said, through `sol.qml`.
+/// What the configuration said, through `qml`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Configured {
     /// `qml.renderer`.

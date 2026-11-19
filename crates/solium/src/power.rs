@@ -1,5 +1,5 @@
 //! Turning a monitor off without taking it away: `zwlr_output_power_manager_v1`,
-//! `sol.monitor_power`, and the idle blank in `idle.rs`.
+//! `power`, and the idle blank in `idle.rs`.
 //!
 //! **Off is not gone.** A monitor that is off keeps its `wl_output`, its place
 //! in the arrangement, its work area and every window on it; only the display
@@ -12,7 +12,7 @@
 //!
 //! Three things can ask, and they all end in [`Solium::set_power`]: a client
 //! over the protocol (`wlopm`, and `swayidle` driving it), a script with
-//! `sol.monitor_power`, and the idle blank. One thing turns every screen back
+//! `power`, and the idle blank. One thing turns every screen back
 //! on without asking: input. See [`Solium::wake_screens`].
 //!
 //! ## What "off" is, per backend
@@ -41,7 +41,7 @@
 //!   calls `tty.rs` makes; the DRM calls themselves need a GPU, and no test
 //!   reaches them.
 //! * **nested.** There is no display to turn off, and answering `failed` would
-//!   make the whole feature -- the protocol, the idle blank, `sol.monitor_power`
+//!   make the whole feature -- the protocol, the idle blank, `power`
 //!   and what the lock does with a dark monitor -- impossible to try anywhere
 //!   but a tty. So that monitor's share of the window is drawn black once and
 //!   then not drawn at all, the client is told `off`, and the log says it was

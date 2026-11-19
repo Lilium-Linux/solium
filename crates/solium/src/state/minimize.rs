@@ -25,7 +25,7 @@ impl Solium {
             && (pane.leaving() || !(present::playing(pane, now) || pane.shown_minimized()))
     }
 
-    /// Minimize `pane`'s window: `sol.minimize`, `super+m` through the
+    /// Minimize `pane`'s window: `minimize`, `super+m` through the
     /// shipped configuration, or its own client asking.
     ///
     /// **A modal dialog goes with the window it belongs to**: minimizing a
@@ -147,8 +147,8 @@ impl Solium {
         self.repoint_clients();
     }
 
-    /// [`Self::unminimize`], asked for by a script -- `sol.unminimize`,
-    /// `sol.act("windows.unminimize")` -- or by an X11 client, and not by a
+    /// [`Self::unminimize`], asked for by a script -- `unminimize`,
+    /// `act("windows.unminimize")` -- or by an X11 client, and not by a
     /// focus: with nothing holding the keyboard afterwards, it settles where
     /// it settles after any window goes or comes, so it is not left on
     /// nothing.
@@ -230,7 +230,7 @@ impl Solium {
         );
     }
 
-    /// Show a minimized window anyway, or stop: `sol.show_minimized`. See
+    /// Show a minimized window anyway, or stop: `show-minimized`. See
     /// `Pane::shown_minimized`.
     pub(crate) fn show_minimized(&mut self, pane: crate::pane::PaneId, shown: bool) {
         if let Some(held) = self.panes.get_mut(pane)

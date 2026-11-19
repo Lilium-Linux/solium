@@ -40,7 +40,7 @@ fn shipped_init_and_user(
     name: &str,
     user: &str,
 ) -> Option<(std::path::PathBuf, anyhow::Result<Scripts>)> {
-    let own = Scripts::user_config_dir()?;
+    let own = solium_paths::user_config_dir()?;
     if let Ok(entries) = std::fs::read_dir(&own)
         && entries
             .filter_map(Result::ok)
@@ -56,7 +56,7 @@ fn shipped_init_and_user(
     // Copied rather than required in place: `Scripts::load` puts the
     // config's *own* directory on `package.path` ahead of the shipped one,
     // and that is how the fixture `user.lua` beside it gets found at all.
-    let shipped = crate::assets::lua().join("init.lua");
+    let shipped = solium_lua::shipped().join("init.lua");
     let config = directory.join("init.lua");
     std::fs::copy(&shipped, &config).ok()?;
 
@@ -311,7 +311,7 @@ fn one_screen(windows: &[u64]) -> Snapshot {
 /// a list whose second copy is the defect under test would be the same
 /// mistake with more steps.
 fn accepted_keys(section: &str) -> Vec<String> {
-    let path = crate::assets::lua().join("config.lua");
+    let path = solium_lua::shipped().join("config.lua");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let Some(table) = text.split("local open_sections = {").nth(1) else {
         return Vec::new();
@@ -581,6 +581,26 @@ impl Scripts {
             }),
             &self.answers(None),
         )
+    }
+
+    /// Load the configuration at `config` in place of the one running, as a
+    /// reload does: how a test changes which file a session runs.
+    pub(crate) fn reload_from(&mut self, config: &std::path::Path) -> anyhow::Result<()> {
+        self.load_next(config);
+        self.reload()
+    }
+
+    /// Load `config` at the next reload: how a test reloads a session onto
+    /// another file. The window manager otherwise reloads the file it found.
+    pub(crate) fn load_next(&self, config: &std::path::Path) {
+        let config = config.to_owned();
+        self.link.run(
+            Box::new(move |wm| {
+                wm.load_next(config);
+                String::new()
+            }),
+            &self.answers(None),
+        );
     }
 
     /// [`Self::evaluate`], with `snapshot` as what the compositor looks like:

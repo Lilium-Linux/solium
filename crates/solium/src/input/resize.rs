@@ -201,7 +201,7 @@ pub(crate) struct Resizing {
     from: Point<f64, Logical>,
     /// Where the pointer, or the finger, is now.
     at: Point<f64, Logical>,
-    /// Whether `sol.resize_hold` keeps the window as it is.
+    /// Whether `resize-hold` keeps the window as it is.
     held: bool,
 }
 
@@ -290,7 +290,7 @@ impl ResizeDrag {
 }
 
 /// A script keeping a window a resize has as it is, or letting the resize go
-/// on (`sol.resize_hold`, #454). While held, a motion asks nothing of the
+/// on (`resize-hold`, #454). While held, a motion asks nothing of the
 /// window or of the layouts. Let go, the resize goes on from where the
 /// pointer is then and from the rectangle the window has then, and the one
 /// the layout gives it, so nothing jumps: what the drag would have done while
@@ -462,7 +462,7 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// be both.
 ///
 /// **The value is in the layout's outer coordinate space, by construction
-/// rather than by argument.** `laid_out` is the rectangle `sol.place` was
+/// rather than by argument.** `laid_out` is the rectangle `place` was
 /// handed — `Solium::place` takes a script's rect as the pane's outer rectangle
 /// and subtracts the insets itself — so this is the space `tree:layout` returns
 /// and therefore the space `solium_layout::tree::Tiling::node_box` measures a
@@ -638,7 +638,7 @@ pub(crate) fn drag_rect(
 impl ResizeDrag {
     /// The pointer, or the finger, is at `location`: the resize it asks for
     /// is recorded for the next pass, unless a script holds the window
-    /// (`sol.resize_hold`), when nothing is.
+    /// (`resize-hold`), when nothing is.
     pub(crate) fn to(&self, data: &mut Solium, location: Point<f64, Logical>) {
         let Some(resizing) = data
             .resizes

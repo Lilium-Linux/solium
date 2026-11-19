@@ -17,7 +17,7 @@
 //! ordinary as one whose content is a client, which is what makes the loading
 //! window an ordinary window rather than a special one. An application that
 //! dies leaves `Content::Leaving`, which fades out what it last showed; and
-//! what the compositor draws for its own reasons is `sol.surface`
+//! what the compositor draws for its own reasons is `surface`
 //! (`scripted.rs`), which is not a pane at all.
 //!
 //! `Space` has not gone away and is not going to. It stays underneath as the
@@ -198,7 +198,7 @@ pub(crate) struct Left {
     ///
     /// **The names and not the members**, because a group's members are a
     /// script's to declare, and `workspaces.lua` rebuilds a desk's membership
-    /// from `sol.windows()` -- which this pane is no longer in -- so asking the
+    /// from the `window` rows -- which this pane is no longer in -- so asking the
     /// groups which ones hold it would lose the desk's shift on the next
     /// `layout` event. `a_window_that_left_keeps_the_shift_its_desk_had` pins
     /// the rebuild and `a_window_that_left_moves_with_its_desk` the desk moving
@@ -334,7 +334,7 @@ pub(crate) struct Pane {
     /// maximised, fullscreen or floating window down to the tile it used to
     /// have. So it is cleared on every way out of a tile — a maximise and a
     /// fullscreen (which keep it in [`Self::left_tile`] for the way back), a
-    /// `sol.place` with `tile = false`, and `sol.unplace`, which is what
+    /// `place` with `tile = false`, and `unplace`, which is what
     /// `modes.use` sends for every window when the layout changes.
     /// `a_maximised_window_is_not_held_in_its_old_tile`,
     /// `a_fullscreen_window_is_not_held_in_its_old_tile` and
@@ -358,12 +358,12 @@ pub(crate) struct Pane {
     /// both ways.
     ///
     /// **And while a window is leaving, a let-go waits for it.** A
-    /// `sol.unplace`, or a `sol.place` with `tile = false`, that arrives during
+    /// `unplace`, or a `place` with `tile = false`, that arrives during
     /// the close -- `modes.use` sends the first for every window, so a mode
     /// switch inside the fade is one -- leaves this set and is owed instead,
     /// in [`Self::let_go`], until the window comes back. See [`Self::untile`].
     ///
-    /// **Usually from the rectangle a layout handed `sol.place`, but not
+    /// **Usually from the rectangle a layout handed `place`, but not
     /// always**: `Solium::rescue_offscreen` reaches `move_pane` too, with a
     /// rectangle it worked out itself to drag a window back onto a screen that
     /// went away. So the invariant is the narrower one — no client ever writes
@@ -471,7 +471,7 @@ pub(crate) struct Pane {
     /// and one that is not is kept for ever.
     frame: Frame,
     /// What the configuration handed this window's frame alone, as its
-    /// layers' `windowValues`: `sol.frame(id, { ... })` (#417). Kept across a
+    /// layers' `windowValues`: `frame-values(id, { ... })` (#417). Kept across a
     /// change of style, and gone with the window.
     frame_values: crate::decoration::Values,
     /// The frame this pane had in the style before this one, kept so a switch
@@ -576,7 +576,7 @@ pub(crate) struct Pane {
     /// pane is not captured on
     /// (`keyed::tests::a_pane_that_stops_warping_gives_the_texture_back`).
     captures: crate::keyed::Captures,
-    /// The grids a `sol.present` geometry last drew this pane through, by
+    /// The grids a `present` geometry last drew this pane through, by
     /// key, built once a pass in `render::prepare` and kept while nothing
     /// they depend on moves, and the version a present pinned. Left with the
     /// pane, as its captures are.
@@ -599,11 +599,11 @@ pub(crate) struct Pane {
     minimized: bool,
     /// Whether a configuration shows this minimized window anyway, where its
     /// present puts it: an overview's thumbnail, a recents card
-    /// (`sol.show_minimized`). Only read while the window is minimized, and
+    /// (`show-minimized`). Only read while the window is minimized, and
     /// cleared when it is shown again. It still takes no pointer or touch.
     shown_minimized: bool,
     /// Whether this window is kept above every window that is not (#424):
-    /// `sol.keep_above`. The window's own state and not the configuration's,
+    /// `keep-above`. The window's own state and not the configuration's,
     /// so a reload keeps it, and it goes with the pane when the window
     /// closes. Read by `Solium::stack_kept_above`. See `WindowInfo::above`.
     above: bool,
@@ -1105,7 +1105,7 @@ impl Pane {
         &mut self.meshes
     }
 
-    /// What the configuration handed this window with `sol.frame`, as a
+    /// What the configuration handed this window with `frame-values`, as a
     /// rule's `values` match reads it (#454).
     pub(crate) const fn frame_values(&self) -> &crate::decoration::Values {
         &self.frame_values

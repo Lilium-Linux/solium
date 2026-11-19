@@ -4975,7 +4975,7 @@ end)"#,
     assert_eq!(
         (
             desk.state.status.as_str(),
-            log.matches("sol.act: no such action").count()
+            log.matches("act: no such action").count()
         ),
         ("unknown-action;unknown-action;", 1),
         "(what the dones heard, how many times the log warned of it):\n{log}"

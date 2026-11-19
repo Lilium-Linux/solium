@@ -30,7 +30,7 @@ impl Library {
     /// install's (`assets::effects`).
     pub(crate) fn new() -> Self {
         Self::with(
-            crate::script::Scripts::user_config_dir().map(|dir| dir.join("effects")),
+            solium_paths::user_config_dir().map(|dir| dir.join("effects")),
             crate::assets::effects(),
         )
     }
@@ -94,7 +94,7 @@ pub(crate) fn is_name(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Problem {
     /// The effect's name, `"config"` for the configuration itself, or
-    /// `"rules"` for a rule `sol.effects` gave
+    /// `"rules"` for a rule `effects` gave
     /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
     pub(crate) effect: String,
     pub(crate) file: PathBuf,
@@ -170,7 +170,7 @@ pub(crate) struct WarpPixels {
 /// most `limit` of them (`effects.limits.params`): refused, as a problem at
 /// its file saying why, for a param it does not have, a word, or more
 /// numbers than the limit, never cut (amended 2026-10-08, configurable).
-/// What a `sol.present` geometry whose `pixels` names another effect packs
+/// What a `present` geometry whose `pixels` names another effect packs
 /// for that effect's frag.
 /// `tests::a_pixels_effect_with_more_params_than_the_limit_is_refused_at_bind`.
 pub(crate) fn pack_pixels<P>(
@@ -377,7 +377,7 @@ pub(crate) struct EffectId {
 }
 
 impl EffectId {
-    /// The id of no effect: a `sol.present` geometry whose folder is
+    /// The id of no effect: a `present` geometry whose folder is
     /// missing carries it, and [`Host::by_id`] answers nothing for it, since
     /// a slot's index starts at 1, so the geometry follows its `failed`
     /// (`state::tests::real_client::a_present_deform_is_a_file`).
@@ -568,7 +568,7 @@ impl<P: Clone> Host<P> {
     /// What every effect's Lua is made with from now on, `effects.sandbox`;
     /// whether they changed. Every wanted folder loaded under other caps is
     /// loaded again now, so an effect a budget refused can load under a
-    /// larger one, and the folders the same `sol.effects` names load under
+    /// larger one, and the folders the same `effects` names load under
     /// the new caps (`tests::new_caps_load_every_wanted_folder_again`); an
     /// unchanged folder keeps its id, so a present under way is not ended
     /// (`tests::new_caps_keep_an_unchanged_folders_id`).
@@ -648,7 +648,7 @@ impl<P: Clone> Host<P> {
         }
     }
 
-    /// `origin` wants `names` as well as what it wanted: `sol.present`'s, so
+    /// `origin` wants `names` as well as what it wanted: `present`'s, so
     /// a second genie does not drop the first's effect mid-flight.
     /// `tests::present_wants_accumulate_until_a_reload`.
     pub(crate) fn add_wanted(
@@ -661,7 +661,7 @@ impl<P: Clone> Host<P> {
     }
 
     /// Read every wanted folder again (a configuration reload), and clear the
-    /// recorded compile failures once (\[16\] §5). `sol.present`'s names go:
+    /// recorded compile failures once (\[16\] §5). `present`'s names go:
     /// its bindings name them again as they run.
     /// `tests::a_failed_content_is_not_retried_until_it_changes_or_a_reload`,
     /// `tests::present_wants_accumulate_until_a_reload`.
@@ -670,7 +670,7 @@ impl<P: Clone> Host<P> {
         self.reload_keeping(Vec::new());
     }
 
-    /// `Self::reload`, `sol.present` keeping `live`, the names a geometry
+    /// `Self::reload`, `present` keeping `live`, the names a geometry
     /// still draws with: an unchanged one keeps its version and its id
     /// (Ruling 7: an unrelated reload rebuilds nothing), and only one whose
     /// folder changed ends a present under way, by its `on_reload`.
@@ -894,7 +894,7 @@ impl<P: Clone> Host<P> {
                         pending.pixels = pixels;
                     }
                     // With nothing to compile (a geometry file alone) the
-                    // version is current at once, so a `sol.present` genie
+                    // version is current at once, so a `present` genie
                     // resolves its id on the pass it is named:
                     // `tests::a_version_with_nothing_to_compile_is_current_at_once`.
                     if needs.is_empty() {
@@ -1960,7 +1960,7 @@ pub(crate) mod tests {
     /// The shipped folders sit beside the shipped QML and Lua, wherever those
     /// were found, so an install that has one has the others.
     #[test]
-    fn the_shipped_effects_are_beside_the_qml_and_the_lua() {
+    fn the_shipped_effects_are_beside_the_qml() {
         assert_eq!(
             crate::assets::effects().parent(),
             crate::assets::qml().parent()
@@ -2758,7 +2758,7 @@ pub(crate) mod tests {
     }
 
     /// **A version with nothing to compile is current at once**: a
-    /// geometry-only effect `sol.present` names resolves its id on the pass
+    /// geometry-only effect `present` names resolves its id on the pass
     /// it is named, with no compile between.
     #[test]
     fn a_version_with_nothing_to_compile_is_current_at_once() {
@@ -2966,7 +2966,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
-    /// **`sol.present`'s names accumulate until a reload**: a second genie
+    /// **`present`'s names accumulate until a reload**: a second genie
     /// naming another effect does not drop the first's mid-flight.
     #[test]
     fn present_wants_accumulate_until_a_reload() {

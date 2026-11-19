@@ -102,7 +102,7 @@ impl Desk {
             &entry,
             format!(
                 "package.path = {shipped:?} .. \"/?.lua\"\n{body}\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -739,7 +739,7 @@ fn every_close_route_tells_the_layout_the_close_has_begun() {
     );
     desk.install(&format!(
         "dofile({init:?})\n{RECORDER}",
-        init = concat!(env!("CARGO_MANIFEST_DIR"), "/lua/init.lua"),
+        init = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua/init.lua"),
     ));
     assert!(desk.state.trigger("super+q"), "super+q was not handled");
     assert_eq!(

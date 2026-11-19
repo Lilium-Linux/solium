@@ -29,7 +29,7 @@ calculations use the layout crate.
 
 | Layer | Responsibility | Main sources |
 |---|---|---|
-| Configuration | Bindings, modes, workspaces, shell policy | `crates/solium/lua/` |
+| Configuration | Bindings, modes, workspaces, shell policy | `crates/solium-lua/lua/` |
 | Window manager | Runs the configuration, in a process of its own | `crates/solium-lua/`, or the program `wm.toml` names |
 | Protocol | What the compositor and a window manager say to each other | `crates/wm-protocol/` |
 | Desktop UI | Frames, wallpaper, reusable QML types | `crates/solium/qml/` |
@@ -87,13 +87,21 @@ the compositor, `wm/` holds the connection (`link.rs`), who is waited for and
 for how long (`scripts.rs`), what a window manager is told (`events.rs`,
 `diff.rs`) and what `wm.toml` chose (`chosen.rs`); `script/` holds the
 commands and the settings sections as the compositor's own types. The
-compositor links no window manager's code: `clippy.toml` denies Lua's types
-everywhere but the effect sandbox.
+compositor links no window manager's code and names none of its files: it
+starts the program `wm.toml` names, or `solium-lua`, with no arguments; a
+window manager finds its own configuration and says in `hello-answer` where it
+is. `clippy.toml` denies Lua's types everywhere but the effect sandbox, and
+the test `the_compositor_names_nothing_of_the_lua_window_manager` refuses the
+Lua API's names, the Lua window manager's files and its variables anywhere in
+the compositor's production source.
 
 The shipped window manager is `solium-lua` (`crates/solium-lua/`): the `sol`
-API and the Lua runtime. Its `lua/init.lua` loads configuration and modes;
-`~/.config/solium/user.lua` supplies overrides; `config.lua` documents
-defaults.
+API, the Lua runtime, and its configuration in `crates/solium-lua/lua/`. Its
+`init.lua` loads configuration and modes; `~/.config/solium/user.lua`
+supplies overrides; `config.lua` sends every setting of the compositor's with
+its default and documentation. Both programs find their shipped files the same
+way (`crates/paths`): a packager's `SOLIUM_DATADIR`, the build tree, then
+`share/solium` beside the binary.
 
 Presentation commands work on stable window IDs and selections. Arrangements
 come from `crates/layout`; Lua decides when to apply them. Configuration reload
@@ -102,7 +110,7 @@ previous configuration. `solium --check` validates loading and declared QML
 scenes without starting a session.
 
 The [configuration guide](ricing.md) covers usage. The Lua API's source
-reference is [meta/sol.lua](../crates/solium/lua/meta/sol.lua).
+reference is [meta/sol.lua](../crates/solium-lua/lua/meta/sol.lua).
 
 ## Presentation, animation and input
 

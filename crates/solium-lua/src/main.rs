@@ -1,12 +1,14 @@
 //! `solium-lua`: Solium's Lua window manager, as the compositor starts it.
 //!
-//! `solium-lua <config> <shipped-lua> [<user-lua>]`, with the socket to the
-//! compositor as its standard input: the configuration to load, where the
-//! shipped Lua is, and where the user's own is. It answers `hello`, then
-//! every batch, until the compositor says goodbye. Its log goes to its
-//! standard error, which is the compositor's. With no `<user-lua>` nothing
-//! of the user's own is read: how the compositor starts it in place of a
-//! configuration that keeps stopping.
+//! `solium-lua [<configuration>]`, with the socket to the compositor as its
+//! standard input. The compositor starts it with no arguments, and it finds
+//! its own configuration (`found.rs`: `SOLIUM_LUA_INIT`, the user's
+//! `init.lua`, or the shipped one); a `wm.toml` that names it can name the
+//! file to load instead. It answers `hello`, then every batch, until the
+//! compositor says goodbye. Its log goes to its
+//! standard error, which is the compositor's. Started safe (`hello.safe`),
+//! it reads none of the user's own: how the compositor starts it in place of
+//! a window manager that keeps stopping.
 
 use std::io::IsTerminal;
 use std::os::fd::AsFd;
@@ -25,11 +27,14 @@ fn main() -> ExitCode {
         .with_ansi(std::io::stderr().is_terminal())
         .init();
     let mut arguments = std::env::args_os().skip(1);
-    let (Some(config), Some(shipped)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: solium-lua <config> <shipped-lua> [<user-lua>], started by solium");
+    let config = arguments.next().map(PathBuf::from);
+    if arguments.next().is_some() {
+        eprintln!(
+            "usage: solium-lua [<configuration>], started by solium with the socket as its \
+             standard input"
+        );
         return ExitCode::from(2);
-    };
-    let user = arguments.next().map(PathBuf::from);
+    }
     let stream = match std::io::stdin()
         .as_fd()
         .try_clone_to_owned()
@@ -42,7 +47,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match solium_lua::serve(stream, &PathBuf::from(config), PathBuf::from(shipped), user) {
+    match solium_lua::serve(stream, config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("{err:#}");

@@ -6,13 +6,13 @@
 //! it was told it has text-input focus on; both are applied on `commit`. That
 //! is all this keeps: which text field is live, on which window, and its caret.
 //! The compositor publishes it as data, in the global space for the
-//! configuration (`sol.text_input()`, `sol.on("text_input", ...)`) and in a
+//! configuration (``text-field` change, `text-input`) and in a
 //! pane's own space for its decoration (`caret`), and draws nothing of its own
 //! with it. `tests::an_enabled_field_has_its_caret_in_the_global_space`.
 //!
 //! ## When the configuration is told
 //!
-//! `sol.on("text_input", function(field, why) end)` hears three things, each
+//! `text-input end)` hears three things, each
 //! named by `why`: a field enabled, or enabled again on its window getting
 //! the keyboard back (`"field"`); its caret moved, as its client says it
 //! (`"caret"`); and its window starting or stopping being drawn in a frame,

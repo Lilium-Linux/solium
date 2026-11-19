@@ -501,10 +501,10 @@ fn a_store_survives_a_reload_as_the_data_it_saves() {
            shown = tostring(s.volume) .. " " .. tostring(s.run)"#,
     )
     .expect("writing");
-    scripts.reload(&config).expect("reloading");
+    scripts.reload_from(&config).expect("reloading");
     assert_eq!(scripts.evaluate("return shown"), "65 nil");
     std::fs::write(&config, r#"shown = sol.store("other", {}).kept"#).expect("writing");
-    scripts.reload(&config).expect("reloading");
+    scripts.reload_from(&config).expect("reloading");
     assert_eq!(scripts.evaluate("return shown"), "yes");
     assert!(
         std::fs::read_dir(&state)

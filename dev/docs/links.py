@@ -1,7 +1,7 @@
 """Where a link in Solium's documentation points, once the book is built.
 
 The documentation is written to be read on GitHub, where a link is a path in
-the repository: `docs/ricing.md` links `../crates/solium/lua/config.lua`, and
+the repository: `docs/ricing.md` links `../crates/solium-lua/lua/config.lua`, and
 the README links `docs/ricing.md`. The book is built from `docs/`, with a few
 files from elsewhere copied in, so the same link has to become one of three
 things:
@@ -51,8 +51,8 @@ COPIES = "generated/repo"
 
 # Source files whose page in the book is generated from them.
 GENERATED = {
-    "crates/solium/lua/config.lua": "generated/reference/configuration.md",
-    "crates/solium/lua/meta/sol.lua": "generated/reference/lua-api.md",
+    "crates/solium-lua/lua/config.lua": "generated/reference/configuration.md",
+    "crates/solium-lua/lua/meta/sol.lua": "generated/reference/lua-api.md",
     "crates/solium/environment.txt": "generated/reference/environment.md",
 }
 

@@ -7,13 +7,15 @@
 //!
 //! The window manager is a program of its own, the socket its standard
 //! input: the shipped `solium-lua`, or the command the user's `wm.toml`
-//! names ([`crate::wm::Chosen`]). A test runs it on a thread of its own instead, over a socket pair
-//! all the same, so every test of the configuration crosses the protocol.
+//! names ([`crate::wm::Chosen`]). The compositor hands it nothing else, and
+//! names none of its files: a window manager finds its own configuration,
+//! and says in `hello-answer` where that is. A test runs it on a thread of
+//! its own instead, over a socket pair all the same, so every test of the
+//! configuration crosses the protocol.
 
 use std::cell::RefCell;
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,7 +24,7 @@ use solium_wm_protocol::{self as wire, Message};
 
 use solium_wm_protocol::Ask;
 
-use crate::wm::Chosen;
+use crate::wm::{Chosen, Which};
 
 /// How long a write to the window manager may block. Its socket's buffer
 /// holds hundreds of batches, so a write blocks only when the window manager
@@ -66,34 +68,34 @@ impl std::fmt::Debug for Link {
 }
 
 impl Link {
-    /// Start the window manager on the configuration at `config`, and wait
-    /// `within` for its `hello-answer`: what the configuration asked for as
-    /// it loaded. Its questions while it loads go to `answers`. With
-    /// `shipped_only` it reads nothing of the user's own, and is the
-    /// shipped window manager whatever `chosen`, the user's `wm.toml`,
-    /// names. `keeps` is what the window manager it takes the place of
-    /// kept, handed to it in `hello`: nothing, for the first.
+    /// Start the window manager `which` says, and wait `within` for its
+    /// `hello-answer`: what its configuration asked for as it loaded, and
+    /// where that configuration is. Its questions while it loads go to
+    /// `answers`. Started safe it is the shipped window manager whatever
+    /// `chosen`, the user's `wm.toml`, names, and `hello` tells it so.
+    /// `keeps` is what the window manager it takes the place of kept,
+    /// handed to it in `hello`: nothing, for the first.
     pub(crate) fn start(
-        config: &Path,
-        shipped_only: bool,
+        which: &Which,
         chosen: &Chosen,
         keeps: Vec<(String, wire::Doc)>,
         answers: &dyn Ask,
         within: Duration,
-    ) -> Result<(Self, Vec<wire::Command>)> {
-        Self::open(config, shipped_only, chosen)?.greeted(keeps, answers, within)
+    ) -> Result<(Self, wire::HelloAnswer)> {
+        Self::open(which, chosen)?.greeted(which.safe(), keeps, answers, within)
     }
 
     /// Say `hello` to the window manager at the other end, and wait
-    /// `within` for its `hello-answer`: the link, and what it asked for.
-    /// One that speaks another version of the protocol, says goodbye, or
-    /// says nothing in that time is the error.
+    /// `within` for its `hello-answer`: the link, and the answer. One that
+    /// speaks another version of the protocol, says goodbye, or says
+    /// nothing in that time is the error.
     fn greeted(
         self,
+        safe: bool,
         keeps: Vec<(String, wire::Doc)>,
         answers: &dyn Ask,
         within: Duration,
-    ) -> Result<(Self, Vec<wire::Command>)> {
+    ) -> Result<(Self, wire::HelloAnswer)> {
         let link = self;
         // What goes wrong on the socket is said as what the window manager
         // did, for whoever reports it to put a name to.
@@ -105,6 +107,7 @@ impl Link {
                 .into_iter()
                 .map(|(name, document)| wire::Kept { name, document })
                 .collect(),
+            safe,
         }))
         .map_err(named)?;
         let answered = link
@@ -119,7 +122,7 @@ impl Link {
                         wire::VERSION
                     );
                 }
-                Ok((link, answer.commands))
+                Ok((link, answer))
             }
             Some(Message::Goodbye(why)) => Err(anyhow!(why)),
             Some(other) => bail!("the window manager answered `hello` with {other:?}"),
@@ -232,9 +235,9 @@ impl Link {
 
     /// The window manager's process, its standard input the socket: the
     /// command `chosen` names, as it is written, or the shipped
-    /// `solium-lua` on `config`.
+    /// `solium-lua`, with no arguments.
     #[cfg(not(test))]
-    fn open(config: &Path, shipped_only: bool, chosen: &Chosen) -> Result<Self> {
+    fn open(which: &Which, chosen: &Chosen) -> Result<Self> {
         let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
         // Started as every program the compositor starts is
         // (`launch::command`): with the environment Solium was started
@@ -245,23 +248,14 @@ impl Link {
         // when the compositor says goodbye, or when the socket closes with
         // it.
         let (program, mut command) = match chosen.command.as_deref() {
-            Some([program, arguments @ ..]) if !shipped_only => {
+            Some([program, arguments @ ..]) if !which.safe() => {
                 let mut command = crate::launch::command(program);
                 command.args(arguments);
                 (std::path::PathBuf::from(program), command)
             }
             _ => {
                 let program = program().map_err(|why| anyhow!(why))?;
-                let mut command = crate::launch::command(&program);
-                command.arg(config).arg(crate::assets::lua());
-                // Where the user's own Lua is, unless none of it is to be
-                // read.
-                if let Some(user) = (!shipped_only)
-                    .then(crate::wm::paths::user_config_dir)
-                    .flatten()
-                {
-                    command.arg(user);
-                }
+                let command = crate::launch::command(&program);
                 (program, command)
             }
         };
@@ -390,7 +384,6 @@ fn unanswered(query: &wire::Query) -> wire::Reply {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::os::unix::net::UnixStream;
-    use std::path::Path;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -398,7 +391,7 @@ pub(crate) mod tests {
     use solium_wm_protocol::{self as wire, Message, frame};
 
     use super::{Link, Peer};
-    use crate::wm::Chosen;
+    use crate::wm::{Chosen, Which};
     use solium_wm_protocol::Ask;
 
     /// Something for the window manager's thread to run with it, and where
@@ -416,22 +409,31 @@ pub(crate) mod tests {
 
     impl Link {
         /// The window manager on a thread of its own, over a socket pair:
-        /// the Lua one, whatever `wm.toml` names.
-        pub(super) fn open(config: &Path, shipped_only: bool, _chosen: &Chosen) -> Result<Self> {
+        /// the Lua one, whatever `wm.toml` names, on the file `which` names
+        /// or the one it finds itself.
+        pub(super) fn open(which: &Which, _chosen: &Chosen) -> Result<Self> {
             let (ours, theirs) =
                 UnixStream::pair().context("making the window manager's socket")?;
             let (control, heard) = mpsc::channel::<Control>();
-            let config = config.to_owned();
-            let user = (!shipped_only)
-                .then(crate::wm::paths::user_config_dir)
-                .flatten();
+            let named = match which {
+                Which::Lua(config) => Some(config.clone()),
+                Which::Chosen | Which::Safe => None,
+            };
+            let files = move |safe: bool| match named {
+                Some(config) => solium_lua::Files {
+                    config,
+                    shipped: solium_lua::shipped().to_path_buf(),
+                    user: solium_paths::user_config_dir(),
+                },
+                None => solium_lua::Files::find(safe),
+            };
             // What it logs as it loads goes to the log the test is reading.
             let log = tracing::dispatcher::get_default(Clone::clone);
             let thread = std::thread::Builder::new()
                 .name("window manager".to_owned())
                 .spawn(move || {
                     let started = tracing::dispatcher::with_default(&log, || {
-                        solium_lua::Wm::start(theirs, &config, crate::assets::lua(), user)
+                        solium_lua::Wm::start(theirs, files)
                     });
                     let Ok(mut wm) = started else {
                         return;
@@ -485,7 +487,7 @@ pub(crate) mod tests {
         pub(crate) fn played(
             run: impl FnOnce(UnixStream) + Send + 'static,
             answers: &dyn Ask,
-        ) -> Result<(Self, Vec<wire::Command>)> {
+        ) -> Result<(Self, wire::HelloAnswer)> {
             let (ours, theirs) =
                 UnixStream::pair().context("making the window manager's socket")?;
             let thread = std::thread::Builder::new()
@@ -499,7 +501,7 @@ pub(crate) mod tests {
                     thread: Some(thread),
                 },
             )?
-            .greeted(Vec::new(), answers, Duration::from_secs(10))
+            .greeted(false, Vec::new(), answers, Duration::from_secs(10))
         }
 
         /// End the window manager on its thread, as one that crashed ends:
@@ -576,10 +578,13 @@ pub(crate) mod tests {
                 .expect("a timeout");
             let mut scripts = crate::wm::Scripts::over(
                 Link::over(ours),
-                commands,
+                wire::HelloAnswer {
+                    version: wire::VERSION.to_owned(),
+                    commands,
+                    source: Some("/played/by/hand.lua".to_owned()),
+                },
                 std::rc::Rc::default(),
-                Path::new("/played/by/hand.lua"),
-                false,
+                Which::Chosen,
             );
             scripts.patient = false;
             (

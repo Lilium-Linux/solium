@@ -43,7 +43,7 @@ pub(crate) fn parse(
     (settings, auth, scene)
 }
 
-/// `sol.lock`'s settings for Solium's own lock (#281): `lockout` (a table of
+/// `lock`'s settings for Solium's own lock (#281): `lockout` (a table of
 /// `attempts`, `seconds` and `max_seconds`, whole numbers of at least 1),
 /// `secret_layout` (`"first"` or `"current"`), `helper_timeout_ms` (a whole
 /// number of at least 100), `retry` (`seconds` and `max_seconds`, and
@@ -245,7 +245,7 @@ fn pin(table: &Doc, whole: &dyn Fn(&Doc, u32) -> Option<u32>) -> crate::pin::Set
     settings
 }
 
-/// `sol.lock`'s settings for what Solium's own lock shows (#281): `native`
+/// `lock`'s settings for what Solium's own lock shows (#281): `native`
 /// (true or false; unset, true unless `command` names a locker, as
 /// `has_command` says), `scene` (a path or a name, not empty), `prompt_on`
 /// (`"primary"`, `"pointer"` or a monitor's name), `enter_ms` and `exit_ms`

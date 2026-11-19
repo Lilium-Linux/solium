@@ -12,7 +12,7 @@ them has been taken again since, so read them as orders of magnitude.
 
 Settings are not here. [docs/ricing.md](../docs/ricing.md) is how to
 configure Solium with `~/.config/solium/user.lua`, and the
-[configuration reference](../crates/solium/lua/config.lua) has every setting.
+[configuration reference](../crates/solium-lua/lua/config.lua) has every setting.
 The keys that ship are the
 [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 page, made from what `solium --check` prints.

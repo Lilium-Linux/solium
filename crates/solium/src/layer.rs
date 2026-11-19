@@ -47,7 +47,7 @@ use smithay::{
     wayland::shell::wlr_layer::Layer,
 };
 
-/// `config.layer_shell`, handed over by `sol.layer_shell` (#461).
+/// `config.layer_shell`, handed over by `layer_shell` (#461).
 /// `script::tests::sol_layer_shell_reads_input_below_as_a_flag_or_a_list_of_namespaces`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Settings {

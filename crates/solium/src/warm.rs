@@ -88,7 +88,7 @@ pub(crate) fn parse(tree: &Doc) -> Result<FirstFrame, String> {
     Ok(config)
 }
 
-/// `sol.startup`'s options: `first_frame` read through [`parse`], with a
+/// `startup`'s options: `first_frame` read through [`parse`], with a
 /// number in it that is not finite kept, so `max_ms = 1/0` is refused
 /// rather than read as the default; any other key refused by name, with
 /// the nearest one. `script::tests::sol_startup_reaches_the_compositor`.
@@ -133,7 +133,7 @@ pub(crate) struct Warm {
 }
 
 impl Warm {
-    /// `startup.first_frame`, as `sol.startup` last gave it.
+    /// `startup.first_frame`, as `startup` last gave it.
     /// `tests::hold_and_on_reload_are_obeyed`.
     pub(crate) fn configure(&mut self, config: FirstFrame) {
         self.config = config;

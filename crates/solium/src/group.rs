@@ -13,13 +13,13 @@
 //! transform on it composes with whatever its members are already doing:
 //!
 //! ```lua
-//! sol.group("desk-2", { windows = { 3, 7 }, surfaces = { "wallpaper-2" } })
-//! sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+//! group("desk-2", { windows = { 3, 7 }, surfaces = { "wallpaper-2" } })
+//! present-group("desk-2", { x = -2560 }, { duration = 300 })
 //! ```
 //!
 //! One call, one animation, one target. The wallpaper travels because it is in
 //! the selection, **not because the compositor knows what a wallpaper is** — and
-//! it still does not. `sol.surface` is one primitive doing five jobs and that
+//! it still does not. `surface` is one primitive doing five jobs and that
 //! stays true.
 //!
 //! Composition is the point rather than a detail. A window individually tilted
@@ -278,7 +278,7 @@ impl Selection {
 
 /// Turn the names a script wrote into the selection the compositor holds.
 ///
-/// The one seam between `sol.group`'s strings and [`Member`], and it is a free
+/// The one seam between `group`'s strings and [`Member`], and it is a free
 /// function rather than a method on `Solium` because it needs exactly one thing
 /// from the compositor — the name table — and a test proving the shipped
 /// workspace slide carries its wallpaper has to make the same conversion the
@@ -1100,7 +1100,7 @@ mod desk {
                  require(\"wallpaper\")\n\
                  require(\"workspaces\")\n",
                 here = directory.to_string_lossy(),
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");

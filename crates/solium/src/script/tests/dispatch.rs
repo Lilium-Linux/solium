@@ -1114,7 +1114,7 @@ fn a_reload_keeps_the_focus_model_tiling_was_switched_to() {
     let config = directory.join("init.lua");
     let mut reloaded = scripts;
     reloaded
-        .reload(&config)
+        .reload_from(&config)
         .expect("reloading the test scripts");
     let modes = focus_modes(reloaded.startup().commands);
     let _ = std::fs::remove_dir_all(&directory);
@@ -2379,7 +2379,7 @@ fn an_override_stopped_three_times_is_taken_out_alone() {
 local actions = require("actions")
 runs = 0
 actions.override("windows.close", function() runs = runs + 1; while true do end end)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let acts = |outcome: &Outcome| -> Vec<(String, String)> {
@@ -2429,7 +2429,7 @@ fn an_override_of_nil_gives_its_action_back_to_the_compositor() {
 local actions = require("actions")
 actions.override("windows.close", function() heard = true end)
 actions.override("windows.close", nil)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
@@ -2474,7 +2474,7 @@ local actions = require("actions")
 actions.override("windows.close", function()
 while true do end
 end)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");
@@ -2502,7 +2502,7 @@ local actions = require("actions")
 heard = ""
 actions.override("windows.close", function() heard = heard .. "first;" end)
 actions.override("windows.close", function() heard = heard .. "second;" end)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");

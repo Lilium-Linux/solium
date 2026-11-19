@@ -148,7 +148,7 @@ fn actions_lua_routes_the_vocabulary_and_leaves_the_rest_alone() {
             r#"package.path = {shipped:?} .. "/?.lua"
 local actions = require("actions")
 actions.override("windows.focus", function(data, surface) sol.status("mine " .. data.id .. " " .. surface) end)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let acts = |outcome: &Outcome| -> Vec<(String, String)> {

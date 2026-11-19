@@ -18,6 +18,9 @@ solium-animation = { path = "../animation" }
 solium-effects = { path = "../effects" }
 solium-json = { path = "../json", features = ["lua"] }
 solium-layout = { path = "../layout" }
+# Where the shipped Lua and the user's own are, as every program of Solium's
+# finds them.
+solium-paths = { path = "../paths" }
 solium-wm-protocol = { path = "../wm-protocol" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

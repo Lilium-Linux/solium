@@ -1,5 +1,5 @@
 //! A binding whose key is held, and which asked to run again while it is
-//! (#224): `sol.bind`'s `repeating`.
+//! (#224): `declare`'s `repeating`.
 //!
 //! A key that has a binding is the compositor's, so the client that would
 //! repeat it never sees it, and libinput reports one press however long the

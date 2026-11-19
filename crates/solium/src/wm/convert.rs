@@ -357,7 +357,7 @@ pub(crate) fn refusal(command: &wire::Command) -> Option<String> {
     doc(nodes)
         .and_then(|options| configure(section, &options))
         .err()
-        .map(|why| format!("sol.{section} is refused: {why}"))
+        .map(|why| format!("the `{section}` section is refused: {why}"))
 }
 
 /// A settings section as the commands that apply it, each read as the
@@ -788,7 +788,7 @@ pub(crate) fn resize_edge(
     })
 }
 
-/// The deform `sol.present(id, { deform = <lua> })` carries, for a state
+/// The deform `present(id, { deform = <lua> })` carries, for a state
 /// test to apply as the command would.
 #[cfg(test)]
 pub(crate) fn deform_for_test(lua: &str) -> crate::script::DeformSpec {

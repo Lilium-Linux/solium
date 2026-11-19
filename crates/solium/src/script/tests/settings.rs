@@ -107,7 +107,7 @@ fn the_old_name_for_sol_pane_still_works() {
 /// the fixture, and the assertion would then be about their configuration.
 #[test]
 fn a_user_file_using_the_old_key_still_chooses_a_style() {
-    let Some(own) = Scripts::user_config_dir() else {
+    let Some(own) = solium_paths::user_config_dir() else {
         return;
     };
     if own.join("user.lua").exists() || own.join("config.lua").exists() {
@@ -1159,7 +1159,7 @@ fn sol_layer_shell_reads_input_below_as_a_flag_or_a_list_of_namespaces() {
 /// `~/.config/solium`.
 #[test]
 fn the_shipped_configuration_tells_the_session_and_starts_autostart() {
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
     let directory = std::env::temp_dir().join("solium-script-test-session-shipped");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a temporary directory");
@@ -1206,7 +1206,7 @@ fn the_shipped_configuration_tells_the_session_and_starts_autostart() {
 /// the shipped `init.lua`'s own call.
 #[test]
 fn the_shipped_configuration_asks_for_auto() {
-    let Some(own) = Scripts::user_config_dir() else {
+    let Some(own) = solium_paths::user_config_dir() else {
         return;
     };
     if own.join("user.lua").exists() || own.join("config.lua").exists() {
@@ -1234,7 +1234,7 @@ fn the_shipped_configuration_asks_for_auto() {
             buffers: Some(crate::qml::buffers::Buffers::default()),
         }
     );
-    let shipped = std::fs::read_to_string(crate::assets::lua().join("init.lua"))
+    let shipped = std::fs::read_to_string(solium_lua::shipped().join("init.lua"))
         .expect("the shipped init.lua");
     assert!(
         shipped.contains("sol.qml(config.qml)"),
@@ -1260,7 +1260,7 @@ fn the_shipped_configuration_asks_for_auto() {
 /// `~/.config/solium`, which would otherwise answer first.
 #[test]
 fn the_shipped_configuration_leaves_the_cursor_to_the_environment() {
-    let Some(own) = Scripts::user_config_dir() else {
+    let Some(own) = solium_paths::user_config_dir() else {
         return;
     };
     if own.join("user.lua").exists() || own.join("config.lua").exists() {

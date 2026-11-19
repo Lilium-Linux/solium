@@ -287,7 +287,7 @@ impl Drawn {
 pub(crate) struct Prepared {
     warps: Vec<Warped>,
     overs: Vec<Warped>,
-    /// Panes a refused `sol.present` geometry hides this pass
+    /// Panes a refused `present` geometry hides this pass
     /// (`effects.present.failed = "hide"`): nothing of them is drawn.
     /// `tests::a_refused_present_follows_its_failed_policy`.
     hidden: Vec<crate::pane::PaneId>,
@@ -511,7 +511,7 @@ pub(crate) enum Route {
     /// The flat path, its client rounded where it is if its style says so
     /// (`tests::a_style_with_a_radius_is_drawn_inline`).
     Flat,
-    /// Nothing of it: a refused `sol.present` geometry under
+    /// Nothing of it: a refused `present` geometry under
     /// `failed = "hide"`, no capture job, no warp, no element
     /// (`tests::a_refused_present_follows_its_failed_policy`).
     Hidden,
@@ -859,7 +859,7 @@ fn present_grid(
             .unwrap_or(solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 }),
         geometry.axis,
     );
-    // A `sol.present` geometry measures how far the window is pulled into
+    // A `present` geometry measures how far the window is pulled into
     // its target: a leaving's progress, so `t.direction` is -1.
     let ask = Ask {
         progress: geometry.progress,
@@ -3866,7 +3866,7 @@ fn t2_places(
 pub(crate) enum Measured {
     /// Where the walk draws a pane part away from its rest without a mesh,
     /// and the zoom its picture is drawn at: through a glide, a drag, an
-    /// open, a `sol.present` rectangle.
+    /// open, a `present` rectangle.
     Drawn(Rectangle<f64, Logical>, f64),
     /// Where it rests ([`part_rect`], from `pane_outer`), today's place: a
     /// part that is not a pane's, a pane drawn at rest, a warped pane's
@@ -5718,7 +5718,7 @@ pub(crate) fn elements(
     // bound is met even by a scene that does nothing.
     // `tests::the_lock_s_exit_is_drawn_over_the_session_and_under_the_pointer`.
     //
-    // The same over a peek (`sol.lock_peek`): the scene pulled down over the
+    // The same over a peek (`lock-peek`): the scene pulled down over the
     // desktop by the configuration's own gesture, while the session is
     // unlocked and its input the session's. Frames are asked for as the
     // scene animates and as the peek moves, not every frame, so a peek left
@@ -7658,7 +7658,7 @@ fn flat_pane(
                 // taken off, so a client with client-side shadows (its window
                 // geometry has a non-zero offset) had its picture shifted away
                 // from its frame in every captured draw: warps, genies, close
-                // fades (`pane_job`), and tilted `sol.present` presentations.
+                // fades (`pane_job`), and tilted `present` presentations.
                 // The same `window_surface_origin` the flat path (`elements`)
                 // already used, so the two cannot drift apart again.
                 // `state::tests::window_surface_origin_matches_a_csd_clients_shadow_offset`.

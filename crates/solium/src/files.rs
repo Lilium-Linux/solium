@@ -1,12 +1,12 @@
-//! Files from Lua without blocking the compositor (#473): `sol.read`,
-//! `sol.write`, `sol.watch` and `sol.store`.
+//! Files for the window manager without blocking the compositor (#473): `file-read`,
+//! `file-write`, `watch` and `store`.
 //!
 //! The configuration runs on the compositor's own thread, so a read that
 //! waits on a slow disk would stall every window. Here a read or a write
 //! runs on a thread of its own, and what it came to is picked up in
 //! [`settle`], once each time round the event loop, as `runs.rs` reads its
 //! children: both loops wake at least every 16 ms, so a result waits no
-//! longer than that to reach Lua.
+//! longer than that to reach the window manager.
 //!
 //! - **A read** goes to the end of the file rather than trusting its size,
 //!   which `/proc` and `/sys` report as 0, and stops at `files.max_read`.
@@ -16,14 +16,15 @@
 //!   were asked for: only one runs at a time, and the next waits for it.
 //! - **A watch** is on the file's directory, through one non-blocking
 //!   inotify instance read in [`settle`], so a file replaced by a rename,
-//!   as editors and `sol.write` replace one, is still followed, and one that
+//!   as editors and `file-write` replace one, is still followed, and one that
 //!   does not exist yet is seen when it appears.
 //! - **A store** is a table the configuration keeps, loaded from
 //!   `$XDG_STATE_HOME/solium/state/<name>.json` when it is first asked for,
 //!   and written back through the same atomic write at most once a second
 //!   when it changed, before a reload, and when the compositor stops.
 //!
-//! The Lua side, which keeps each callback under its id, is in `script.rs`.
+//! The window manager names each read, write and watch by an id of its own,
+//! and is told each one's end by it.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -229,7 +230,7 @@ pub(crate) enum Heard {
     WatchEnded { id: u64 },
 }
 
-/// `sol.read`: read `path`, up to `max` bytes, and tell read `id`.
+/// `file-read`: read `path`, up to `max` bytes, and tell read `id`.
 #[derive(Clone, Debug)]
 pub(crate) struct ReadRequest {
     pub(crate) id: u64,
@@ -237,7 +238,7 @@ pub(crate) struct ReadRequest {
     pub(crate) max: usize,
 }
 
-/// `sol.write`: write `data` to `path`, and tell write `id` when `report`.
+/// `file-write`: write `data` to `path`, and tell write `id` when `report`.
 #[derive(Clone, Debug)]
 pub(crate) struct WriteRequest {
     pub(crate) id: u64,
@@ -251,7 +252,7 @@ pub(crate) struct WriteRequest {
 struct Job {
     path: PathBuf,
     data: Vec<u8>,
-    /// Who is told: a `sol.write`'s id and the configuration it came from,
+    /// Who is told: a `file-write`'s id and the configuration it came from,
     /// or the store it saves.
     by: By,
 }
@@ -275,7 +276,7 @@ enum Queued {
 
 #[derive(Clone, Debug)]
 enum By {
-    /// A `sol.write`, told when `report`.
+    /// A `file-write`, told when `report`.
     Lua {
         id: u64,
         generation: u64,
@@ -301,7 +302,7 @@ enum Finished {
     },
 }
 
-/// One file `sol.watch` follows.
+/// One file `watch` follows.
 #[derive(Debug)]
 struct Watch {
     directory: inotify::WatchDescriptor,
@@ -458,7 +459,7 @@ impl Files {
         }
     }
 
-    /// Queue a `sol.write`.
+    /// Queue a `file-write`.
     pub(crate) fn write(&mut self, request: WriteRequest) {
         let by = By::Lua {
             id: request.id,
@@ -490,7 +491,7 @@ impl Files {
             .name("solium-write".to_owned())
             .spawn(move || {
                 // A store's directory is the compositor's to make; a
-                // `sol.write`'s must already be there.
+                // `file-write`'s must already be there.
                 let made = match (&by, path.parent()) {
                     (By::Store { .. }, Some(directory)) => fs::create_dir_all(directory),
                     _ => Ok(()),
@@ -526,7 +527,7 @@ impl Files {
                 report,
             } => {
                 if let Some(err) = &error {
-                    tracing::warn!(path = %path.display(), err, "sol.write failed");
+                    tracing::warn!(path = %path.display(), err, "file-write failed");
                 }
                 if report && generation == self.generation {
                     self.heard.push(Heard::Wrote { id, error });
@@ -561,7 +562,7 @@ impl Files {
     /// Follow the file at `path`, whose directory exists, for watch `id`.
     pub(crate) fn watch(&mut self, id: u64, path: &Path, shown: String) {
         let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
-            tracing::warn!(path = %path.display(), "sol.watch: nothing to watch there");
+            tracing::warn!(path = %path.display(), "watch: nothing to watch there");
             return;
         };
         if self.inotify.is_none() {
@@ -579,7 +580,7 @@ impl Files {
         let directory_watch = match inotify.watches().add(directory, MASK) {
             Ok(watch) => watch,
             Err(err) => {
-                tracing::warn!(directory = %directory.display(), %err, "sol.watch: cannot watch the directory");
+                tracing::warn!(directory = %directory.display(), %err, "watch: cannot watch the directory");
                 return;
             }
         };
@@ -1146,7 +1147,7 @@ pub(crate) mod tests {
         fs::write(&path, "1").expect("writing");
         let heard = pump_until(&mut files, |heard| heard.len() >= 2);
         assert_eq!(kinds(&heard), [Kind::Created, Kind::Changed]);
-        // Replaced by a rename, as `sol.write` and editors replace a file.
+        // Replaced by a rename, as `file-write` and editors replace a file.
         write_atomic(&path, b"2").expect("replacing");
         let heard = pump_until(&mut files, |heard| !heard.is_empty());
         assert_eq!(kinds(&heard), [Kind::Changed]);

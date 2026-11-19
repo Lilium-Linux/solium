@@ -14,9 +14,9 @@
 //!   of when the keyboard moves anywhere else: a key that focuses another
 //!   window or another monitor, a click elsewhere, Alt+Tab. That is the rule
 //!   the keyboard shortcuts inhibitor already follows (`shortcuts_inhibit`).
-//! - **`sol.release_pointer` takes it back** from the window that holds it,
+//! - **`release-pointer` takes it back** from the window that holds it,
 //!   which then holds it again only once it is pressed on. The shipped
-//!   `super+Escape` calls it, beside `sol.take_shortcuts_back`, so one key
+//!   `super+Escape` calls it, beside `take-shortcuts-back`, so one key
 //!   gets out of a game and out of a virtual machine alike.
 //! - **An X11 window also loses the keyboard to it.** An X client's own grab
 //!   is the X server's, and no request lets another client end it; what the
@@ -40,7 +40,7 @@ fn root_of(surface: &WlSurface) -> WlSurface {
 }
 
 /// Whether a surface whose root is `root` may hold the pointer: the keyboard
-/// is on that root (`keyboard`, also a root), and `sol.release_pointer` has
+/// is on that root (`keyboard`, also a root), and `release-pointer` has
 /// not let go of it since it was last pressed on (`released`).
 /// `tests::only_the_surface_with_the_keyboard_and_not_released_may_hold_the_pointer`.
 pub(crate) fn may_hold<S: PartialEq>(root: &S, keyboard: Option<&S>, released: Option<&S>) -> bool {
@@ -101,7 +101,7 @@ impl Solium {
         }
     }
 
-    /// `sol.release_pointer`: take the pointer back from the window holding
+    /// `release-pointer`: take the pointer back from the window holding
     /// it, until that window is pressed on again; and the keyboard too from
     /// an X11 one, so the X11 client lets go of its own grabs (#427; see the
     /// module header).
@@ -139,7 +139,7 @@ impl Solium {
         );
     }
 
-    /// A press on `surface`: a window `sol.release_pointer` let go of may
+    /// A press on `surface`: a window `release-pointer` let go of may
     /// hold the pointer again.
     pub(crate) fn pressed_on(&mut self, surface: &WlSurface) {
         if self.pointer_released.as_ref() == Some(&root_of(surface)) {

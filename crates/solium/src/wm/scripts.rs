@@ -30,7 +30,7 @@
 //! session's time.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -41,7 +41,7 @@ use crate::script::*;
 use crate::wm::events::Answers;
 use crate::wm::link::Link;
 use crate::wm::stores::StoreReads;
-use crate::wm::{Chosen, Settings, Wait};
+use crate::wm::{Chosen, Settings, Wait, Which};
 use solium_wm_protocol::Ask;
 
 /// A batch the window manager has not answered yet.
@@ -170,10 +170,12 @@ pub(crate) struct Scripts {
     /// The connection failed, or the window manager stopped answering,
     /// and why: nothing more is sent.
     down: Option<String>,
-    /// The configuration it was started on, to start it on again.
-    config: std::path::PathBuf,
-    /// It was started to read nothing of the user's own.
-    shipped_only: bool,
+    /// Which window manager it is, to start it again.
+    which: Which,
+    /// Where its configuration is, as it said in `hello-answer`: the file a
+    /// problem with what it asked for names, and whose directory a change
+    /// under reloads it (`autoreload`).
+    source: Option<PathBuf>,
     /// What `wm.toml` said when it was started: the command it is, unless
     /// it is the shipped one, and the weight of its scope.
     chosen: Chosen,
@@ -221,37 +223,27 @@ pub(crate) type Keeps = Vec<(String, wire::Doc)>;
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Scripts {
-    /// Load the configuration, cold.
-    pub(crate) fn load(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::default(), false, Vec::new())
+    /// Start the window manager `which` says, cold.
+    pub(crate) fn load(which: impl Into<Which>) -> Result<Self> {
+        Self::load_reading(which.into(), StoreReads::default(), Vec::new())
     }
 
-    /// Start a window manager on `config` in place of one that stopped,
-    /// handing it what that one kept. With `shipped_only` it reads nothing
-    /// of the user's own: [`Self::shipped_config`], in place of a
-    /// configuration that keeps stopping.
-    pub(crate) fn start_again(config: &Path, shipped_only: bool, keeps: Keeps) -> Result<Self> {
-        Self::load_reading(config, StoreReads::default(), shipped_only, keeps)
+    /// Start the window manager `which` says in place of one that stopped,
+    /// handing it what that one kept. Started safe ([`Which::Safe`]) it is
+    /// the shipped one, reading nothing of the user's own.
+    pub(crate) fn start_again(which: Which, keeps: Keeps) -> Result<Self> {
+        Self::load_reading(which, StoreReads::default(), keeps)
     }
 
-    /// The configuration that ships.
-    pub(crate) fn shipped_config() -> std::path::PathBuf {
-        crate::assets::lua().join("init.lua")
+    /// Start the window manager for `solium --check`: as [`Self::load`]
+    /// does, except that nothing of the user's is changed, so a store's
+    /// broken file stays where it is and is said in [`Self::check_notes`]
+    /// (#473).
+    pub(crate) fn load_for_check(which: impl Into<Which>) -> Result<Self> {
+        Self::load_reading(which.into(), StoreReads::checking(), Vec::new())
     }
 
-    /// Load the configuration for `solium --check`: as [`Self::load`] does,
-    /// except that nothing of the user's is changed, so a store's broken
-    /// file stays where it is and is said in [`Self::check_notes`] (#473).
-    pub(crate) fn load_for_check(config: &Path) -> Result<Self> {
-        Self::load_reading(config, StoreReads::checking(), false, Vec::new())
-    }
-
-    fn load_reading(
-        config: &Path,
-        stores: StoreReads,
-        shipped_only: bool,
-        keeps: Keeps,
-    ) -> Result<Self> {
+    fn load_reading(which: Which, stores: StoreReads, keeps: Keeps) -> Result<Self> {
         let stores = Rc::new(stores);
         let answers = Answers {
             snapshot: None,
@@ -262,8 +254,8 @@ impl Scripts {
         for line in &said {
             tracing::warn!(file = ?Chosen::file(), "{line}");
         }
-        let (link, commands) = Link::start(config, shipped_only, &chosen, keeps, &answers, within)?;
-        let mut scripts = Self::over(link, commands, stores, config, shipped_only);
+        let (link, answer) = Link::start(&which, &chosen, keeps, &answers, within)?;
+        let mut scripts = Self::over(link, answer, stores, which);
         scripts.chosen = chosen;
         scripts.chosen_said = said;
         Ok(scripts)
@@ -280,29 +272,22 @@ impl Scripts {
             snapshot: None,
             stores: Rc::clone(&stores),
         };
-        let (link, commands) = Link::played(run, &answers)?;
-        Ok(Self::over(
-            link,
-            commands,
-            stores,
-            Path::new("/a/window/manager/of/its/own"),
-            false,
-        ))
+        let (link, answer) = Link::played(run, &answers)?;
+        Ok(Self::over(link, answer, stores, Which::Chosen))
     }
 
-    /// The window manager at the other end of `link`, started on `config`,
-    /// which answered `hello` with `commands`.
+    /// The window manager `which` at the other end of `link`, which
+    /// answered `hello` with `answer`.
     pub(crate) fn over(
         link: Link,
-        commands: Vec<wire::Command>,
+        answer: wire::HelloAnswer,
         stores: Rc<StoreReads>,
-        config: &Path,
-        shipped_only: bool,
+        which: Which,
     ) -> Self {
         let loaded = wire::Answer {
             serial: 0,
             handled: false,
-            commands,
+            commands: answer.commands,
             motion: None,
             decision: None,
         };
@@ -320,8 +305,8 @@ impl Scripts {
             #[cfg(test)]
             patient: true,
             down: None,
-            config: config.to_owned(),
-            shipped_only,
+            which,
+            source: answer.source.map(PathBuf::from),
             chosen: Chosen::default(),
             chosen_said: Vec::new(),
             took: Took::default(),
@@ -714,14 +699,19 @@ impl Scripts {
         self.down.as_deref()
     }
 
-    /// The configuration it was started on.
-    pub(crate) fn config(&self) -> &Path {
-        &self.config
+    /// Which window manager it is.
+    pub(crate) fn which(&self) -> &Which {
+        &self.which
     }
 
-    /// Whether it was started to read nothing of the user's own.
-    pub(crate) fn shipped_only(&self) -> bool {
-        self.shipped_only
+    /// Where its configuration is, as it said, when it said.
+    pub(crate) fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
+    /// Whether it was started safe, reading nothing of the user's own.
+    pub(crate) fn safe(&self) -> bool {
+        self.which.safe()
     }
 
     /// What `wm.toml` said when this window manager was started.
@@ -739,7 +729,7 @@ impl Scripts {
     /// so that a reload is a new window manager and not this one loading
     /// again.
     pub(crate) fn chosen_another(&self) -> bool {
-        !self.shipped_only && Chosen::read().0.command != self.chosen.command
+        !self.safe() && Chosen::read().0.command != self.chosen.command
     }
 
     /// The window manager's process, when it is one.
@@ -748,34 +738,32 @@ impl Scripts {
     }
 
     /// The file that says which window manager this is, for a problem
-    /// about it to name: `wm.toml` when that named its program, and the
-    /// configuration it was started on otherwise.
-    pub(crate) fn named_in(&self) -> std::path::PathBuf {
-        Self::named_by(&self.chosen, self.shipped_only, &self.config)
+    /// about it to name: `wm.toml` when that named its program, else where
+    /// the window manager said its configuration is, else `wm.toml`'s
+    /// place, which is where another is chosen.
+    pub(crate) fn named_in(&self) -> PathBuf {
+        Self::named_by(&self.chosen, self.safe(), self.source())
     }
 
-    /// [`Self::named_in`], of a window manager started on `config` as
-    /// `chosen` says.
-    pub(crate) fn named_by(
-        chosen: &Chosen,
-        shipped_only: bool,
-        config: &Path,
-    ) -> std::path::PathBuf {
-        match (&chosen.command, Chosen::file()) {
-            (Some(_), Some(file)) if !shipped_only => file,
-            _ => config.to_owned(),
+    /// [`Self::named_in`], of a window manager `chosen` names, started
+    /// `safe` or not, whose configuration is at `source` when it said.
+    pub(crate) fn named_by(chosen: &Chosen, safe: bool, source: Option<&Path>) -> PathBuf {
+        let wm_toml = Chosen::file().unwrap_or_else(|| PathBuf::from("wm.toml"));
+        match (&chosen.command, source) {
+            (Some(_), _) if !safe => wm_toml,
+            (_, Some(source)) => source.to_owned(),
+            (_, None) => wm_toml,
         }
     }
 
     /// Load the configuration again, the window manager carrying what it
     /// kept; [`Self::startup`] then hands over what the new one asked for.
     /// One that fails to load leaves everything as it was.
-    pub(crate) fn reload(&mut self, config: &Path) -> Result<()> {
+    pub(crate) fn reload(&mut self) -> Result<()> {
         if self.down() {
             bail!("the window manager has stopped");
         }
-        let path = config.to_string_lossy().into_owned();
-        self.link.send(&Message::Reload(path))?;
+        self.link.send(&Message::Reload)?;
         let within = {
             #[cfg(test)]
             {
@@ -816,16 +804,6 @@ impl Scripts {
     /// the one started in its place.
     pub(crate) fn take_keeps(&mut self) -> Keeps {
         std::mem::take(&mut self.keeps).into_iter().collect()
-    }
-
-    /// Where the configuration is. See [`crate::wm::paths::config_path`].
-    pub(crate) fn config_path() -> std::path::PathBuf {
-        crate::wm::paths::config_path(&crate::assets::lua())
-    }
-
-    /// Where a user's own scripts live, whether or not they have any.
-    pub(crate) fn user_config_dir() -> Option<std::path::PathBuf> {
-        crate::wm::paths::user_config_dir()
     }
 
     /// The window manager's stores, as it would save them, each as its
@@ -1066,7 +1044,7 @@ impl Scripts {
     }
 
     /// The effect rules the configuration handed over as it loaded, the last
-    /// `sol.effects` winning, read without taking them, so `--check` sees
+    /// `effects` winning, read without taking them, so `--check` sees
     /// them and [`Self::startup`] still hands them over.
     /// `check::tests::the_effects_a_rule_names_are_checked`.
     pub(crate) fn effects_at_load(
@@ -1077,7 +1055,7 @@ impl Scripts {
     }
 
     /// The engine's own keys the configuration handed over as it loaded,
-    /// the last `sol.effects` winning, as [`Self::effects_at_load`] reads
+    /// the last `effects` winning, as [`Self::effects_at_load`] reads
     /// its rules: `--check` judges them as the session would.
     /// `check::tests::a_refused_effects_key_fails_the_check`.
     pub(crate) fn effect_settings_at_load(
@@ -1087,7 +1065,7 @@ impl Scripts {
             .map(|options| crate::script::settings::effects::parse(&options, true).1)
     }
 
-    /// What the configuration said through `sol.qml` as it loaded, if
+    /// What the configuration said through `qml` as it loaded, if
     /// anything: read before any scene starts Qt.
     pub(crate) fn qml(&self) -> crate::qml::renderer::Configured {
         self.loaded_section("qml")
@@ -1095,7 +1073,7 @@ impl Scripts {
             .unwrap_or_default()
     }
 
-    /// What the configuration said through `sol.session` as it loaded: the
+    /// What the configuration said through `session` as it loaded: the
     /// default, both on, when it said nothing.
     pub(crate) fn session(&self) -> crate::session::Settings {
         self.loaded_section("session")

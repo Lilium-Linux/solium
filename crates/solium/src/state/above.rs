@@ -1,4 +1,4 @@
-//! A window kept above the others (#424): `sol.keep_above`, and the one place
+//! A window kept above the others (#424): `keep-above`, and the one place
 //! the stack is put in order for it.
 //!
 //! The stack is the space's order, which `sync_panes` hands to the panes and

@@ -596,8 +596,8 @@ fn a_window_manager_that_will_not_start_gives_way_to_the_shipped_configuration()
 
     std::fs::write(&entry, r#"sol.bind("super+t", function() end)"#).expect("writing");
     let scripts = state.first_scripts(&entry).expect("the one asked for");
-    assert!(!scripts.shipped_only());
-    assert_eq!(scripts.config(), entry);
+    assert!(!scripts.safe());
+    assert_eq!(scripts.source(), Some(entry.as_path()));
     assert_eq!(said(&state), Vec::<String>::new());
     drop(scripts);
 
@@ -605,8 +605,11 @@ fn a_window_manager_that_will_not_start_gives_way_to_the_shipped_configuration()
     let scripts = state
         .first_scripts(&entry)
         .expect("the shipped configuration in its place");
-    assert!(scripts.shipped_only());
-    assert_eq!(scripts.config(), crate::script::Scripts::shipped_config());
+    assert!(scripts.safe());
+    assert_eq!(
+        scripts.source(),
+        Some(solium_lua::shipped().join("init.lua").as_path())
+    );
     let said = said(&state);
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(

@@ -14,10 +14,11 @@
 //! **What is different, and why.**
 //!
 //!  * *Several roots, not one.* The desktop is a single directory; a
-//!    configuration is the user's own `~/.config/solium` (Lua, pane styles,
-//!    loading scenes, a wallpaper, a shell) plus, when `SOLIUM_LUA_INIT`
-//!    names somewhere else, that file's own directory too. See
-//!    [`resolve_roots`].
+//!    configuration is the user's own `~/.config/solium` (pane styles,
+//!    loading scenes, a wallpaper, a shell, and the window manager's own
+//!    files when it keeps them there) plus, when the window manager said its
+//!    configuration is somewhere else (`hello-answer`'s `source`), that
+//!    file's own directory too. See [`resolve_roots`].
 //!  * *The officially supported overrides are roots too, wherever they
 //!    point.* `SOLIUM_SHELL_SCENE`, `SOLIUM_PANE`, `SOLIUM_QML_TITLEBAR` and
 //!    `SOLIUM_LOADING` are how a shell, a pane style or titlebar, or a
@@ -52,7 +53,7 @@ use std::{
 
 use smithay::reexports::rustix::event::epoll;
 
-/// `config.reload`, handed over by `init.lua` through `sol.auto_reload`.
+/// `config.reload`, handed over by `init.lua` through `auto_reload`.
 ///
 /// `Copy` and compared whole (`state/commands.rs`'s `configure_autoreload`
 /// logs only when it actually changed), the same shape `idle::Settings`
@@ -180,31 +181,31 @@ pub(crate) fn decide_timer_outcome(
 
 /// The pure core of [`watch_roots`]: which directories to watch, given the
 /// user's own configuration directory (`None`, or `Some` only when it is
-/// really a directory on this machine) and where the configuration actually
-/// in charge lives.
+/// really a directory on this machine) and where the window manager said
+/// its configuration is, when it said.
 ///
-/// Parameterised rather than reading `Scripts::user_config_dir` and
-/// `Scripts::config_path` itself, the same split `folder::resolve_desktop_dir`
+/// Parameterised rather than reading the user's directory and the window
+/// manager's word itself, the same split `folder::resolve_desktop_dir`
 /// makes against `folder::desktop_dir` and for the same reason: a test drives
 /// it with real temporary directories instead of mutating this process's own
 /// `$HOME` and `$XDG_CONFIG_HOME`.
 ///
-/// **No user directory at all watches nothing** -- not the shipped
-/// `lua/` under wherever this build's assets live, which is a system
-/// directory, possibly unwritable, and not the user's to have reloaded
-/// behind them. `tests::no_user_directory_watches_nothing`.
+/// **No user directory at all watches nothing** -- not even the window
+/// manager's own directory, which with no user directory is a shipped one,
+/// a system directory, possibly unwritable, and not the user's to have
+/// reloaded behind them. `tests::no_user_directory_watches_nothing`.
 ///
 /// **A user directory is watched even running the shipped entry point.**
 /// Someone who has only dropped a pane style into
 /// `~/.config/solium/qml/panes/` and never written an `init.lua` of their own
-/// still gets it reloaded live -- the directory, not merely the files
-/// `package.path` would `require`, is what issue #223 asked for.
+/// still gets it reloaded live -- the directory, not merely the files the
+/// window manager reads, is what issue #223 asked for.
 /// `tests::a_user_directory_is_watched_even_running_the_shipped_entry_point`.
 ///
-/// **The active configuration's own directory is added when it differs.**
-/// `SOLIUM_LUA_INIT` can point anywhere, and whatever it loaded through
-/// `require` resolves against that directory first
-/// (`Scripts::load_carrying`'s own `package.path` order) -- so that directory
+/// **The window manager's own directory is added when it differs.** Its
+/// configuration can be anywhere (the Lua one's `SOLIUM_LUA_INIT`, a
+/// window manager of the user's own under `~/.config/my-wm`), and what it
+/// pulls in beside that file is in the same directory -- so that directory
 /// is watched too, unless it already *is* the user's.
 /// `tests::the_configs_own_directory_is_added_when_it_differs`,
 /// `tests::the_configs_own_directory_is_not_duplicated_when_it_is_the_users`.
@@ -216,11 +217,15 @@ pub(crate) fn decide_timer_outcome(
 /// to look, and the whole point of the override is that nothing else need be
 /// set up first. `tests::overrides_are_watched_even_with_no_user_directory`,
 /// `tests::overrides_already_covered_by_a_root_are_not_duplicated`.
-fn resolve_roots(user_dir: Option<&Path>, config: &Path, overrides: &[PathBuf]) -> Vec<PathBuf> {
+fn resolve_roots(
+    user_dir: Option<&Path>,
+    source: Option<&Path>,
+    overrides: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(user_dir) = user_dir.filter(|dir| dir.is_dir()) {
         roots.push(user_dir.to_path_buf());
-        if let Some(parent) = config.parent()
+        if let Some(parent) = source.and_then(Path::parent)
             && parent != user_dir
             && parent.is_dir()
         {
@@ -235,15 +240,15 @@ fn resolve_roots(user_dir: Option<&Path>, config: &Path, overrides: &[PathBuf]) 
     roots
 }
 
-/// [`resolve_roots`], against this process's real configuration -- called
-/// from `state/commands.rs`'s `configure_autoreload`, itself reached from
-/// `Command::AutoReload` on every start and every reload, so a directory
-/// created since the last one (someone just wrote their first `user.lua`) is
-/// picked up without restarting the session.
-pub(crate) fn watch_roots() -> Vec<PathBuf> {
+/// [`resolve_roots`], against this process's real configuration and the
+/// running window manager's `source` -- called from `state/commands.rs`'s
+/// `configure_autoreload`, itself reached from `Command::AutoReload` on
+/// every start and every reload, so a directory created since the last one
+/// is picked up without restarting the session.
+pub(crate) fn watch_roots(source: Option<&Path>) -> Vec<PathBuf> {
     resolve_roots(
-        crate::script::Scripts::user_config_dir().as_deref(),
-        &crate::script::Scripts::config_path(),
+        solium_paths::user_config_dir().as_deref(),
+        source,
         &override_roots(),
     )
 }
@@ -546,7 +551,7 @@ mod tests {
         assert_eq!(
             resolve_roots(
                 None,
-                Path::new("/opt/solium/share/solium/lua/init.lua"),
+                Some(Path::new("/opt/solium/share/solium/lua/init.lua")),
                 &[]
             ),
             Vec::<PathBuf>::new()
@@ -558,7 +563,7 @@ mod tests {
         let user_dir = tmp("user-dir-shipped-entry");
         let roots = resolve_roots(
             Some(&user_dir),
-            Path::new("/opt/solium/share/solium/lua/init.lua"),
+            Some(Path::new("/opt/solium/share/solium/lua/init.lua")),
             &[],
         );
         assert_eq!(roots, vec![user_dir.clone()]);
@@ -571,7 +576,7 @@ mod tests {
         // Stands in for `SOLIUM_LUA_INIT` naming a file outside the user's
         // own directory.
         let config_dir = tmp("config-dir-plus-config");
-        let roots = resolve_roots(Some(&user_dir), &config_dir.join("init.lua"), &[]);
+        let roots = resolve_roots(Some(&user_dir), Some(&config_dir.join("init.lua")), &[]);
         assert_eq!(
             roots.len(),
             2,
@@ -586,7 +591,7 @@ mod tests {
     #[test]
     fn the_configs_own_directory_is_not_duplicated_when_it_is_the_users() {
         let user_dir = tmp("user-dir-dup");
-        let roots = resolve_roots(Some(&user_dir), &user_dir.join("init.lua"), &[]);
+        let roots = resolve_roots(Some(&user_dir), Some(&user_dir.join("init.lua")), &[]);
         assert_eq!(roots, vec![user_dir.clone()]);
         let _ = fs::remove_dir_all(&user_dir);
     }
@@ -599,7 +604,7 @@ mod tests {
         let shell_dir = tmp("override-no-user-dir");
         let roots = resolve_roots(
             None,
-            Path::new("/opt/solium/share/solium/lua/init.lua"),
+            Some(Path::new("/opt/solium/share/solium/lua/init.lua")),
             std::slice::from_ref(&shell_dir),
         );
         assert_eq!(
@@ -615,7 +620,7 @@ mod tests {
         let user_dir = tmp("override-already-covered");
         let roots = resolve_roots(
             Some(&user_dir),
-            &user_dir.join("init.lua"),
+            Some(&user_dir.join("init.lua")),
             std::slice::from_ref(&user_dir),
         );
         assert_eq!(

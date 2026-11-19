@@ -29,7 +29,7 @@ use super::{Curve, Scripts, normalise_combo};
 /// because a test's working directory is the workspace root and this file
 /// should not have to know that.
 fn scripts() -> Vec<(String, String)> {
-    let directory = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/lua"));
+    let directory = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"));
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -248,60 +248,6 @@ fn every_axis_named_is_one_the_engine_has() {
             "{file}:{line} asks for axis {name:?}, which Axis::from_name cannot read. \
              Names: \"auto\" and {:?}",
             solium_effects::Axis::all().map(|(known, _)| known)
-        );
-    }
-}
-
-/// **Every event a shipped script listens for is one the compositor sends.**
-///
-/// Worse than an unknown easing, because there is no warning at all:
-/// `sol.on` puts the handler in a table under whatever name it was given,
-/// and a name nothing dispatches is a handler that is simply never called.
-/// A layout that misspells `"monitors"` does not fail -- it stops
-/// rearranging when a screen is unplugged, which reads as a compositor bug.
-///
-/// The vocabulary is read out of `script/` itself rather than listed
-/// here, because a list is a second copy and two copies of a vocabulary
-/// drifting apart is the defect this whole module exists for.
-#[test]
-fn every_event_listened_for_is_one_that_is_sent() {
-    // The production half of the module, each file cut at its first `#[cfg(test)]`
-    // because everything below it -- including this test -- talks *about*
-    // `call_listeners` and would otherwise be counted as calling it.
-    let production = super::source::production();
-    // Decision hooks (`sol.on("notification")`) are dispatched by
-    // `call_deciders`, and are events like any other.
-    let dispatched: Vec<String> = named(production, "call_listeners(lua,")
-        .into_iter()
-        .chain(named(production, "call_deciders(lua,"))
-        .map(|(_, name)| name)
-        .collect();
-
-    // The scrape has to see every dispatch there is, or it narrows the
-    // vocabulary in silence and this test starts agreeing with anything.
-    // One `call_listeners` is the definition; the rest are calls.
-    let calls = production.matches("call_listeners").count() - 1
-        + production
-            .matches("call_deciders")
-            .count()
-            .saturating_sub(1);
-    assert_eq!(
-        dispatched.len(),
-        calls,
-        "{calls} dispatches in script/ but only {} are `call_listeners(lua, \"name\")`; \
-         one of them is written some other way and this check cannot see it",
-        dispatched.len()
-    );
-    assert!(
-        calls >= 8,
-        "only {calls} dispatches found; the scan is broken"
-    );
-
-    for (file, line, event) in everywhere("sol.on(") {
-        assert!(
-            dispatched.contains(&event),
-            "{file}:{line} listens for {event:?}, which nothing dispatches. \
-             Events: {dispatched:?}"
         );
     }
 }
@@ -712,7 +658,7 @@ fn every_height_bind_is_a_key_that_arrives() {
 /// until it is added on purpose.
 #[test]
 fn the_held_volume_keys_repeat_and_only_the_laptop_keys_fire_at_the_lock() {
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
     let directory = std::env::temp_dir().join("solium-shipped-binding-options");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("creating the entry directory");
@@ -768,7 +714,7 @@ fn the_held_volume_keys_repeat_and_only_the_laptop_keys_fire_at_the_lock() {
 /// `playerctl` only when it follows no players** (#379).
 #[test]
 fn the_shipped_media_keys_act_on_the_active_player_and_fall_back_to_playerctl() {
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
     let directory = std::env::temp_dir().join("solium-shipped-media-keys");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("creating the entry directory");
@@ -848,7 +794,7 @@ fn the_shipped_media_keys_act_on_the_active_player_and_fall_back_to_playerctl() 
 /// layout harness below documents.
 #[test]
 fn every_shipped_binding_is_reachable_on_us() {
-    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
     let directory = std::env::temp_dir().join("solium-reachable");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("creating the entry directory");

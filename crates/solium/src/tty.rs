@@ -356,8 +356,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     )?);
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
-    let config = Scripts::config_path();
-    let scripts = solium.first_scripts(&config);
+    let scripts = solium.first_scripts(crate::wm::Which::Chosen);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
@@ -381,7 +380,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         solium.session.x11(None);
     }
     // Before the scripts, same as the session: `lock.before_sleep`'s default
-    // (on) takes the inhibitor at once, and a `sol.lock` in the first dispatch
+    // (on) takes the inhibitor at once, and a `lock` in the first dispatch
     // (`start_scripts`, next) reconfigures it through `Command::Lock` like any
     // reload. `SOLIUM_LOGIND_BUS` names a bus to hear logind on instead of the
     // system bus, the same override `SOLIUM_SESSION_BUS` is for the session.
@@ -917,7 +916,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
             crate::logind::settle(&mut state.solium);
             crate::services::settle(&mut state.solium);
-            // What `sol.run{}`'s children said, and the timers due, on the
+            // What `run{}`'s children said, and the timers due, on the
             // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
             crate::runs::settle(&mut state.solium);
             crate::timers::settle(&mut state.solium);
@@ -2716,7 +2715,7 @@ fn handle_input(
 }
 
 /// What a device got, for the log -- the issue's own "log what each device
-/// got", and the only thing that stands in for `sol.input_devices()` today:
+/// got", and the only thing that stands in for `input_devices` today:
 /// a device's settings are told to the log, not yet to Lua (#157's own
 /// deliberate cut, see the PR this lands in).
 fn log_device(info: &crate::input::devices::DeviceInfo, report: &crate::input::devices::Report) {

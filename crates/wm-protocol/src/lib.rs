@@ -136,6 +136,7 @@ mod tests {
             Message::Hello(Hello {
                 version: crate::VERSION.to_owned(),
                 debug: true,
+                safe: true,
                 keeps: vec![Kept {
                     name: "workspaces".to_owned(),
                     document: vec![

@@ -1,29 +1,28 @@
-//! The Lua scripting surface.
+//! What a window manager asks of the compositor, as the compositor's own
+//! types: its commands, its settings sections, and the documents they read.
 //!
-//! Modes — overview, the app switcher, peek, the icon→window genie — are
-//! scripts over the presentation transform, not features with their own
-//! renderers. This module is the whole boundary between them and the
-//! compositor, and it is deliberately narrow: a script enumerates windows,
-//! sets targets, and binds triggers. **Nothing here mentions Wayland.** A mode
-//! that had to know a window was a `wl_surface` would be a mode that could not
-//! be written by anyone but us.
+//! Modes — overview, the app switcher, peek, the icon→window genie — are a
+//! window manager's use of the presentation transform, not features with
+//! their own renderers. This module is the whole boundary between them and
+//! the compositor, and it is deliberately narrow: a window manager is told
+//! the windows, sets targets, and binds triggers. **Nothing here mentions
+//! Wayland.** A mode that had to know a window was a `wl_surface` would be a
+//! mode that could not be written by anyone but us.
 //!
 //! ## How a call works
 //!
-//! Scripts never hold compositor state. Each dispatch is:
+//! A window manager never holds compositor state. Each event is:
 //!
-//! 1. Rust builds a [`Snapshot`] — windows, work area, cursor — and hands it to
-//!    Lua as app data.
-//! 2. The handler runs. Reads come from the snapshot; writes are pushed onto a
-//!    queue as [`Command`]s.
-//! 3. Rust drains the queue and applies it.
+//! 1. The compositor builds a [`Snapshot`] — windows, work area, cursor —
+//!    and tells the window manager what changed since the last one.
+//! 2. The window manager answers with commands, which arrive here as
+//!    [`Command`]s.
+//! 3. The compositor applies them.
 //!
 //! Which is the "commands are not state" rule (see CONTRIBUTING.md) made
-//! structural: a script cannot mutate the compositor directly, so there is no
-//! way for its idea of a window's geometry to drift from the compositor's. It
-//! also means no borrow of `Solium` is alive while Lua runs, which is what
-//! stops a script calling back into the compositor mid-dispatch and deadlocking
-//! on the seat.
+//! structural: a window manager cannot change the compositor directly, so
+//! there is no way for its idea of a window's geometry to drift from the
+//! compositor's, and nothing of the compositor is borrowed while it works.
 
 mod command;
 pub(crate) mod doc;

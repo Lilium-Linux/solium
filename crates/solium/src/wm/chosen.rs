@@ -12,7 +12,7 @@
 //! ```
 //!
 //! - `command`: the program and its arguments, run as they are written, in
-//!   place of the shipped Lua window manager. The program is looked for on
+//!   place of the shipped window manager, `solium-lua`. The program is looked for on
 //!   `PATH` when it names no directory, and a leading `~/` in the program
 //!   or an argument is the home directory. Its standard input is the
 //!   socket to the compositor, and it is told nothing else: the protocol
@@ -31,6 +31,42 @@ use std::path::{Path, PathBuf};
 
 /// `cpu_weight` when the file does not say: ten times a program's own.
 const CPU_WEIGHT: u64 = 1000;
+
+/// Which window manager is started.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Which {
+    /// The program `wm.toml` names, or the shipped one when it names none.
+    Chosen,
+    /// The shipped one, told in `hello` that it is started safe: in place
+    /// of a window manager that kept stopping or would not start, reading
+    /// none of the user's own.
+    Safe,
+    /// The Lua window manager on a thread, on this configuration file: how
+    /// a test says what runs.
+    #[cfg(test)]
+    Lua(std::path::PathBuf),
+}
+
+impl Which {
+    /// Whether it is started safe.
+    pub(crate) fn safe(&self) -> bool {
+        matches!(self, Self::Safe)
+    }
+}
+
+#[cfg(test)]
+impl From<&std::path::Path> for Which {
+    fn from(config: &std::path::Path) -> Self {
+        Self::Lua(config.to_owned())
+    }
+}
+
+#[cfg(test)]
+impl From<&std::path::PathBuf> for Which {
+    fn from(config: &std::path::PathBuf) -> Self {
+        Self::Lua(config.clone())
+    }
+}
 
 /// What `wm.toml` says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +95,7 @@ impl Chosen {
     /// file.
     #[cfg(not(test))]
     pub(crate) fn read() -> (Self, Vec<String>) {
-        match crate::wm::paths::user_config_dir() {
+        match solium_paths::user_config_dir() {
             Some(directory) => Self::read_in(&directory),
             None => (Self::default(), Vec::new()),
         }
@@ -88,7 +124,7 @@ impl Chosen {
 
     /// Where the user's `wm.toml` is, or would be.
     pub(crate) fn file() -> Option<PathBuf> {
-        crate::wm::paths::user_config_dir().map(|directory| file_in(&directory))
+        solium_paths::user_config_dir().map(|directory| file_in(&directory))
     }
 
     /// What `text` says, `~/` standing for `home`, and what is wrong with

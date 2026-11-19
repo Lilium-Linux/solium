@@ -24,7 +24,7 @@
 //!
 //! **The configuration hears every move drag and may steer it** (#452). Each
 //! one is told to the `drag` listeners as it begins, moves and ends
-//! ([`settle_drags`]), and `sol.drag_hold` and `sol.drag_grip` hold its window
+//! ([`settle_drags`]), and `drag-hold` and `drag-grip` hold its window
 //! still while the pointer goes on, and say where the pointer holds it. That
 //! is all the compositor does: what a drag of a maximised window does --
 //! nothing for a few pixels, then restored under the pointer -- is
@@ -75,7 +75,7 @@ pub(crate) struct Moving {
     offset: Point<f64, Logical>,
     /// Where the pointer, or the finger, is now.
     at: Point<f64, Logical>,
-    /// Whether `sol.drag_hold` holds the window where it is.
+    /// Whether `drag-hold` holds the window where it is.
     held: bool,
     /// Let go of, and `end` not told yet: whether it is to be dropped. It is
     /// kept until then, so a motion told after the release -- the pointer let
@@ -218,7 +218,7 @@ pub(crate) fn settle_drags(state: &mut Solium, edges: bool) {
 }
 
 /// A script holding a dragged window where it is, or letting it go on
-/// (`sol.drag_hold`). Let go, it moves on from where it stands, so nothing
+/// (`drag-hold`). Let go, it moves on from where it stands, so nothing
 /// jumps.
 /// `state::tests::real_client::reflow_on_close::drag_primitives::a_held_window_stays_while_the_pointer_moves_and_goes_on_from_where_it_is`.
 pub(crate) fn hold(state: &mut Solium, window: &Window, held: bool) {
@@ -237,7 +237,7 @@ pub(crate) fn hold(state: &mut Solium, window: &Window, held: bool) {
     }
 }
 
-/// Where a script has the pointer hold a dragged window (`sol.drag_grip`):
+/// Where a script has the pointer hold a dragged window (`drag-grip`):
 /// `along` of its frame's width and `down` of its height, and `by` pixels
 /// further, from the frame's top-left corner, held inside the frame. The
 /// window is put there at once, a glide it is part of the way through is
@@ -402,7 +402,7 @@ impl MoveDrag {
     }
 
     /// The pointer, or the finger, is at `at`: the window follows it, unless
-    /// a script holds it (`sol.drag_hold`).
+    /// a script holds it (`drag-hold`).
     pub(crate) fn to(&self, state: &mut Solium, at: Point<f64, Logical>) {
         let Some(moving) = state
             .moves

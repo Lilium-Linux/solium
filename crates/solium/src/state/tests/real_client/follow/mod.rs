@@ -106,7 +106,7 @@ impl Desk {
             &entry,
             format!(
                 "package.path = {shipped:?} .. \"/?.lua\"\n{body}\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");

@@ -107,8 +107,7 @@ pub(crate) fn run(action: PinAction) -> ExitCode {
 /// `lock.*` as the configuration sets it, for the PIN's lengths and the
 /// helper's timeout; the defaults when it does not load.
 fn configured() -> crate::lock_auth::Settings {
-    let path = crate::script::Scripts::config_path();
-    match crate::script::Scripts::load(&path) {
+    match crate::script::Scripts::load(crate::wm::Which::Chosen) {
         Ok(mut scripts) => scripts
             .startup()
             .commands

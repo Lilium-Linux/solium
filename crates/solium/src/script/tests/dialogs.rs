@@ -85,7 +85,7 @@ fn scripts(name: &str, layout: &str) -> Scripts {
             "package.path = {shipped:?} .. \"/?.lua\"\n\
              require(\"modes\")\n\
              require({layout:?})\n",
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     )
     .expect("writing the entry point");
@@ -804,7 +804,7 @@ mod reflow_on_close {
                  {before}\n\
                  require(\"modes\")\n\
                  require({layout:?})\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -1202,7 +1202,7 @@ mod reflow_on_close {
             // A reload: a fresh Lua state, the layout still current.
             let mut reloaded = scripts;
             reloaded
-                .reload(&entry)
+                .reload_from(&entry)
                 .expect("reloading the shipped layout");
             let restored = placed(&reloaded.restored(desk(&before, &[1, 2, 3], &[3])).commands);
             assert!(
@@ -1522,7 +1522,7 @@ mod overflow {
                  require(\"workspaces\")\n\
                  require(\"tiling\")\n\
                  require(\"scrolling\")\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -2010,7 +2010,7 @@ mod overflow {
         );
         everyone_home(&scripts, "DP-2", "a monitor change");
 
-        scripts.reload(&entry).expect("reloading");
+        scripts.reload_from(&entry).expect("reloading");
         let restored = placed(&scripts.restored(desk_at(&ids, (500.0, 500.0))).commands);
         assert!(
             ids.iter().all(|id| restored.contains_key(id)),
@@ -2478,7 +2478,7 @@ mod client_sizes {
                  require(\"workspaces\")\n\
                  require(\"tiling\")\n\
                  require(\"scrolling\")\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -3019,7 +3019,7 @@ mod client_sizes {
         );
 
         let mut fresh = scripts;
-        fresh.reload(&entry).expect("reloading the scripts");
+        fresh.reload_from(&entry).expect("reloading the scripts");
         let _ = fresh.restored(crowded());
         let _ = fresh.monitors_changed(crowded());
         let told = fresh.relayout(crowded());
@@ -3088,7 +3088,7 @@ mod reload {
                  require(\"workspaces\")\n\
                  require(\"tiling\")\n\
                  require(\"scrolling\")\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -3112,7 +3112,7 @@ mod reload {
     /// looking like `now` throughout. The new scripts, and every command
     /// the three announcements produced.
     fn reload(mut scripts: Scripts, entry: &Path, now: &Snapshot) -> (Scripts, Vec<Command>) {
-        scripts.reload(entry).expect("reloading the scripts");
+        scripts.reload_from(entry).expect("reloading the scripts");
         let mut commands = scripts.restored(now.clone()).commands;
         commands.extend(scripts.monitors_changed(now.clone()).commands);
         commands.extend(scripts.relayout(now.clone()).commands);
@@ -3294,7 +3294,7 @@ mod reload {
         // from, so reading it copies.
         assert!(
             scripts
-                .reload(&entry.with_file_name("missing.lua"))
+                .reload_from(&entry.with_file_name("missing.lua"))
                 .is_err()
         );
         assert_eq!(
@@ -3349,7 +3349,8 @@ mod reload {
         assert!(scripts.take_keeps().is_empty());
         drop(scripts);
 
-        let mut again = Scripts::start_again(&entry, false, keeps).expect("started again");
+        let mut again =
+            Scripts::start_again(crate::wm::Which::from(&entry), keeps).expect("started again");
         let _ = again.startup();
         let mut commands = again.restored(now.clone()).commands;
         commands.extend(again.monitors_changed(now.clone()).commands);

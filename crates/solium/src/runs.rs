@@ -1,4 +1,4 @@
-//! Programs a configuration runs and reads back: the table form of `sol.run`
+//! Programs a configuration runs and reads back: the table form of `run`
 //! (#472).
 //!
 //! A child is started as every program Solium starts is
@@ -7,7 +7,7 @@
 //! and stdout and stderr piped back. The pipes are non-blocking and read once
 //! each time round the event loop, in [`settle`], as the services are: both
 //! loops wake at least every 16 ms, so nothing here ever waits for a child,
-//! and a line waits no longer than that to reach Lua.
+//! and a line waits no longer than that to reach the window manager.
 //!
 //! What a child may cost is bounded. Each stream keeps at most `max_output`
 //! bytes: past that the pipe is closed, so a child that goes on writing gets
@@ -29,10 +29,11 @@ use crate::state::Solium;
 /// How much is read from a pipe at a time.
 const CHUNK: usize = 64 * 1024;
 
-/// What `sol.run({ argv }, options)` asked for.
+/// What `run({ argv }, options)` asked for.
 #[derive(Clone, Debug)]
 pub(crate) struct Request {
-    /// The run's id, which its functions are kept under in `sol._runs`.
+    /// The run's id, as the window manager gave it: what each `runs` event
+    /// names.
     pub(crate) id: u64,
     /// The program, then its arguments.
     pub(crate) argv: Vec<String>,
@@ -153,7 +154,7 @@ impl Capture {
     }
 }
 
-/// A child `sol.run` started and has not seen end.
+/// A child `run` started and has not seen end.
 #[derive(Debug)]
 struct Running {
     id: u64,
@@ -205,7 +206,7 @@ impl Running {
     }
 }
 
-/// Every child the configuration's `sol.run{}` started, until it is reaped.
+/// Every child the configuration's `run{}` started, until it is reaped.
 #[derive(Debug, Default)]
 pub(crate) struct Runs {
     running: Vec<Running>,

@@ -70,7 +70,7 @@ const GRAPHICAL: &str = "graphical-session.target";
 /// `a_bus_that_never_answers_holds_the_exit_for_at_most_its_patience`.
 const PATIENCE: Duration = Duration::from_secs(2);
 
-/// `session` in the configuration, handed over by `sol.session`.
+/// `session` in the configuration, handed over by `session`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     /// Export the environment and start the target at all.

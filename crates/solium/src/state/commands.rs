@@ -181,7 +181,7 @@ impl Solium {
                 self.effects.push_problem(Problem::warning(
                     &label,
                     &file,
-                    format!("sol.present: {}", warning.message),
+                    format!("present: {}", warning.message),
                 ));
             }
             geometry::packed(&bound.params, limit)
@@ -198,7 +198,7 @@ impl Solium {
                     &label,
                     &file,
                     None,
-                    format!("sol.present: {message}"),
+                    format!("present: {message}"),
                 ));
                 return None;
             }
@@ -355,7 +355,7 @@ impl Solium {
             tracing::debug!(status, "mode changed");
             self.status = status;
             // `Solium.status` is published only from a frame, same as every
-            // other model; a binding that only calls `sol.status` must still
+            // other model; a binding that only calls `status` must still
             // ask for one, not rely on a command alongside it.
             self.redraw = true;
         }
@@ -453,13 +453,13 @@ impl Solium {
                         deform,
                         // Explicit so the next field added breaks this line
                         // instead of being defaulted past it -- and these two
-                        // stay the defaults because `sol.present_from` reads
+                        // stay the defaults because `present-from` reads
                         // no keys for them. It could not honour them if it
                         // did: this is the frame a window animates *from*, and
                         // both fields select the destination's value at the
                         // first blended frame, so a depth or a pivot here
                         // would never be on screen. A script wanting either
-                        // says so with `sol.present` once it has landed.
+                        // says so with `present` once it has landed.
                         z: 0.0,
                         pivot: (0.5, 0.5),
                     };
@@ -856,8 +856,8 @@ impl Solium {
                             }
                             None => tracing::warn!(
                                 monitor = name,
-                                "sol.monitor_power: no monitor by that name -- `sol.monitors()` \
-                                 lists the ones there are"
+                                "power: no monitor by that name -- the `monitors` change lists \
+                                 the ones there are"
                             ),
                         }
                     }
@@ -918,7 +918,7 @@ impl Solium {
                         crate::decoration::Restyle::Building => self.redraw = true,
                         crate::decoration::Restyle::Unchanged => {}
                     }
-                    // Changed or not: the configuration's first `sol.pane`
+                    // Changed or not: the configuration's first `pane`
                     // may name the style already set, and its rules are
                     // bound when the style is applied (Ruling 15,
                     // `tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
@@ -1019,7 +1019,7 @@ impl Solium {
                         .present(&name, to, now, animation.duration, animation.easing)
                     {
                         // Named rather than ignored, for the reason
-                        // `sol.surface` names a scene it cannot find: a
+                        // `surface` names a scene it cannot find: a
                         // transform on a selection nobody declared is a typo,
                         // and a mode that silently does nothing is the hardest
                         // kind of configuration mistake to find.
@@ -1059,7 +1059,7 @@ impl Solium {
             }
         }
         // **A window whose `cramped` changed is told again, once** (#115).
-        // `sol.windows()` is the snapshot taken before the handler that said
+        // the `window` rows are the snapshot taken before the handler that said
         // it ran, so nothing reading the window list in that handler -- a bar
         // redrawing on `layout` -- could see what the layout had just said,
         // and on a quiet desktop no later event comes to show it. So the
@@ -1074,7 +1074,7 @@ impl Solium {
         }
         self.dispatching -= 1;
         // Once the whole dispatch is done, every handler it ran included, and
-        // not when the layout pass inside it is: what follows `sol.monitors{}`
+        // not when the layout pass inside it is: what follows `monitors{}`
         // may say where a surface now is.
         // `real_client::a_runtime_primary_change_drops_the_old_primarys_scene`,
         // `real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`.
@@ -1105,7 +1105,7 @@ impl Solium {
         self.tell_settled_attempts();
     }
 
-    /// Tell each `done` what became of its `sol.act`, in a dispatch of their
+    /// Tell each `done` what became of its `act`, in a dispatch of their
     /// own, once the outermost dispatch that settled it is applied whole,
     /// every command after it in its batch included (03 §3.3.2), and after a
     /// hotplug's or a reload's held handlers.
@@ -1179,20 +1179,28 @@ impl Solium {
     /// handles a monitor arriving already handles this.
     ///
     /// **This is what issue #116 was.** Only `layout` reached the new scripts,
-    /// and only by accident: shipped `init.lua` calls `sol.monitors`, whose
+    /// and only by accident: shipped `init.lua` calls `monitors`, whose
     /// command happens to trigger a relayout. `workspaces.lua` regrouped every
     /// window onto desk 1 from that `layout` while desk 1 was still carried
     /// two screen-widths off-stage by the *previous* session's view, and
     /// nothing put it back — `super+1` did not, because the fresh Lua state
     /// believed workspace 1 was already showing.
     pub(crate) fn reload(&mut self) {
-        self.reload_from(&Scripts::config_path());
+        self.reload_as(crate::wm::Which::Chosen);
     }
 
-    /// [`Self::reload`], from the file at `path`, which is how
+    /// [`Self::reload`], with the Lua window manager loading the file at
+    /// `path`, which is how
     /// `tests::real_client::a_reload_that_moves_the_primary_drops_the_old_primarys_scene`
     /// reloads.
+    #[cfg(test)]
     pub(crate) fn reload_from(&mut self, path: &std::path::Path) {
+        self.reload_as(crate::wm::Which::from(path));
+    }
+
+    /// [`Self::reload`], of the window manager `which` says when a new one
+    /// is started.
+    fn reload_as(&mut self, which: crate::wm::Which) {
         // The stores saved now, whatever the new configuration turns out to
         // be, so a reload never loses what a restart would keep (#473).
         crate::files::save_stores_at_last(self);
@@ -1206,8 +1214,8 @@ impl Solium {
             // And when `wm.toml` names another program than the one
             // running, the reload is that program started, the one running
             // going on if it will not.
-            Some(scripts) if scripts.shipped_only() || scripts.chosen_another() => {
-                match Scripts::load(path) {
+            Some(scripts) if scripts.safe() || scripts.chosen_another() => {
+                match Scripts::load(which) {
                     Ok(loaded) => Ok(loaded),
                     Err(err) => {
                         self.scripts = Some(scripts);
@@ -1215,14 +1223,23 @@ impl Solium {
                     }
                 }
             }
-            Some(mut scripts) => match scripts.reload(path) {
-                Ok(()) => Ok(scripts),
-                Err(err) => {
-                    self.scripts = Some(scripts);
-                    Err(err)
+            Some(mut scripts) => {
+                // A test's reload onto another file: the running window
+                // manager loads that one.
+                #[cfg(test)]
+                if let crate::wm::Which::Lua(path) = &which {
+                    scripts.load_next(path);
                 }
-            },
-            None => Scripts::load(path),
+                let reloaded = scripts.reload();
+                match reloaded {
+                    Ok(()) => Ok(scripts),
+                    Err(err) => {
+                        self.scripts = Some(scripts);
+                        Err(err)
+                    }
+                }
+            }
+            None => Scripts::load(which),
         };
         if reloaded.is_ok() {
             // A reload that loads is the user's word that this is the
@@ -1232,44 +1249,43 @@ impl Solium {
             self.effects.clear_problems_of("wm");
             self.wm_restarts = crate::wm::Restarts::default();
         }
-        self.take_on(reloaded, path);
+        self.take_on(reloaded);
     }
 
-    /// The window manager a session starts with: the user's, on `config`,
-    /// or, when that will not start (a `wm.toml` naming a program that is
-    /// not there, a configuration that does not load), the shipped
-    /// configuration in its place, which reads nothing of the user's, with
-    /// a problem saying why. A desktop with the shipped bindings and the
+    /// The window manager a session starts with: the one `which` says, or,
+    /// when that will not start (a `wm.toml` naming a program that is not
+    /// there, a configuration that does not load), the shipped one in its
+    /// place, started safe so that it reads nothing of the user's, with a
+    /// problem saying why. A desktop with the shipped bindings and the
     /// reason on screen can be mended from inside it; one with no window
     /// manager has no key that opens a terminal. A reload tries the user's
     /// again, as it does after [`Self::restart_wm`] gave up on it.
-    pub(crate) fn first_scripts(&mut self, config: &std::path::Path) -> Option<Scripts> {
-        let err = match Scripts::load(config) {
+    pub(crate) fn first_scripts(&mut self, which: impl Into<crate::wm::Which>) -> Option<Scripts> {
+        let err = match Scripts::load(which) {
             Ok(scripts) => return Some(scripts),
             Err(err) => err,
         };
-        tracing::error!(?err, config = %config.display(), "the window manager would not start");
-        let (scripts, said) =
-            match Scripts::start_again(&Scripts::shipped_config(), true, Vec::new()) {
-                Ok(scripts) => (
-                    Some(scripts),
-                    format!(
-                        "the window manager would not start: {err:#}. The shipped configuration \
+        tracing::error!(?err, "the window manager would not start");
+        let (scripts, said) = match Scripts::start_again(crate::wm::Which::Safe, Vec::new()) {
+            Ok(scripts) => (
+                Some(scripts),
+                format!(
+                    "the window manager would not start: {err:#}. The shipped configuration \
                      is running in its place: reload to run yours again."
-                    ),
                 ),
-                Err(shipped) => {
-                    tracing::error!(err = ?shipped, "nor would the shipped configuration");
-                    (
-                        None,
-                        format!(
-                            "the window manager would not start: {err:#}. Neither would the \
+            ),
+            Err(shipped) => {
+                tracing::error!(err = ?shipped, "nor would the shipped configuration");
+                (
+                    None,
+                    format!(
+                        "the window manager would not start: {err:#}. Neither would the \
                          shipped configuration: {shipped:#}. No window manager is running."
-                        ),
-                    )
-                }
-            };
-        let named_in = Scripts::named_by(&crate::wm::Chosen::read().0, false, config);
+                    ),
+                )
+            }
+        };
+        let named_in = Scripts::named_by(&crate::wm::Chosen::read().0, false, None);
         self.effects
             .push_problem(crate::effect::host::Problem::error(
                 "wm", &named_in, None, said,
@@ -1299,9 +1315,9 @@ impl Solium {
         // What it kept, as it last said, for the one started in its place:
         // a tiled desk comes back split for split.
         let keeps = scripts.take_keeps();
-        let config = scripts.config().to_owned();
+        let which = scripts.which().clone();
         let named_in = scripts.named_in();
-        let shipped_only = scripts.shipped_only();
+        let shipped_only = scripts.safe();
         let window = scripts.settings.restart_window.as_secs_f64();
         let start =
             self.wm_restarts
@@ -1310,19 +1326,16 @@ impl Solium {
         self.watch_wm();
         tracing::error!(why, ?start, "the window manager stopped");
         let again = format!("the window manager {why}. It was started again.");
-        let shipped =
-            |keeps: crate::wm::Keeps| Scripts::start_again(&Scripts::shipped_config(), true, keeps);
+        let shipped = |keeps: crate::wm::Keeps| Scripts::start_again(crate::wm::Which::Safe, keeps);
         let (started, said) = match start {
             crate::wm::Start::Again if shipped_only => (Some(shipped(keeps)), again),
             crate::wm::Start::Again => (
                 // One that will not start at all is no better than one
                 // that keeps stopping.
-                Some(
-                    Scripts::start_again(&config, false, keeps.clone()).or_else(|err| {
-                        tracing::error!("{err:#}");
-                        shipped(keeps)
-                    }),
-                ),
+                Some(Scripts::start_again(which, keeps.clone()).or_else(|err| {
+                    tracing::error!("{err:#}");
+                    shipped(keeps)
+                })),
                 again,
             ),
             crate::wm::Start::Shipped => (
@@ -1340,7 +1353,7 @@ impl Solium {
                 ),
             ),
         };
-        if !started.is_some_and(|started| self.take_on(started, &config)) {
+        if !started.is_some_and(|started| self.take_on(started)) {
             // Nothing took its place: what it started is still its own.
             self.runs.stop_all();
             self.timers.clear();
@@ -1356,7 +1369,17 @@ impl Solium {
 
     /// Take a window manager that has just loaded, or loaded again, in
     /// place of the one before: whether there was one to take.
-    fn take_on(&mut self, reloaded: anyhow::Result<Scripts>, path: &std::path::Path) -> bool {
+    /// The file a problem with what the window manager asked for names:
+    /// where it said its configuration is, or `wm.toml`
+    /// ([`Scripts::named_in`]).
+    pub(crate) fn wm_file(&self) -> std::path::PathBuf {
+        match &self.scripts {
+            Some(scripts) => scripts.named_in(),
+            None => Scripts::named_by(&crate::wm::Chosen::read().0, false, None),
+        }
+    }
+
+    fn take_on(&mut self, reloaded: anyhow::Result<Scripts>) -> bool {
         match reloaded {
             Ok(scripts) => {
                 crate::qml::clear_cache();
@@ -1384,7 +1407,7 @@ impl Solium {
                 // after it, by a different `Decoration` built from the file
                 // as it now reads.
                 self.decorations.reload(&mut self.panes, style);
-                // Held as one dispatch, so a `sol.monitors{}` at the top of
+                // Held as one dispatch, so a `monitors{}` at the top of
                 // the new configuration places no surface before the handlers
                 // below have said where it now is
                 // (`a_reload_that_moves_a_monitor_keeps_the_scene_its_handler_declares_there`).
@@ -1395,7 +1418,7 @@ impl Solium {
                 // (`decoration::tests::a_reload_starts_the_frames_values_afresh`).
                 self.decorations.clear_values(&mut self.panes);
                 // Likewise: the old declaration is the previous session's,
-                // and a configuration that stops calling `sol.workspaces`
+                // and a configuration that stops calling `workspaces`
                 // must publish none, not what it last said. `workspaces.lua`
                 // declares again inside this same held dispatch, so nothing
                 // flickers for one that still does.
@@ -1403,10 +1426,10 @@ impl Solium {
                 // The effect folders, read again: a changed one is pending
                 // until the next `prepare` compiles it, and a broken one
                 // keeps what ran (`a_reload_reads_the_effect_folders_again`).
-                // Before the scripts start, so the rules their `sol.effects`
+                // Before the scripts start, so the rules their `effects`
                 // hands over bind against the folders as they now are
                 // (`a_reload_binds_the_rules_against_the_folders_it_read`).
-                // A `sol.present` geometry under way keeps its name wanted,
+                // A `present` geometry under way keeps its name wanted,
                 // so an unchanged folder keeps its version and its id, and
                 // only a changed one ends the present by its `on_reload`
                 // (`tests::real_client::a_reload_that_leaves_a_presents_folder_unchanged_keeps_it`).
@@ -1424,7 +1447,7 @@ impl Solium {
                 // style again
                 // (`tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`).
                 self.apply_style_rules();
-                // What the old configuration's refused `sol.effects` said is
+                // What the old configuration's refused `effects` said is
                 // the old configuration's: the new one says it again, or it
                 // is gone (`tests::a_reload_drops_a_refused_settings_problem`).
                 self.effects.clear_problems_of("settings");
@@ -1438,7 +1461,7 @@ impl Solium {
                 // (#473): `tests::a_reload_ends_the_watches_and_keeps_the_store`.
                 self.files.reload();
                 self.start_scripts(Some(scripts));
-                // After the new configuration's `sol.startup`, so its
+                // After the new configuration's `startup`, so its
                 // `on_reload` is the one obeyed: the first frame's gate armed
                 // again (`tests::a_reload_arms_the_first_frames_gate_only_with_on_reload`).
                 self.warm.reloaded();
@@ -1458,12 +1481,12 @@ impl Solium {
                 // made another monitor primary may declare nothing differently
                 // (`a_reload_that_moves_the_primary_drops_the_old_primarys_scene`).
                 self.sync_instances();
-                // And what the held handlers' `sol.act`s came to, which no
+                // And what the held handlers' `act`s came to, which no
                 // dispatch inside the hold could tell
                 // (`a_sol_act_in_a_reloaded_configuration_hears_done_in_the_reloads_dispatch`).
                 self.tell_settled_attempts();
                 self.redraw = true;
-                tracing::info!(config = %path.display(), "configuration reloaded");
+                tracing::info!(config = ?self.scripts.as_ref().and_then(Scripts::source), "configuration reloaded");
                 // And then look at what that produced -- at where it *lands*,
                 // not at this frame, which is still the previous session's.
                 // See `everything_is_off_stage` for both halves: why the
@@ -1485,7 +1508,7 @@ impl Solium {
                 true
             }
             Err(err) => {
-                tracing::error!(?err, config = %path.display(), "reload failed, keeping what was running");
+                tracing::error!(?err, "reload failed, keeping what was running");
                 // On the overlay of the configuration still running, at its
                 // file and line (`a_failed_reload_is_a_problem_until_one_succeeds`).
                 // Replacing the last one: a second failed reload is one
@@ -1525,7 +1548,7 @@ impl Solium {
     /// [`crate::autoreload::watch_roots`] every time rather than only at
     /// start-up: a directory created since the last reload (a first
     /// `user.lua`, just written) is picked up the next time anything calls
-    /// `sol.auto_reload`, which the shipped `init.lua` does on every reload.
+    /// `auto_reload`, which the shipped `init.lua` does on every reload.
     pub(crate) fn configure_autoreload(&mut self, settings: crate::autoreload::Settings) {
         if self.autoreload_settings != settings {
             tracing::debug!(?settings, "automatic reload settings set");
@@ -1533,7 +1556,7 @@ impl Solium {
             self.autoreload_debounce = crate::autoreload::Debounce::default();
         }
         let roots = if settings.automatic {
-            crate::autoreload::watch_roots()
+            crate::autoreload::watch_roots(self.scripts.as_ref().and_then(Scripts::source))
         } else {
             Vec::new()
         };
@@ -1550,7 +1573,7 @@ impl Solium {
     ///
     /// Called from `start_scripts`, after every reload as well as cold start,
     /// so a path a reload just changed to is checked too. Padded with the
-    /// shipped `qml/` and `lua/` directories before comparing, so the
+    /// shipped `qml/` directory before comparing, so the
     /// ordinary case -- nothing overridden, every scene the one Solium ships
     /// -- never warns.
     /// `tests::warns_once_for_a_pane_style_set_outside_every_watched_root`,
@@ -1560,9 +1583,9 @@ impl Solium {
         if !self.autoreload_settings.automatic {
             return;
         }
-        let mut roots = crate::autoreload::watch_roots();
+        let mut roots =
+            crate::autoreload::watch_roots(self.scripts.as_ref().and_then(Scripts::source));
         roots.push(crate::assets::qml());
-        roots.push(crate::assets::lua());
 
         let mut configured: Vec<std::path::PathBuf> = self
             .surfaces
@@ -1586,8 +1609,8 @@ impl Solium {
 
     /// Take the scripts, and act on whatever they asked for while loading.
     pub(crate) fn start_scripts(&mut self, scripts: Option<Scripts>) {
-        // Before the scripts run, so `sol.keyboard()` answers truthfully even
-        // in a configuration that never calls `sol.keyboard{…}` -- which is
+        // Before the scripts run, so `keyboard` answers truthfully even
+        // in a configuration that never calls `keyboard{…}` -- which is
         // the common case, since the useful default is whatever the session's
         // `XKB_DEFAULT_*` already said.
         self.keyboard = crate::keymap::describe(self);
@@ -1677,7 +1700,7 @@ impl Solium {
         self.apply(outcome);
     }
 
-    /// One `sol.effects`: its settings and its rules, or, when either did
+    /// One `effects`: its settings and its rules, or, when either did
     /// not parse, neither, with every error on the overlay (Ruling 28): the
     /// settings first, so the folders the same call's rules name load under
     /// its caps. `tests::a_refused_effects_setting_keeps_everything_as_it_was`,
@@ -1693,7 +1716,7 @@ impl Solium {
                 self.effects
                     .push_problem(crate::effect::host::Problem::error(
                         "settings",
-                        &Scripts::config_path(),
+                        &self.wm_file(),
                         None,
                         error,
                     ));
@@ -1713,7 +1736,7 @@ impl Solium {
         }
     }
 
-    /// `sol.startup`'s `first_frame`, the first frame's gate: taken whole,
+    /// `startup`'s `first_frame`, the first frame's gate: taken whole,
     /// or refused on the overlay under `startup`, keeping what ran.
     /// `tests::sol_startup_configures_the_gate_and_a_refusal_keeps_what_ran`.
     pub(crate) fn apply_startup(&mut self, first_frame: Result<crate::warm::FirstFrame, String>) {
@@ -1724,7 +1747,7 @@ impl Solium {
                 .effects
                 .push_problem(crate::effect::host::Problem::error(
                     "startup",
-                    &Scripts::config_path(),
+                    &self.wm_file(),
                     None,
                     error,
                 )),
@@ -1756,7 +1779,7 @@ impl Solium {
         }
     }
 
-    /// Rules from `sol.effects`: all of them bound and runnable, or none
+    /// Rules from `effects`: all of them bound and runnable, or none
     /// taken and the errors on the overlay, so a broken set keeps the rules
     /// that ran (`tests::a_broken_rule_keeps_the_rules_that_ran`,
     /// `tests::a_blur_rule_without_source_binds_and_live_is_refused`). The rules
@@ -1764,7 +1787,7 @@ impl Solium {
     /// (`tests::a_replaced_rule_set_holds_only_its_own_programs`); a set
     /// refused leaves no compile asked for
     /// (`tests::a_refused_rule_set_leaves_no_compile_asked_for`). A reload
-    /// replays `sol.effects`, so rules are bound again at every config load
+    /// replays `effects`, so rules are bound again at every config load
     /// (`tests::a_reload_binds_the_rules_against_the_folders_it_read`).
     pub(crate) fn apply_effects(
         &mut self,
@@ -1783,7 +1806,7 @@ impl Solium {
         use crate::effect::host::Problem;
         use crate::effect::plan::{Chains, rule_problem};
         use crate::effect::rules::{Fill, Origin, RuleKey};
-        let file = Scripts::config_path();
+        let file = self.wm_file();
         let rules = match rules {
             Ok(rules) => rules,
             Err(errors) => {
@@ -2210,7 +2233,7 @@ impl Solium {
 }
 
 /// Whether binding a rule set may keep the slots the running set filled:
-/// only when nothing but params changed (`IfChanged`, `sol.effects`), never
+/// only when nothing but params changed (`IfChanged`, `effects`), never
 /// after the formats probe, whose rebind must start every slot afresh
 /// (`Always`, `rebind_effects`). #305.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

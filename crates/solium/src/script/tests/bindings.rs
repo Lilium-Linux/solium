@@ -158,7 +158,7 @@ fn a_failing_script_does_not_swallow_the_key() {
 /// `a_user_file_using_the_old_key_still_chooses_a_style`.
 #[test]
 fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
-    if let Some(own) = Scripts::user_config_dir()
+    if let Some(own) = solium_paths::user_config_dir()
         && (own.join("config.lua").exists()
             || own.join("user.lua").exists()
             || own.join("workspaces.lua").exists()
@@ -216,7 +216,9 @@ fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
     );
 
     // Exactly what `Solium::reload` does, in the order it does it.
-    scripts.reload(&config).expect("reloading the test script");
+    scripts
+        .reload_from(&config)
+        .expect("reloading the test script");
     let restored = scripts.restored(one_screen(all));
     let monitors = scripts.monitors_changed(one_screen(all));
     let layout = scripts.relayout(one_screen(all));
@@ -294,7 +296,7 @@ fn a_reload_keeps_the_workspace_the_windows_and_the_layout() {
 /// between the two loads -- which is what a reload is for.
 #[test]
 fn a_reload_with_fewer_workspaces_leaves_no_window_on_a_desk_that_is_gone() {
-    if let Some(own) = Scripts::user_config_dir()
+    if let Some(own) = solium_paths::user_config_dir()
         && (own.join("config.lua").exists()
             || own.join("user.lua").exists()
             || own.join("workspaces.lua").exists()
@@ -349,7 +351,9 @@ fn a_reload_with_fewer_workspaces_leaves_no_window_on_a_desk_that_is_gone() {
     )
     .expect("writing the fixture user.lua");
 
-    scripts.reload(&config).expect("reloading the test script");
+    scripts
+        .reload_from(&config)
+        .expect("reloading the test script");
     let restored = scripts.restored(one_screen(all));
     let monitors = scripts.monitors_changed(one_screen(all));
     let layout = scripts.relayout(one_screen(all));

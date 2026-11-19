@@ -421,7 +421,7 @@ fn workspaces_lua_does_not_route_a_scenes_actions_by_itself() {
             r#"package.path = {shipped:?} .. "/?.lua"
 require("workspaces")
 sol.on("surface", function(_, action, data) sol.act(action, data) end)"#,
-            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+            shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
         ),
     );
     let data = crate::json::Json::parse(r#"{"id":4}"#).expect("valid JSON");

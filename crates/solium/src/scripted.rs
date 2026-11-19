@@ -124,7 +124,7 @@ pub(crate) enum On {
     Rect(Rectangle<i32, Logical>),
 }
 
-/// What a script asked for. Carried from Lua to the compositor, so it holds no
+/// What a window manager asked for. Carried to the compositor, so it holds no
 /// rasterisations and can be cloned like every other command.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Declaration {

@@ -183,7 +183,8 @@ pub fn serve(client: &Client) -> Result<(), ClientError> {
     // `hello` first. It names the protocol the compositor speaks, and one
     // this was not built for is refused there.
     client.hello()?;
-    client.ready(setup())?;
+    // It reads no file of its own, so it names none.
+    client.ready(setup(), None)?;
     let mut tiny = Tiny::default();
     loop {
         match client.next()? {
@@ -194,7 +195,7 @@ pub fn serve(client: &Client) -> Result<(), ClientError> {
             }
             // It has no configuration to read again: it says what it said
             // at the start, which is what a reload asks for.
-            Heard::Reload(_) => client.reloaded(Reloaded::Loaded(Answer {
+            Heard::Reload => client.reloaded(Reloaded::Loaded(Answer {
                 serial: 0,
                 handled: false,
                 commands: setup(),

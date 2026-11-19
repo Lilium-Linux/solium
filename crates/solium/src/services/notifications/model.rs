@@ -66,7 +66,7 @@ impl Reason {
 pub(crate) struct Incoming {
     pub(crate) id: u32,
     /// The sender's unique name on the bus, `:1.42`, or empty for one of the
-    /// shell's own (`sol.notify`).
+    /// shell's own (`notify`).
     pub(crate) sender: String,
     /// The sender's process, as the bus says, when it said.
     pub(crate) pid: Option<u32>,
@@ -91,7 +91,7 @@ pub(crate) struct Incoming {
     pub(crate) received: u64,
 }
 
-/// What the policy decided for one arrival (`sol.on("notification")`, or
+/// What the policy decided for one arrival (`notification`, or
 /// [`Decision::default_for`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Decision {
@@ -132,7 +132,7 @@ impl Default for Timeouts {
     }
 }
 
-/// What the configuration says (`sol.notifications{ ... }`).
+/// What the configuration says (`notifications{ ... }`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     pub(crate) timeouts: Timeouts,

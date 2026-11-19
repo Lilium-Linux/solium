@@ -14,7 +14,7 @@
 //! merge a type default with the overrides that name it, and hand the result
 //! to libinput's own `config_*` setters, behind [`ApplySettings`] so a test
 //! can stand in for a touchpad nobody is touching. **What the defaults and
-//! the overrides actually say lives in Lua** (`sol.input`, `config.lua`'s
+//! the overrides actually say lives in the window manager** (the `input` section,
 //! `input` section) -- this module never reads a config file and never
 //! decides that a touchpad should tap.
 //!
@@ -288,7 +288,7 @@ impl DeviceMatch {
     }
 }
 
-/// What `sol.input{...}` said: a default per device type, and overrides
+/// What `input{...}` said: a default per device type, and overrides
 /// matched by name or by vendor/product, in the order `config.lua`'s
 /// `devices` list gave them.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -351,7 +351,7 @@ fn outcome(result: DeviceConfigResult) -> Applied {
 /// What [`apply`] did, one entry per field `Settings` actually named --
 /// nothing for a field left `None`, since "not configured" is not "tried and
 /// failed". `tracing` turns this into the one log line per device the issue
-/// asks for; `sol.on("input_device", ...)` turns it into a table.
+/// asks for; `input-device` turns it into a table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Report(Vec<(&'static str, Applied)>);
 
@@ -525,7 +525,7 @@ impl Registry {
         self.known.retain(|(existing, _)| existing.id != id);
     }
 
-    /// Test-only: nothing reads the list back yet (`sol.input_devices()` is
+    /// Test-only: nothing reads the list back yet (`input_devices` is
     /// the deliberate cut the PR this lands in names), but `device_gone`
     /// removing the right entry needs some way to look.
     #[cfg(test)]

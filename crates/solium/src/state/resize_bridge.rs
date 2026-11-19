@@ -1396,9 +1396,9 @@ impl Solium {
     /// `crate::input::resize::dragged_edge` builds it from the pane's own
     /// laid-out edge and the drag's total movement rather than from the seat.
     ///
-    /// It is in the layout's **outer** space — the space `sol.place` writes and
+    /// It is in the layout's **outer** space — the space `place` writes and
     /// `tree:layout` returns — because it comes from `Solium::pane_laid_out`,
-    /// which is the rectangle `sol.place` was last handed for this pane. Not
+    /// which is the rectangle `place` was last handed for this pane. Not
     /// from `Solium::pane_outer`, which is that rectangle only until the client
     /// commits a size of its own.
     ///

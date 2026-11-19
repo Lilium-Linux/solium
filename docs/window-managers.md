@@ -63,8 +63,13 @@ The program is started with the socket to the compositor as its **standard
 input**, as Solium starts every program: with the environment Solium itself
 was started with, in a session of its own, and holding no file descriptor but
 its standard input, output and error. It gets no arguments but the ones you
-wrote. What it writes to its standard error goes to the compositor's log
-(`~/.local/state/solium/session.log`).
+wrote, and the compositor names none of its files: a window manager finds its
+own configuration, wherever it keeps it, and says in `hello-answer` where that
+is. The shipped one, `solium-lua`, is started with no arguments and reads
+`SOLIUM_LUA_INIT`, else `~/.config/solium/init.lua`, else its own shipped
+`init.lua`; named in `command`, it takes the file to load as its one
+argument. What a window manager writes to its standard error goes to the
+compositor's log (`~/.local/state/solium/session.log`).
 
 - The file is read each time a window manager is started. After you change
   `command`, a reload starts the new program; if it will not start, the one
@@ -72,8 +77,9 @@ wrote. What it writes to its standard error goes to the compositor's log
 - A key the file gets wrong is shown on the desktop's problems overlay and
   fails `solium --check`, which also names the program it would start.
 - A program that cannot be started, or that says `goodbye` instead of
-  answering `hello`, is replaced by the shipped configuration, with the reason
-  on the overlay. See [when a window manager stops](#when-a-window-manager-stops).
+  answering `hello`, is replaced by the shipped window manager, started safe,
+  with the reason on the overlay. See
+  [when a window manager stops](#when-a-window-manager-stops).
 
 When Solium is the session (started by its session file), it asks systemd to
 put the window manager's process in a scope of its own, `solium-wm-<pid>.scope`
@@ -92,16 +98,25 @@ the protocol's own; each is described in [the reference](generated/reference/pro
 The compositor speaks first:
 
 - `hello` carries the protocol's `version`, whether the session is in debug
-  mode, and `keeps`: what the window manager this one takes the place of asked
-  the compositor to hold (nothing, at the start of a session).
+  mode, `keeps`: what the window manager this one takes the place of asked
+  the compositor to hold (nothing, at the start of a session), and `safe`:
+  whether it is started in place of one that kept stopping or would not
+  start. A window manager started safe reads none of the user's own
+  configuration, so the session has keys that work and the user can mend
+  what stopped the last one.
 
 The window manager answers with one of:
 
-- `hello-answer`: the version it was built for, and the commands that set the
-  desktop up before its first frame. These usually include `declare` (its key
-  bindings), `listen` (the events it wants) and `configure` (settings).
+- `hello-answer`: the version it was built for, the commands that set the
+  desktop up before its first frame, and `source`, the file its
+  configuration is in when it has one. The commands usually include
+  `declare` (its key bindings), `listen` (the events it wants) and
+  `configure` (settings). `source` is the file a problem with what it asked
+  for names, such as a setting the compositor refused, and a change in that
+  file's directory reloads it (`auto_reload`), as a change under
+  `~/.config/solium` does.
 - `goodbye`, with why it cannot run. The compositor then runs the shipped
-  configuration in its place.
+  window manager in its place, started safe.
 
 Two versions speak to each other when their major numbers are equal. Before
 1.0, the minor numbers must be equal too: `0.1.3` speaks to `0.1.0` and not to
@@ -216,8 +231,9 @@ them after the batch you are in.
 
 ### 7. Reload
 
-`reload` asks the window manager to load its configuration again: the user
-pressed the reload key, or a file under `~/.config/solium` changed. It answers
+`reload` asks the window manager to load its configuration again, from
+wherever it found it: the user pressed the reload key, or a file changed under
+`~/.config/solium` or beside its `source`. It carries nothing. It answers
 `reloaded`:
 
 - `loaded`, with an answer whose commands set the desktop up as
@@ -330,13 +346,14 @@ Then:
 The timers, runs and file watches of the one that stopped are gone with it.
 
 A window manager that stops `wm.restarts` times inside `wm.restart_window_s`
-is not started a fourth time. The **shipped configuration** runs in its place,
-reading nothing of yours, and the overlay says so. A reload tries yours again.
-If the shipped one stops as often, none runs.
+is not started a fourth time. The **shipped window manager** runs in its
+place, started safe (`hello.safe`), so it reads nothing of yours, and the
+overlay says so. A reload tries yours again. If the shipped one stops as
+often, none runs.
 
 The same happens at the start of a session: a window manager that will not
-start gives way to the shipped configuration, so there is always a key that
-opens a terminal.
+start gives way to the shipped one, started safe, so there is always a key
+that opens a terminal.
 
 ### Keeping state
 

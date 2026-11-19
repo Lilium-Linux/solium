@@ -2338,6 +2338,7 @@ dependencies = [
  "solium-json",
  "solium-layout",
  "solium-lua",
+ "solium-paths",
  "solium-wm-protocol",
  "toml",
  "tracing",
@@ -2389,11 +2390,16 @@ dependencies = [
  "solium-effects",
  "solium-json",
  "solium-layout",
+ "solium-paths",
  "solium-wm-protocol",
  "tracing",
  "tracing-subscriber",
  "xkbcommon",
 ]
+
+[[package]]
+name = "solium-paths"
+version = "0.0.0"
 
 [[package]]
 name = "solium-wm-protocol"

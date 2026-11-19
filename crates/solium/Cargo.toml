@@ -11,6 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# Where the shipped files are, as every program of Solium's finds them.
+solium-paths = { path = "../paths" }
 # The animation engine, as a crate so that curves can be tested and previewed
 # without a compositor. See crates/animation/preview.
 solium-animation = { path = "../animation" }

@@ -1,7 +1,7 @@
 //! The tray (#363): Solium as the session's `org.kde.StatusNotifierWatcher`
 //! and its host, and the items applications put there (Steam, Discord,
-//! Telegram...), for scenes (`Tray`) and for Lua (`sol.tray`,
-//! `sol.on("tray")`, `tray.*` actions).
+//! Telegram...), for scenes (`Tray`) and for the window manager (`tray`,
+//! `tray`, `tray.*` actions).
 //!
 //! * [`content`] makes what an item sends safe to show: its pictures, its
 //!   labels, the icon files it names;
@@ -10,8 +10,8 @@
 //! * [`server`] is the bus, on threads of its own;
 //! * this module holds them together for the event loop: it starts the
 //!   server when the configuration asks and the session allows, applies what
-//!   the server read, hands pictures to Qt, and turns what a scene or Lua
-//!   asks into calls. `crate::services::settle` drives it.
+//!   the server read, hands pictures to Qt, and turns what a scene or the
+//!   window manager asks into calls. `crate::services::settle` drives it.
 
 pub(crate) mod content;
 pub(crate) mod model;
@@ -28,7 +28,7 @@ use crate::{
 use model::{Call, Change, Entry, Item, Outcome, Picture, Status, Tray};
 use server::{Fact, Server};
 
-/// What the configuration says: `sol.tray{ ... }`.
+/// What the configuration says: `tray{ ... }`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Config {
     /// Own `org.kde.StatusNotifierWatcher`.
@@ -55,7 +55,7 @@ pub(crate) struct View {
     pub(crate) items: Vec<BTreeMap<&'static str, Json>>,
 }
 
-/// One event for `sol.on("tray")`.
+/// One event for `tray`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Event {
     /// `added`, `changed`, `removed`, `menu` or `owner`.
@@ -114,7 +114,7 @@ pub(crate) struct Service {
     owner: Option<Owner>,
     view: Rc<View>,
     dirty: bool,
-    /// For `sol.on("tray")`, in order, drained each settle.
+    /// For `tray`, in order, drained each settle.
     pub(crate) events: Vec<Event>,
 }
 
@@ -137,7 +137,7 @@ impl Service {
         self.start_or_stop();
     }
 
-    /// `sol.tray{ ... }`, at load and on every reload.
+    /// `tray{ ... }`, at load and on every reload.
     pub(crate) fn configure(&mut self, config: Config) {
         self.config = config;
         self.start_or_stop();

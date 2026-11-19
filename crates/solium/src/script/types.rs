@@ -126,7 +126,7 @@ pub(crate) struct WindowInfo {
     /// for it is a slot kept for nothing. `tiling.adopt` and
     /// `scrolling.adopt` are the shipped readers.
     pub(crate) leaving: bool,
-    /// Whether this window is minimized (#30): `sol.minimize`, or its own
+    /// Whether this window is minimized (#30): `minimize`, or its own
     /// client asking. Still mapped and alive, but not drawn once a present
     /// running on it has played out, under no pointer or finger, and never
     /// holding the keyboard. The shipped layouts leave a minimized window out
@@ -135,7 +135,7 @@ pub(crate) struct WindowInfo {
     /// `real_client::reflow_on_close::minimize::sol_minimize_marks_the_row_fires_once_and_leaves_the_client_mapped`.
     pub(crate) minimized: bool,
     /// Whether this window is kept above every window that is not (#424):
-    /// `sol.keep_above`. Cleared when it closes; kept across a reload.
+    /// `keep-above`. Cleared when it closes; kept across a reload.
     /// `real_client::reflow_on_close::above::a_kept_above_window_stays_over_a_window_focused_after_it_and_takes_its_click`.
     pub(crate) above: bool,
     /// Where a dock shows this window, as a client of
@@ -157,12 +157,12 @@ pub(crate) struct WindowInfo {
     pub(crate) min: Option<Size<i32, Logical>>,
     pub(crate) max: Option<Size<i32, Logical>>,
     /// Whether the layout in charge said, when it last placed this window,
-    /// that its tile is smaller than the window's own minimum: `sol.place`'s
+    /// that its tile is smaller than the window's own minimum: `place`'s
     /// `cramped`. A layout's word, not the compositor's measure, because only
     /// the layout knows whether it is respecting that minimum at all.
     pub(crate) cramped: bool,
     /// Whether the window's client has been shown: its first frame taken
-    /// (`present::mark_shown`). False for a window launched with `sol.spawn`
+    /// (`present::mark_shown`). False for a window launched with `spawn`
     /// from its `open` until then, which is how `tiling.lua` tells a window
     /// whose first limits arrive in time to decide where it goes from one
     /// already on screen whose limits changed (#115). See
@@ -245,11 +245,11 @@ pub(crate) struct WindowInfo {
 /// what decides the pixels it owns on them ([`Frame::covers`]).
 ///
 /// **A rectangle until #134's fourth review**, and a rectangle can say
-/// neither. `sol.window_at` asked it whether it contained the point, so a
+/// neither. `window-at` asked it whether it contained the point, so a
 /// window on a hidden workspace carried over the next monitor -- which never
 /// draws it -- was under the cursor there, and so was a window fading out at
 /// opacity zero over the neighbour that grew into its place (#135). Handed to
-/// scripts only through `sol.window_at`, which asks [`crate::state::owns`] of
+/// scripts only through `window-at`, which asks [`crate::state::owns`] of
 /// it, the rule the Rust hit test asks; nothing reads it in Lua.
 /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws` and
 /// `sol_window_at_over_a_window_fading_out_answers_the_neighbour_in_its_place`.
@@ -276,7 +276,7 @@ pub(crate) struct MonitorInfo {
     pub(crate) name: String,
     /// What windows may use: the monitor less whatever anchored surfaces have
     /// reserved. In the global space, so a rect from here can be handed
-    /// straight to `sol.place`.
+    /// straight to `place`.
     pub(crate) area: Rect,
     /// The whole monitor, exclusive zones included. What a wallpaper or a
     /// fullscreen window covers.
@@ -290,7 +290,7 @@ pub(crate) struct MonitorInfo {
     /// Its rotation, as the name a configuration would write.
     pub(crate) transform: String,
     /// Whether it has been turned off, which leaves it here, where it was.
-    /// `sol.monitors()` says `power = "off"`. See `power.rs`.
+    /// `monitors` says `power = "off"`. See `power.rs`.
     pub(crate) off: bool,
 }
 
@@ -307,49 +307,49 @@ pub(crate) struct Snapshot {
     /// Every monitor, in the order the compositor holds them.
     pub(crate) monitors: Vec<MonitorInfo>,
     /// Installed, visible applications, by name (`crate::apps::scan`'s own
-    /// order). `sol.apps()`. Shared, not copied, from one snapshot to the
+    /// order). `apps`. Shared, not copied, from one snapshot to the
     /// next: a snapshot is taken for every event a script hears.
     pub(crate) apps: std::rc::Rc<Vec<crate::apps::Entry>>,
-    /// The keyboard, for `sol.keyboard()` and for a shell that wants to draw
+    /// The keyboard, for `keyboard` and for a shell that wants to draw
     /// a layout indicator.
     pub(crate) keyboard: crate::keymap::State,
     pub(crate) shortcuts_owner: Option<u64>,
-    /// The active monitor's work area — what `sol.monitor()` answers.
+    /// The active monitor's work area — what the `work-area` change says.
     ///
     /// Kept as its own field rather than found in `monitors` every time,
     /// because almost every script wants exactly this and nothing else.
     pub(crate) work_area: Rect,
     pub(crate) cursor: (f64, f64),
     /// Every monitor's rectangle, as `Solium::window_under` is handed them:
-    /// the screens [`crate::state::owns`] asks about for `sol.window_at`.
+    /// the screens [`crate::state::owns`] asks about for `window-at`.
     /// Empty in a snapshot with no screens, which `owns` reads as "not known
     /// to be nowhere", as the compositor's own walk does.
     /// `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
     pub(crate) screens: Vec<Rectangle<i32, Logical>>,
-    /// The focused text field and its caret, for `sol.text_input()`:
+    /// The focused text field and its caret, for ``text-field` change:
     /// `text_input::tests::an_enabled_field_has_its_caret_in_the_global_space`.
     pub(crate) text_input: Option<crate::text_input::Field>,
     /// What is broken in an effect, a rule or the configuration, for
-    /// `sol.problems()`:
+    /// ``problems` change:
     /// `tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`.
     pub(crate) problems: Vec<ProblemRow>,
     /// Whether the session is locked. A binding run while it is -- one that
     /// asked to be, with `locked` -- may not act on windows; see
     /// [`crate::wm::convert::reaches_past_the_lock`].
     pub(crate) locked: bool,
-    /// Notifications as the service holds them, for `sol.notifications()`
+    /// Notifications as the service holds them, for `notifications`
     /// (#346). Shared, not copied, from one snapshot to the next.
     pub(crate) notifications: std::rc::Rc<crate::services::notifications::View>,
-    /// Audio as the service holds it, for `sol.audio()` (#347).
+    /// Audio as the service holds it, for `audio` (#347).
     pub(crate) audio: std::rc::Rc<crate::services::audio::View>,
-    /// The tray as the service holds it, for `sol.tray()` (#363).
+    /// The tray as the service holds it, for `tray` (#363).
     pub(crate) tray: std::rc::Rc<crate::services::tray::View>,
     /// The media players as the service holds them, and the time, for
-    /// `sol.media()` (#379).
+    /// `media` (#379).
     pub(crate) media: crate::services::media::Seen,
 }
 
-/// One problem, as `sol.problems()` hands it over: an effect, a rule or the
+/// One problem, as ``problems` change hands it over: an effect, a rule or the
 /// configuration, where, and what. Rust publishes; `lua/problems.lua` shows
 /// (`tests::a_broken_effect_reaches_sol_problems_with_its_file_and_line`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -362,7 +362,7 @@ pub(crate) struct ProblemRow {
     pub(crate) severity: &'static str,
 }
 
-/// What `sol.press` delivers to a window.
+/// What `press` delivers to a window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Press {
     /// A pointer button, by its evdev code: `BTN_LEFT` and the four after it.
@@ -373,7 +373,7 @@ pub(crate) enum Press {
 }
 
 /// What a binding asked for besides its handler: the table form of
-/// `sol.bind`'s third argument (#224). Both are off unless asked for, which is
+/// a binding's own options in `declare` (#224). Both are off unless asked for, which is
 /// what every binding was before there was a table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BindingOptions {

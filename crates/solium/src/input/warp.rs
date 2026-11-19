@@ -1,6 +1,6 @@
-//! The pointer taken somewhere by a script (#220): `sol.warp`, and the warp a
-//! `sol.focus` can carry. The policy -- which focus changes take the pointer
-//! along, where on the window and how -- is Lua's (`lua/follow.lua`); this is
+//! The pointer taken somewhere by a script (#220): `warp`, and the warp a
+//! `focus` can carry. The policy -- which focus changes take the pointer
+//! along, where on the window and how -- is the window manager's; this is
 //! the primitive.
 //!
 //! **The pointer goes at once; its picture flies.** What the pointer is over,

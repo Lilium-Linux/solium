@@ -71,8 +71,11 @@ impl<'a> Report<'a> {
 /// `tests::a_config_that_does_not_load_still_fails`,
 /// `tests::an_unrecognised_setting_still_fails`,
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
-pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
-    report.line(&format!("checking {}", path.display()));
+pub(crate) fn config(
+    which: impl Into<crate::wm::Which>,
+    report: &mut Report,
+) -> Option<crate::script::Scripts> {
+    report.line("checking the window manager");
     // Which window manager answers for it: the program `wm.toml` names, or
     // the shipped one. What is wrong with that file fails the check, as a
     // setting nothing reads does: the file would not do what it says.
@@ -92,7 +95,7 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
         report.fail(&format!("  {}: {line}", file.display()));
     }
     // Read only: a check changes none of the user's files (#473).
-    match crate::script::Scripts::load_for_check(path) {
+    match crate::script::Scripts::load_for_check(which) {
         Err(err) => {
             // Printed rather than only returned: this is a command someone
             // runs to read the answer, and the chain is where the answer is.
@@ -103,6 +106,11 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
             None
         }
         Ok(scripts) => {
+            // Where it said its configuration is: the file to mend when
+            // what follows fails.
+            if let Some(source) = scripts.source() {
+                report.line(&format!("  configuration  {}", source.display()));
+            }
             let bindings = scripts.bindings();
             report.line(&format!("  ok: {} binding(s)", bindings.len()));
             for binding in bindings {
@@ -168,12 +176,12 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 }
             }
 
-            // A refused engine key refuses the whole `sol.effects` call at
+            // A refused engine key refuses the whole `effects` call at
             // run time, its rules included, so it fails here, naming the key
             // (Ruling 9, `tests::a_refused_effects_key_fails_the_check`).
             if let Some(Err(error)) = scripts.effect_settings_at_load() {
                 report
-                    .fail("  sol.effects is refused -- neither its settings nor its rules apply:");
+                    .fail("  the `effects` section is refused -- neither its settings nor its rules apply:");
                 report.line(&format!("    {error}"));
             }
 
@@ -604,7 +612,7 @@ pub(crate) fn configured_rules(
 
 /// The `effects.sandbox` the configuration gives every effect's Lua, which
 /// `--check` loads effects and styles under, as the session does: the
-/// defaults when it names none or its `sol.effects` is refused.
+/// defaults when it names none or its `effects` is refused.
 /// `tests::an_effect_is_checked_under_the_configured_sandbox`,
 /// `cli::check_of_a_folder_reads_the_configured_sandbox`.
 pub(crate) fn configured_caps(scripts: &crate::script::Scripts) -> crate::effect::settings::Caps {
@@ -632,13 +640,16 @@ pub(crate) fn rules(
     rules: Option<&[crate::effect::rules::Rule]>,
     caps: crate::effect::settings::Caps,
     formats: Option<crate::pool::Formats>,
+    file: &Path,
 ) {
     report.line("  effects.rules:");
-    // Rules that did not parse, or whose `sol.effects` was refused, which
+    // Rules that did not parse, or whose `effects` was refused, which
     // `config` has failed, are not said to pass
     // (`tests::rules_that_did_not_parse_are_not_called_ok`).
     let Some(rules) = rules else {
-        report.line("    rules not checked: they did not parse, or their sol.effects was refused");
+        report.line(
+            "    rules not checked: they did not parse, or their `effects` section was refused",
+        );
         return;
     };
     let mut host = crate::effect::host::Host::new(library.clone());
@@ -649,18 +660,13 @@ pub(crate) fn rules(
         host.set_formats(formats);
     }
     host.want("check", wanted_by(rules));
-    let config = crate::script::Scripts::config_path();
     let mut refused = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
         if rule.fill == crate::effect::rules::Fill::Off {
             continue;
         }
         if let Err(problem) = crate::effect::plan::Chains::bind(&mut host, rule) {
-            refused.push(crate::effect::plan::rule_problem(
-                index + 1,
-                problem,
-                &config,
-            ));
+            refused.push(crate::effect::plan::rule_problem(index + 1, problem, file));
         }
     }
     say(report, &refused);
@@ -974,12 +980,11 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
             // Under the configuration's `effects.sandbox`, as the session
             // loads the folder; the defaults when it does not load
             // (`cli::check_of_a_folder_reads_the_configured_sandbox`).
-            let caps =
-                crate::script::Scripts::load_for_check(&crate::script::Scripts::config_path())
-                    .map_or_else(
-                        |_| crate::effect::settings::Caps::default(),
-                        |scripts| configured_caps(&scripts),
-                    );
+            let caps = crate::script::Scripts::load_for_check(crate::wm::Which::Chosen)
+                .map_or_else(
+                    |_| crate::effect::settings::Caps::default(),
+                    |scripts| configured_caps(&scripts),
+                );
             let mut gpu = render_node();
             let formats = gpu.as_mut().map(crate::pool::probe_formats);
             let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
@@ -1006,7 +1011,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
             }
         }
         None => {
-            if let Some(mut scripts) = config(&crate::script::Scripts::config_path(), &mut report) {
+            if let Some(mut scripts) = config(crate::wm::Which::Chosen, &mut report) {
                 // Read before `scenes` takes what the configuration handed
                 // over as it loaded.
                 let configured = configured_rules(&scripts);
@@ -1032,7 +1037,15 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                             caps,
                             compiler.as_mut().zip(formats),
                         );
-                        rules(&mut report, &library, configured.as_deref(), caps, formats);
+                        let file = scripts.named_in();
+                        rules(
+                            &mut report,
+                            &library,
+                            configured.as_deref(),
+                            caps,
+                            formats,
+                            &file,
+                        );
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1382,7 +1395,7 @@ mod tests {
     /// which comes first; then there is nothing this test can say.
     #[test]
     fn an_unrecognised_setting_still_fails() {
-        if let Some(own) = crate::script::Scripts::user_config_dir()
+        if let Some(own) = solium_paths::user_config_dir()
             && let Ok(entries) = std::fs::read_dir(&own)
             && entries
                 .filter_map(Result::ok)
@@ -1399,7 +1412,7 @@ mod tests {
         )
         .expect("user.lua");
         let path = directory.join("init.lua");
-        std::fs::copy(crate::assets::lua().join("init.lua"), &path).expect("the shipped init.lua");
+        std::fs::copy(solium_lua::shipped().join("init.lua"), &path).expect("the shipped init.lua");
         let (passed, text) = reported(|report| {
             let _ = config(&path, report);
         });
@@ -1581,7 +1594,7 @@ mod tests {
     /// first by `scripted::find_scene`. Then a test about the shipped
     /// configuration has nothing to say.
     fn the_users_own_files_are_in_the_way() -> bool {
-        let lua = crate::script::Scripts::user_config_dir()
+        let lua = solium_paths::user_config_dir()
             .and_then(|own| std::fs::read_dir(own).ok())
             .is_some_and(|mut entries| {
                 entries.any(|entry| {
@@ -1668,7 +1681,7 @@ mod tests {
         }
         crate::qml::qt_test::on_the_qt_thread(|| {
             software_qt();
-            let shipped = crate::assets::lua().join("init.lua");
+            let shipped = solium_lua::shipped().join("init.lua");
             let (passed, text) = check_scenes(&shipped);
             assert!(passed, "{text}");
         });
@@ -2170,7 +2183,16 @@ mod tests {
         let library = crate::effect::host::Library::with(Some(effects.clone()), place.join("none"));
         let check = |rules: &str| {
             let rules = rules_from(&place, rules);
-            reported(|report| super::rules(report, &library, rules.as_deref(), CAPS, None))
+            reported(|report| {
+                super::rules(
+                    report,
+                    &library,
+                    rules.as_deref(),
+                    CAPS,
+                    None,
+                    Path::new("init.lua"),
+                )
+            })
         };
         let (passed, out) = check(
             r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "live" } } }"#,
@@ -2195,8 +2217,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         assert!(rules.is_none(), "the premise: the rules did not parse");
         let library = crate::effect::host::Library::with(None, effect_fixtures());
-        let (_, out) =
-            reported(|report| super::rules(report, &library, rules.as_deref(), CAPS, None));
+        let (_, out) = reported(|report| {
+            super::rules(
+                report,
+                &library,
+                rules.as_deref(),
+                CAPS,
+                None,
+                Path::new("init.lua"),
+            )
+        });
         assert!(!out.contains("ok") && out.contains("not checked"), "{out}");
     }
 
@@ -2242,7 +2272,7 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(directory);
         assert!(!passed, "{out}");
-        assert!(out.contains("sol.input is refused"), "{out}");
+        assert!(out.contains("the `input` section is refused"), "{out}");
         assert!(
             out.contains("allow must be true, false or 'fullscreen'"),
             "{out}"
@@ -2286,8 +2316,16 @@ mod tests {
             &place,
             r#"{ { match = "*", part = "client", slot = "behind", effect = "big" } }"#,
         );
-        let (passed, out) =
-            reported(|report| super::rules(report, &library, rules.as_deref(), ROOMY, None));
+        let (passed, out) = reported(|report| {
+            super::rules(
+                report,
+                &library,
+                rules.as_deref(),
+                ROOMY,
+                None,
+                Path::new("init.lua"),
+            )
+        });
         let _ = std::fs::remove_dir_all(place);
         assert!(passed, "{out}");
     }

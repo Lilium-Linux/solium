@@ -1,6 +1,6 @@
-//! Typed reads of a section's keys, with the conversions Lua's own make, so a
-//! section read from a document accepts and refuses what it did when it was
-//! read from a Lua table: a number where text is wanted is its text.
+//! Typed reads of a section's keys, as forgiving as a configuration language
+//! is: a number where text is wanted is its text, so a section any window
+//! manager sends is read as the shipped one's always was.
 
 use crate::script::Doc;
 

@@ -215,7 +215,7 @@ impl Scripts {
         self.send(snapshot, wire::Event::Refused(id))
     }
 
-    /// A notification arriving, for `sol.on("notification")` to decide its
+    /// A notification arriving, for `notification` to decide its
     /// fate; `None` when no decider said anything.
     ///
     /// Unanswered in time, nothing was decided, and the notification is
@@ -236,7 +236,7 @@ impl Scripts {
     }
 
     /// Something happened to a notification (#346): `added`, `replaced`,
-    /// `closed`, `invoked`, `dnd` or `owner`, for `sol.on("notifications")`.
+    /// `closed`, `invoked`, `dnd` or `owner`, for `notifications`.
     pub(crate) fn notifications_event(
         &mut self,
         event: &crate::json::Json,
@@ -338,7 +338,7 @@ impl Scripts {
         )
     }
 
-    /// What `sol.act` attempts came to.
+    /// What `act` attempts came to.
     pub(crate) fn attempts_settled(&mut self, settled: &[Settled], snapshot: Snapshot) -> Outcome {
         self.send(
             snapshot,
@@ -355,7 +355,7 @@ impl Scripts {
         )
     }
 
-    /// What `sol.run{}`'s programs printed, and how they ended.
+    /// What `run{}`'s programs printed, and how they ended.
     pub(crate) fn runs_heard(
         &mut self,
         heard: &[crate::runs::Heard],

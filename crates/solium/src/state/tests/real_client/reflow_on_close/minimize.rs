@@ -623,8 +623,11 @@ fn super_m_minimizes_the_focused_window_through_the_shipped_configuration() {
     focus(&mut desk, pane);
     desk.install(&format!("require(\"minimize\")\n{HEARD}"));
     assert!(
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lua/init.lua"))
-            .is_ok_and(|init| init.contains("require(\"minimize\")")),
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../solium-lua/lua/init.lua"
+        ))
+        .is_ok_and(|init| init.contains("require(\"minimize\")")),
         "init.lua does not load minimize.lua"
     );
 

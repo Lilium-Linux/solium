@@ -4,6 +4,7 @@ members = [
     "crates/effects",
     "crates/json",
     "crates/layout",
+    "crates/paths",
     "crates/solium",
     "crates/solium-auth",
     "crates/solium-lua",

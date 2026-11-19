@@ -2609,7 +2609,7 @@ mod escape {
                 "package.path = {shipped:?} .. \"/?.lua\"\n\
                  sol.keyboard{{ layout = \"us,ru\", active = {active} }}\n\
                  require(\"overview\")\n",
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -2669,7 +2669,7 @@ mod escape {
         let state = &mut session.state;
         let mut scripts = state.scripts.take().expect("the scripts loaded");
         scripts
-            .reload(entry)
+            .reload_from(entry)
             .expect("reloading the shipped overview");
         state.start_scripts(Some(scripts));
         let snapshot = state.snapshot();

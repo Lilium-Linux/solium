@@ -749,11 +749,10 @@ impl Default for Pointer {
             chrome: None,
             x11: x11::Named::default(),
             // Resolved from the environment straight away, rather than waiting
-            // for `sol.cursor`. `lua/init.lua` does call it, but a user who
-            // copied `init.lua` into ~/.config/solium before this setting
-            // existed has one that does not — and `XCURSOR_THEME` being
-            // honoured must not depend on a line in a file they wrote last
-            // year. Two `env::var` calls; the theme itself is still lazy.
+            // for the window manager's `cursor_theme` section. The shipped one
+            // sends it, but one written before this setting existed does not,
+            // and `XCURSOR_THEME` being honoured must not depend on a line in
+            // a file the user wrote last year. Two `env::var` calls; the theme itself is still lazy.
             settings: theme::Settings::resolve(
                 &theme::Configured::default(),
                 &theme::Environment::read(),

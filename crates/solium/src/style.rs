@@ -1,7 +1,7 @@
 //! A pane style: a folder of QML declaring how a window looks.
 //!
-//! The manifest is `Pane.qml` and it is QML rather than Lua on purpose —
-//! style lives in QML and Lua configures the compositor, so a description of
+//! The manifest is `Pane.qml` and it is QML rather than the window manager's on purpose —
+//! style lives in QML and the window manager configures the compositor, so a description of
 //! how a thing looks belongs on the QML side of that line. It also means a
 //! simple style is one file with inline layers and a complex one is a folder,
 //! with no format to migrate between.
@@ -457,7 +457,7 @@ pub(crate) fn directories() -> Vec<PathBuf> {
 /// its directories rather than going looking for them — `find` supplies the
 /// real ones, a test supplies its own.
 ///
-/// The order is the one decorations already use and the one `sol.surface` uses:
+/// The order is the one decorations already use and the one `surface` uses:
 /// the user's directory shadows the shipped one, name by name, so replacing a
 /// style means dropping in a folder rather than copying everything else.
 ///

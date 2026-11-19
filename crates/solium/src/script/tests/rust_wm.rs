@@ -119,9 +119,8 @@ fn a_window_manager_in_rust_binds_a_key_and_places_a_window() {
 fn a_window_manager_in_rust_answers_a_reload() {
     let mut scripts = tiny();
     scripts.opened(1, one_screen(&[1]));
-    scripts
-        .reload(std::path::Path::new("/nothing/it/reads"))
-        .expect("reloaded");
+    // It reads no file, so a reload is only asked for and answered.
+    scripts.reload().expect("reloaded");
     assert!(scripts.has_binding("super+shift+e"));
     let outcome = scripts.opened(2, one_screen(&[1, 2]));
     assert_eq!(placed(&outcome), [(1, 0.0, 800.0), (2, 800.0, 800.0)]);
@@ -139,7 +138,10 @@ fn a_batch_says_what_the_compositors_clock_read() {
         if client.hello().is_err() {
             return;
         }
-        let _ = client.ready(vec![wire::Command::Listen(vec!["relayout".to_owned()])]);
+        let _ = client.ready(
+            vec![wire::Command::Listen(vec!["relayout".to_owned()])],
+            None,
+        );
         while let Ok(Heard::Batch(batch)) = client.next() {
             let said = wire::Command::Status(format!("{}", batch.at));
             let _ = client.reply(batch.serial, false, vec![said]);
@@ -167,6 +169,7 @@ fn a_window_manager_of_another_version_is_refused() {
             &Message::HelloAnswer(wire::HelloAnswer {
                 version: "9.4.0".to_owned(),
                 commands: Vec::new(),
+                source: None,
             }),
         );
     })

@@ -332,12 +332,17 @@ fn a_window_manager_with_nothing_to_answer_is_never_one_that_stopped() {
 
 /// **The shipped configuration loads with nothing of the user's own**: what
 /// the compositor starts in place of a configuration that keeps stopping.
+/// It is started safe, `hello` says so, and it says it loaded the shipped
+/// file.
 #[test]
 fn the_shipped_configuration_loads_by_itself() {
-    let scripts = Scripts::start_again(&Scripts::shipped_config(), true, Vec::new())
+    let scripts = Scripts::start_again(crate::wm::Which::Safe, Vec::new())
         .expect("the shipped configuration");
-    assert!(scripts.shipped_only());
-    assert_eq!(scripts.config(), crate::assets::lua().join("init.lua"));
+    assert!(scripts.safe());
+    assert_eq!(
+        scripts.source(),
+        Some(solium_lua::shipped().join("init.lua").as_path())
+    );
     assert!(
         scripts.has_binding("super+shift+r"),
         "with its own way to reload"

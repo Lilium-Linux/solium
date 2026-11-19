@@ -527,7 +527,7 @@ impl Solium {
             | "windows.minimize" | "windows.unminimize" => {}
             _ => {
                 if self.unknown_actions.insert(action.to_owned()) {
-                    tracing::warn!(action, "sol.act: no such action");
+                    tracing::warn!(action, "act: no such action");
                 }
                 return Err("unknown-action");
             }

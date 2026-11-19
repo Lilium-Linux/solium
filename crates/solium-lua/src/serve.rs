@@ -6,14 +6,14 @@
 //! on.
 
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
 use solium_wm_protocol as wire;
 use solium_wm_protocol::client::{Client, Heard};
 
-use crate::{Ask, Host, Setup};
+use crate::{Ask, Files, Host, Setup};
 
 /// A handler's questions, asked over the socket.
 struct Asks(Rc<Client>);
@@ -35,33 +35,37 @@ impl Ask for Asks {
 pub struct Wm {
     host: Host,
     client: Rc<Client>,
+    /// The files it read, and reads again at a reload.
+    files: Files,
 }
 
 impl Wm {
-    /// Read the compositor's `hello`, load the configuration at `config`
-    /// with the shipped Lua at `shipped` and the user's own at `user`, and
-    /// answer: `hello-answer` with what it asked for as it loaded, or
-    /// `goodbye` with why it would not load, which is then the error. What
-    /// `hello` hands back of a window manager this one takes the place of
-    /// is what `sol.keep` answers with.
-    pub fn start(
-        stream: UnixStream,
-        config: &Path,
-        shipped: PathBuf,
-        user: Option<PathBuf>,
-    ) -> Result<Self> {
+    /// Read the compositor's `hello`, load the configuration `files` says
+    /// for a window manager started safe or not (`hello.safe`), and answer:
+    /// `hello-answer` with what it asked for as it loaded and where its
+    /// configuration is, or `goodbye` with why it would not load, which is
+    /// then the error. What `hello` hands back of a window manager this one
+    /// takes the place of is what `sol.keep` answers with.
+    pub fn start(stream: UnixStream, files: impl FnOnce(bool) -> Files) -> Result<Self> {
         let client = Rc::new(Client::over(stream));
         let hello = client.hello()?;
+        let files = files(hello.safe);
         let setup = Setup {
-            shipped,
-            user,
+            shipped: files.shipped.clone(),
+            user: files.user.clone(),
             debug: hello.debug,
         };
         let carried = crate::Keep::from_wire(&hello.keeps);
-        match Host::load(config, setup, carried, Box::new(Asks(Rc::clone(&client)))) {
+        let asks = Box::new(Asks(Rc::clone(&client)));
+        match Host::load(&files.config, setup, carried, asks) {
             Ok((host, loaded)) => {
-                client.ready(loaded.commands)?;
-                Ok(Self { host, client })
+                let source = files.config.to_string_lossy().into_owned();
+                client.ready(loaded.commands, Some(source))?;
+                Ok(Self {
+                    host,
+                    client,
+                    files,
+                })
             }
             Err(err) => {
                 let _ = client.refuse(&format!("{err:#}"));
@@ -79,8 +83,8 @@ impl Wm {
                 self.client.answer(answer)?;
                 Ok(true)
             }
-            Ok(Heard::Reload(path)) => {
-                let reloaded = match self.host.reload(Path::new(&path), self.asks()) {
+            Ok(Heard::Reload) => {
+                let reloaded = match self.host.reload(&self.files.config, self.asks()) {
                     Ok(loaded) => wire::Reloaded::Loaded(loaded),
                     Err(err) => wire::Reloaded::Failed(format!("{err:#}")),
                 };
@@ -97,20 +101,29 @@ impl Wm {
         &self.host
     }
 
+    /// Load `config` at the next reload, in place of the file it started
+    /// on: for a test that changes which configuration a session runs.
+    pub fn load_next(&mut self, config: PathBuf) {
+        self.files.config = config;
+    }
+
     /// Questions to the compositor, over the socket.
     pub fn asks(&self) -> Box<dyn Ask> {
         Box::new(Asks(Rc::clone(&self.client)))
     }
 }
 
-/// Run the window manager on `stream` until the compositor says goodbye.
-pub fn serve(
-    stream: UnixStream,
-    config: &Path,
-    shipped: PathBuf,
-    user: Option<PathBuf>,
-) -> Result<()> {
-    let mut wm = Wm::start(stream, config, shipped, user)?;
+/// Run the window manager on `stream` until the compositor says goodbye,
+/// on the files it finds on this machine, or on `config` when one was named
+/// and it is not started safe.
+pub fn serve(stream: UnixStream, config: Option<PathBuf>) -> Result<()> {
+    let mut wm = Wm::start(stream, |safe| {
+        let mut files = Files::find(safe);
+        if let Some(config) = config.filter(|_| !safe) {
+            files.config = config;
+        }
+        files
+    })?;
     while wm.step()? {}
     Ok(())
 }

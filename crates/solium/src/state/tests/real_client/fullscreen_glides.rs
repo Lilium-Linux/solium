@@ -693,7 +693,7 @@ fn a_window_dragged_off_its_maximise_glides_under_the_pointer() {
     // `lua/floating.lua` is what pulls a maximised window off.
     let script = format!(
         "package.path = {shipped:?} .. \"/?.lua\"\nrequire(\"floating\")\n{SCRIPT}",
-        shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+        shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
     );
     let mut desk = Desk::new("dragged-off", &script);
     assert!(desk.state.trigger("super+shift+m"));

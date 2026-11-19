@@ -196,7 +196,7 @@ check "  and the release build" cmp -s "$dest/libexec/solium-lua" "$root/target/
 check "share/solium/solium.pam is a copy of dev/pam/solium" cmp -s "$share/solium.pam" "$root/dev/pam/solium"
 check "  mode 644" [ "$(stat -c %a "$share/solium.pam" 2>/dev/null)" = 644 ]
 check "share/solium/qml is a copy of crates/solium/qml" diff -r "$root/crates/solium/qml" "$share/qml"
-check "share/solium/lua is a copy of crates/solium/lua" diff -r "$root/crates/solium/lua" "$share/lua"
+check "share/solium/lua is a copy of crates/solium-lua/lua" diff -r "$root/crates/solium-lua/lua" "$share/lua"
 check "share/solium/effects is a copy of crates/solium/effects" diff -r "$root/crates/solium/effects" "$share/effects"
 check "a file left by an earlier install is gone" [ ! -e "$share/qml/removed-since.qml" ]
 check "share/solium/default-config is a copy of crates/solium/default-config" \
@@ -208,7 +208,7 @@ check "nothing staged is a symlink" [ -z "$(find "$destdir" -type l)" ]
 # file, the PAM file, four configuration files and the record of them.
 # The default configuration twice: beside the shipped QML, and copied into a
 # configuration directory that had none.
-expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects") \
+expected_files=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium-lua/lua" "$root/crates/solium/effects") \
     + 2 * $(count_files "$root/crates/solium/default-config") + 11))
 check "exactly those files, solium-session, the helper, the window manager, the session and PAM files, the units, the portal choice and their record ($expected_files)" \
     [ "$(count_files "$destdir")" -eq "$expected_files" ]
@@ -299,7 +299,8 @@ check "exits 0" [ $? -eq 0 ]
 # /proc/self/exe, so where $HOME or /tmp is reached through a link, the root it
 # logs is the resolved one.
 real_share="$(realpath "$share")"
-check "reads the staged init.lua" grep -qx "checking $real_share/lua/init.lua" "$work/check.out"
+check "its window manager reads the staged init.lua" \
+    grep -qx "  configuration  $real_share/lua/init.lua" "$work/check.out"
 check "resolves its assets to its own share/solium" \
     grep -q "shipped assets root=$real_share\$" "$work/check.out"
 check "loads the bindings" grep -q '^  ok: [0-9]* binding(s)' "$work/check.out"
@@ -394,8 +395,10 @@ mkdir -p "$nc_root/dev" "$nc_root/crates/solium" "$nc_root/target/install/releas
 cp "$install_sh" "$nc_root/dev/install.sh"
 cp -R "$root/dev/session" "$nc_root/dev/session"
 cp -R "$root/dev/pam" "$nc_root/dev/pam"
-cp -R "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+mkdir -p "$nc_root/crates/solium-lua"
+cp -R "$root/crates/solium/qml" "$root/crates/solium/effects" \
     "$root/crates/solium/default-config" "$nc_root/crates/solium/"
+cp -R "$root/crates/solium-lua/lua" "$nc_root/crates/solium-lua/"
 printf '#!/bin/sh\nexit 1\n' >"$nc_root/target/install/release/solium"
 cp "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-auth"
 cp "$nc_root/target/install/release/solium" "$nc_root/target/install/release/solium-lua"
@@ -467,7 +470,7 @@ check "the PAM service file is /etc/pam.d/solium, a copy of dev/pam/solium" \
 check "  mode 644" [ "$(stat -c %a "$sys/etc/pam.d/solium" 2>/dev/null)" = 644 ]
 check "the QML and Lua are copies in /usr/share/solium" \
     diff -r "$root/crates/solium/qml" "$sys_share/qml"
-check "  both of them" diff -r "$root/crates/solium/lua" "$sys_share/lua"
+check "  both of them" diff -r "$root/crates/solium-lua/lua" "$sys_share/lua"
 check "  all three of them" diff -r "$root/crates/solium/effects" "$sys_share/effects"
 sys_session="$sys/usr/share/wayland-sessions/solium.desktop"
 check "the session file is in /usr/share/wayland-sessions" [ -f "$sys_session" ]
@@ -485,7 +488,7 @@ done
 check "nothing went into XDG_CONFIG_HOME" [ ! -e "$sys$broken" ]
 check "share/solium has no session file, no PAM file and no checksums" \
     [ ! -e "$sys_share/solium.desktop" -a ! -e "$sys_share/solium.pam" -a ! -e "$sys_share/config.sha256" ]
-sys_expected=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium/lua" "$root/crates/solium/effects" \
+sys_expected=$(($(count_files "$root/crates/solium/qml" "$root/crates/solium-lua/lua" "$root/crates/solium/effects" \
     "$root/crates/solium/default-config") + 10))
 check "exactly those files ($sys_expected)" [ "$(count_files "$sys")" -eq "$sys_expected" ]
 check "no sudo line is printed" [ -z "$(grep -E '^  sudo ' "$work/system.log")" ]
@@ -618,7 +621,7 @@ check "Recommends slurp, which xdg-desktop-portal-wlr asks which screen to share
     recommends slurp
 check "Recommends foot, which super+return opens when no other terminal is installed" \
     recommends foot
-check "  and init.lua still looks for it" grep -qx '    "foot",' "$root/crates/solium/lua/init.lua"
+check "  and init.lua still looks for it" grep -qx '    "foot",' "$root/crates/solium-lua/lua/init.lua"
 if command -v rpmspec >/dev/null; then
     rpmspec -q "$spec" >"$work/rpmspec-bare.log" 2>&1
     check "the spec refuses to parse without commit and commitdate" [ $? -ne 0 ]

@@ -83,7 +83,7 @@ different list, not a longer one.
 
 [Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html)
 is the list of everything you can put in there, one row per section, and
-[the configuration reference](../crates/solium/lua/config.lua) explains each
+[the configuration reference](../crates/solium-lua/lua/config.lua) explains each
 key. Both are made from `config.lua`, the file that sets the defaults, so they
 cannot drift from it. [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 is every key that ships, and what it does.
@@ -107,7 +107,7 @@ Three guides go deeper than the recipes below:
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your pointer | any QML file, named by `cursor.scene` ([below](#your-own-pointer)) |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
-| the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
+| the shipped files, to copy from | `crates/solium/qml` and `crates/solium-lua/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
 | the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
 
 `~/.config` is `$XDG_CONFIG_HOME` when that is set, and `~/.local/state` is
@@ -2861,7 +2861,7 @@ as it animates. The pane styles' README has the rest, under
 
 Solium ships a definitions file for
 [lua-language-server](https://luals.github.io/),
-[`lua/meta/sol.lua`](../crates/solium/lua/meta/sol.lua), which describes every
+[`lua/meta/sol.lua`](../crates/solium-lua/lua/meta/sol.lua), which describes every
 `sol.*` function with its arguments. Point the server at it and your editor
 completes `sol.` and checks what you pass. A `.luarc.json` in
 `~/.config/solium`, beside your `user.lua`:
@@ -2874,7 +2874,7 @@ completes `sol.` and checks what you pass. A `.luarc.json` in
 ```
 
 That is where a package puts Solium's Lua. `dev/install.sh` puts it in
-`~/.local/share/solium/lua`, and in a checkout it is `crates/solium/lua`; write
+`~/.local/share/solium/lua`, and in a checkout it is `crates/solium-lua/lua`; write
 the whole path either way. Naming the `lua` folder rather than `lua/meta`
 also lets the server follow `require("modes")` and the other shipped modules.
 The same file is the Lua API page of the documentation site.

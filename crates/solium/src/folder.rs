@@ -17,7 +17,7 @@
 //! machine, `gio set <file> metadata::trusted true` itself answers "Setting
 //! attribute metadata::trusted not supported", because GIO's `metadata::`
 //! namespace is backed by the gvfs metadata daemon, not a plain extended
-//! attribute, and nothing here can assume that daemon is running. `sol.store`
+//! attribute, and nothing here can assume that daemon is running. `store`
 //! would be the natural fit once it exists.
 
 use std::{
@@ -123,7 +123,7 @@ fn expand_home(raw: &str, home: &str) -> String {
 /// plain executable bit would; a path reused for a different file after the
 /// first is deleted is not expected on a desktop folder, and is the trade
 /// made for durability with no database (`Later`: a real store once
-/// `sol.store` exists).
+/// `store` exists).
 #[derive(Debug)]
 pub(crate) struct Trust {
     path: PathBuf,

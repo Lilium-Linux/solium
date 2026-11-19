@@ -6,10 +6,10 @@
 Every page this writes is transcribed from a source that is also what the
 compositor runs, so none of them can say something the code does not:
 
-    configuration.md  crates/solium/lua/config.lua, comments and settings
+    configuration.md  crates/solium-lua/lua/config.lua, comments and settings
     settings.md       the same file: one row per top-level setting
     bindings.md       `solium --check`, with where each binding is made
-    lua-api.md        crates/solium/lua/meta/sol.lua
+    lua-api.md        crates/solium-lua/lua/meta/sol.lua
     protocol.md       crates/wm-protocol/wit, the window manager protocol
     environment.md    crates/solium/environment.txt, with where each is read
     rust.md           `cargo metadata`, and each crate's own `//!` summary
@@ -41,7 +41,7 @@ import links  # noqa: E402
 ROOT = links.ROOT
 DOCS = os.path.join(ROOT, "docs")
 OUT = os.path.join(DOCS, "generated")
-LUA = "crates/solium/lua"
+LUA = "crates/solium-lua/lua"
 CONFIG = f"{LUA}/config.lua"
 SOL_LUA = f"{LUA}/meta/sol.lua"
 ENVIRONMENT = "crates/solium/environment.txt"
@@ -652,7 +652,7 @@ def bindings(solium, rev):
         out += ["## Made elsewhere", "",
                 "Bound, but not by a `sol.bind` call this page could find:", ""]
         out += [f"- `{combo}`" for combo in unmatched]
-    write("generated/reference/bindings.md", "\n".join(out), "`solium --check` and crates/solium/lua")
+    write("generated/reference/bindings.md", "\n".join(out), "`solium --check` and crates/solium-lua/lua")
 
 
 # sol.lua -----------------------------------------------------------------------

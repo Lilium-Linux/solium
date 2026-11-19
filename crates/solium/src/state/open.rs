@@ -82,7 +82,7 @@ pub(super) struct Opened {
     /// A script answered with commands of its own, so the built-in open
     /// animation is not wanted.
     handled: bool,
-    /// A script asked for the keyboard to go somewhere -- a `sol.focus`
+    /// A script asked for the keyboard to go somewhere -- a `focus`
     /// among its commands. Where a new window's keyboard goes is then the
     /// script's decision and not [`Solium::offer_keyboard`]'s: see
     /// `a_script_that_moves_the_keyboard_at_open_has_the_last_word`.
@@ -122,7 +122,7 @@ impl ClientKind {
 /// How a window is given the keyboard as it is first shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FirstFocus {
-    /// Through [`Solium::focus_window`], as a click or `sol.focus` would be:
+    /// Through [`Solium::focus_window`], as a click or `focus` would be:
     /// raised, handed the keyboard through the gate, activated in X11's own
     /// terms, and announced to the scripts as `focus`.
     Focus,
@@ -210,7 +210,7 @@ impl Solium {
         u32::try_from(credentials.pid).ok()
     }
 
-    /// Which process a window belongs to, as `sol.windows()` and the
+    /// Which process a window belongs to, as the `window` rows and the
     /// `Windows` model both say it: a Wayland window's connection, as the
     /// kernel reports it ([`Self::client_pid`]); an X11 window's own X
     /// connection, as Xwayland reports it, or failing that the
@@ -240,7 +240,7 @@ impl Solium {
     /// only a token that is not falls through to being a request for focus.
     ///
     /// **Already** is the ordinary case, and it is asked first. An application
-    /// that is itself the process `sol.spawn` started was adopted by its pid
+    /// that is itself the process `spawn` started was adopted by its pid
     /// in `new_toplevel`, so by the time it activates with the token it was
     /// handed -- GTK, Qt and winit all do, alacritty among them -- its window
     /// is no longer loading. Asked after the loading test, as it was, this
@@ -605,7 +605,7 @@ impl Solium {
         }
     }
 
-    /// Start a program that shows no window (`sol.run`, #319): the child
+    /// Start a program that shows no window (`run`, #319): the child
     /// [`Self::spawn`] starts, but with no loading window opened for it and no
     /// activation token, since nothing will come back to fill either.
     /// `tests::a_program_run_in_the_background_opens_no_window`.
@@ -619,7 +619,7 @@ impl Solium {
         }
     }
 
-    /// Start a program whose output comes back (`sol.run{}`, #472): the
+    /// Start a program whose output comes back (`run{}`, #472): the
     /// child [`Self::run`] starts, with its output piped to `crate::runs`
     /// and stdin on `/dev/null`.
     pub(crate) fn run_read(&mut self, request: crate::runs::Request) {
@@ -1075,7 +1075,7 @@ impl Solium {
     /// is going: a window opened by its application is told to the layout only
     /// here, at its first frame, so every new toplevel took the keyboard before
     /// anything had placed it -- and one a layout then parked on a workspace
-    /// nobody is looking at kept it. A window launched with `sol.spawn` was
+    /// nobody is looking at kept it. A window launched with `spawn` was
     /// placed before its application existed, and took the keyboard when the
     /// application arrived, wherever that was. With `follow_overflow = false`
     /// both are ordinary, and every key typed afterwards went to a window the
@@ -1098,7 +1098,7 @@ impl Solium {
     /// note says what an X11 window does when it is not). Before the second
     /// round of #134's review a new xdg window in floating or tiling got the
     /// bare grant and no `focus`, while in scrolling it got all of it through
-    /// the strip's own `sol.focus`; the three modes now take one path, which
+    /// the strip's own `focus`; the three modes now take one path, which
     /// `a_window_opening_while_floating_takes_the_keyboard_as_a_focus` and its
     /// `tiling` and `scrolling` twins pin.
     ///

@@ -1,6 +1,6 @@
 //! Audio (03 §3.2.5, #347): the default output and input, every sink and
 //! source, every application's playback stream (#416), their volume and
-//! mute, for scenes (`Audio`) and for Lua (`sol.audio`, `sol.on("audio")`,
+//! mute, for scenes (`Audio`) and for the window manager (`audio`, `audio`,
 //! `audio.*` actions), and which window each stream is.
 //!
 //! * [`volume`] is WirePlumber's volume rules and the write discipline;
@@ -42,7 +42,7 @@ pub(crate) struct View {
 /// The service, owned by `Solium`.
 #[derive(Debug, Default)]
 pub(crate) struct Service {
-    /// Asked for by the configuration (`sol.audio`, an `audio.*` action).
+    /// Asked for by the configuration (`audio`, an `audio.*` action).
     wanted: bool,
     thread: Option<pw::Thread>,
     /// When to try PipeWire again after it went away, and how long the next
@@ -69,7 +69,7 @@ impl Service {
         self.dirty = true;
     }
 
-    /// `sol.audio{ max, step }`.
+    /// `audio{ max, step }`.
     pub(crate) fn configure(&mut self, settings: Settings) {
         self.model.settings = settings;
         self.want();
@@ -463,7 +463,7 @@ fn which(target: Option<&Json>) -> Result<Which, &'static str> {
     }
 }
 
-/// An event as Lua's `sol.on("audio")` reads it.
+/// An event as Lua's `audio` reads it.
 pub(crate) fn event_json(event: &Event) -> Json {
     Json::Object(BTreeMap::from([
         ("what".to_owned(), Json::Text(event.what.to_owned())),

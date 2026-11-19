@@ -79,7 +79,7 @@ pub(crate) enum Command {
         /// How deep the window is drawn. See [`crate::present::Frame::z`].
         ///
         /// Resolved rather than `Option`, unlike the four above it: nothing
-        /// downstream means "left alone" — `sol.present` builds a whole frame
+        /// downstream means "left alone" — `present` builds a whole frame
         /// every time — and a default kept here is one a test can reach
         /// without a compositor to run it against.
         z: f32,
@@ -133,7 +133,7 @@ pub(crate) enum Command {
         /// launch that grows out of its icon already in the icon's shape.
         deform: Option<DeformSpec>,
     },
-    /// Give a window the keyboard: `sol.focus`. `source` is what the
+    /// Give a window the keyboard: `focus`. `source` is what the
     /// handler that asked was answering, which the `focus` event tells
     /// (#220), and `warp` a warp to carry out once the window has it.
     Focus {
@@ -141,7 +141,7 @@ pub(crate) enum Command {
         source: FocusSource,
         warp: Option<Warp>,
     },
-    /// Take the pointer somewhere: `sol.warp` (#220). Carried out once every
+    /// Take the pointer somewhere: `warp` (#220). Carried out once every
     /// command of the dispatch has been applied; the last one asked for wins.
     Warp(Warp),
     Touch {
@@ -154,23 +154,23 @@ pub(crate) enum Command {
     },
     /// Send a window fullscreen on the monitor it is on, or bring it back
     /// from fullscreen: what the client itself would ask for, asked on its
-    /// behalf. `sol.toggle_fullscreen`, and `super+f` (#150).
+    /// behalf. `toggle-fullscreen`, and `super+f` (#150).
     ToggleFullscreen {
         id: u64,
     },
     /// Maximise a window, or put it back: the frame's button, from a script.
-    /// `sol.toggle_maximize`, and `super+shift+m` (#150).
+    /// `toggle-maximize`, and `super+shift+m` (#150).
     ToggleMaximize {
         id: u64,
     },
     /// Hold a window a move drag has where it is while the pointer goes on,
-    /// or let it go on from where it stands: `sol.drag_hold` (#452).
+    /// or let it go on from where it stands: `drag-hold` (#452).
     DragHold {
         id: u64,
         held: bool,
     },
     /// Where the pointer holds a window a move drag has: `along` of its
-    /// frame's width and height, `by` pixels further. `sol.drag_grip`
+    /// frame's width and height, `by` pixels further. `drag-grip`
     /// (#452).
     DragGrip {
         id: u64,
@@ -179,35 +179,35 @@ pub(crate) enum Command {
     },
     /// Keep a window an edge or modifier resize has at its size and place
     /// while the pointer goes on, or let the resize go on from where the
-    /// pointer is: `sol.resize_hold` (#454).
+    /// pointer is: `resize-hold` (#454).
     ResizeHold {
         id: u64,
         held: bool,
     },
-    /// Minimize a window (#30): `sol.minimize`, and `super+m`. Nothing for
+    /// Minimize a window (#30): `minimize`, and `super+m`. Nothing for
     /// a window already minimized. See `WindowInfo::minimized`.
     Minimize {
         id: u64,
     },
-    /// Show a minimized window again: `sol.unminimize`. Nothing for a
+    /// Show a minimized window again: `unminimize`. Nothing for a
     /// window that is not minimized.
     Unminimize {
         id: u64,
     },
     /// Show a minimized window anyway, where its present puts it, or stop:
-    /// `sol.show_minimized`. See `Pane::shown_minimized`.
+    /// `show-minimized`. See `Pane::shown_minimized`.
     ShowMinimized {
         id: u64,
         shown: bool,
     },
     /// Keep a window above every window that is not, or stop (#424):
-    /// `sol.keep_above`. `None` toggles it.
+    /// `keep-above`. `None` toggles it.
     KeepAbove {
         id: u64,
         on: Option<bool>,
     },
     /// One press and release delivered to a window, as a device would
-    /// deliver it: `sol.press`. A key gives the window the keyboard first,
+    /// deliver it: `press`. A key gives the window the keyboard first,
     /// and the focus is told with `source`, what the handler that asked was
     /// answering. See `Solium::press`.
     Press {
@@ -237,13 +237,13 @@ pub(crate) enum Command {
     Reload,
     /// Take back the compositor's shortcuts from the window holding them.
     TakeShortcutsBack,
-    /// Take the pointer back from the window holding it: `sol.release_pointer`
+    /// Take the pointer back from the window holding it: `release-pointer`
     /// (#427). See `state::pointer_hold`.
     ReleasePointer,
-    /// Lock the session, as `lock.*` says: `sol.lock_now`. Only ever locks.
+    /// Lock the session, as `lock.*` says: `lock-now`. Only ever locks.
     LockNow,
     /// Pull Solium's own lock scenes this far down over the unlocked
-    /// desktop, 0 to 1, or let them go back up: `sol.lock_peek`. A picture
+    /// desktop, 0 to 1, or let them go back up: `lock-peek`. A picture
     /// only: it never locks or unlocks. See `Solium::lock_peek`.
     LockPeek(Option<f64>),
     /// Where the monitors are, relative to each other.
@@ -276,8 +276,8 @@ pub(crate) enum Command {
         /// Whether the layout says this tile is smaller than the window's own
         /// minimum. See `WindowInfo::cramped`.
         cramped: bool,
-        /// Whether this is the window a `sol.move_direction` is moving: the
-        /// focused one, placed while the `direction` listeners run. A
+        /// Whether this is the window a directional move is moving: the
+        /// focused one, placed while the window manager answers the key. A
         /// fullscreen or maximised window is placed nowhere by a layout, and
         /// this is the one exception: moved onto another monitor, it is
         /// fullscreen or maximised there. See `Solium::carry_across`,
@@ -295,7 +295,7 @@ pub(crate) enum Command {
     Close {
         id: u64,
     },
-    /// One of the compositor's verbs, from `sol.act`; its outcome reaches the
+    /// One of the compositor's verbs, from `act`; its outcome reaches the
     /// attempt's `done` (Ruling 15).
     /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`.
     Act {
@@ -312,20 +312,20 @@ pub(crate) enum Command {
         program: String,
         args: Vec<String>,
     },
-    /// `sol.run`: start a program that shows no window, a command run in the
+    /// `run`: start a program that shows no window, a command run in the
     /// background (#319): no loading window opened for it, no activation
     /// token.
     Run {
         program: String,
         args: Vec<String>,
     },
-    /// `sol.run({ argv }, options)`: a command whose output, exit and lines
-    /// come back to the functions kept under its id in `sol._runs` (#472).
-    /// See `crate::runs`.
+    /// `run`: a command whose output, exit and lines come back as `runs`
+    /// events, by the id the window manager gave it (#472). See
+    /// `crate::runs`.
     RunRead(crate::runs::Request),
-    /// `sol.after` (`period` none) and `sol.every`: timer `id`, whose
-    /// function is kept in `sol._timers`, falls due `after` from now (#472).
-    /// See `crate::timers`.
+    /// `timer`: timer `id`, of the window manager's naming, falls due `after`
+    /// from now, and every `period` after that when it has one (#472). See
+    /// `crate::timers`.
     Timer {
         id: u64,
         after: Duration,
@@ -333,14 +333,14 @@ pub(crate) enum Command {
     },
     /// A timer's `cancel`, or one whose function is gone.
     TimerCancel(u64),
-    /// `sol.read` (#473): read a file on a thread of its own, for the
-    /// function kept under its id in `sol._files`. See `crate::files`.
+    /// `file-read` (#473): read a file on a thread of its own, told back by
+    /// the id the window manager gave it. See `crate::files`.
     FileRead(crate::files::ReadRequest),
-    /// `sol.write` (#473): write a file atomically, in order with the other
+    /// `file-write` (#473): write a file atomically, in order with the other
     /// writes to its path.
     FileWrite(crate::files::WriteRequest),
-    /// `sol.watch` (#473): follow the file at `path`, whose function is kept
-    /// under `id` in `sol._watches`; `shown` is the path as Lua wrote it.
+    /// `watch` (#473): follow the file at `path`, told back by `id`; `shown`
+    /// is the path as the window manager wrote it.
     Watch {
         id: u64,
         path: std::path::PathBuf,
@@ -348,7 +348,7 @@ pub(crate) enum Command {
     },
     /// A watch's `cancel`, or one whose function is gone.
     WatchCancel(u64),
-    /// `sol.store` read store `name`'s file, which held `text`: not saved
+    /// `store` read store `name`'s file, which held `text`: not saved
     /// again until it differs (#473).
     StoreLoaded {
         name: String,
@@ -394,52 +394,52 @@ pub(crate) enum Command {
     /// logind's `Lock` and sleep signals: the locker to run, and whether to
     /// hold sleep for it. See `crate::logind::Settings`.
     Lock(crate::logind::Settings),
-    /// `sol.notifications{ ... }`: whether Solium serves notifications, and
+    /// `notifications{ ... }`: whether Solium serves notifications, and
     /// how long banners last and how much history is kept (#346). See
     /// `crate::services::notifications::Config`.
     Notifications(crate::services::notifications::Config),
-    /// `sol.notify{ ... }`: one of the shell's own notifications (#346).
+    /// `notify{ ... }`: one of the shell's own notifications (#346).
     Notify(crate::services::notifications::Own),
-    /// `sol.audio{ ... }`, or `sol.audio()` with nothing to set (`None`):
+    /// `audio{ ... }`, or `audio` with nothing to set (`None`):
     /// either way, audio is wanted, and starts (#347).
     Audio(Option<crate::services::audio::model::Settings>),
-    /// `sol.tray{ ... }`: whether Solium is the tray (#363). See
+    /// `tray{ ... }`: whether Solium is the tray (#363). See
     /// `crate::services::tray::Config`.
     Tray(crate::services::tray::Config),
-    /// `sol.media{ ... }`: whether Solium follows the session's media
+    /// `media{ ... }`: whether Solium follows the session's media
     /// players (#379). See `crate::services::media::Config`.
     Media(crate::services::media::Config),
-    /// How Solium's own lock checks a password: `sol.lock`'s `lockout`,
+    /// How Solium's own lock checks a password: `lock`'s `lockout`,
     /// `secret_layout`, `helper_timeout_ms`, `retry` and `keypad` (#281). See
     /// `crate::lock_auth::Settings`.
     LockAuth(crate::lock_auth::Settings),
-    /// What Solium's own lock shows: `sol.lock`'s `native`, `scene`,
+    /// What Solium's own lock shows: `lock`'s `native`, `scene`,
     /// `prompt_on`, `enter_ms`, `exit_ms` and `keypad_margin` (#281). See
     /// `crate::lock_scene::Settings`.
     LockScene(crate::lock_scene::Settings),
     /// Which `WM_CLASS` names are refused a tile, decoration or bar entry
-    /// outright: `sol.x11`, from `config.x11` (#221). See
+    /// outright: the `x11` section (#221). See
     /// `crate::xwayland::Settings`.
     X11(crate::xwayland::Settings),
-    /// Whether `ext-workspace-v1` is offered: `sol.workspaces_offered`, from
+    /// Whether `ext-workspace-v1` is offered: `workspaces_offered`, from
     /// `config.workspaces.offered` (#60). See `crate::ext_workspace`.
     WorkspacesOffered(bool),
     /// Which of the window protocols a shell that is its own program is
-    /// offered: `sol.toplevels`, from `config.toplevels` (#50). See
+    /// offered: `toplevels`, from `config.toplevels` (#50). See
     /// `crate::toplevels::Settings`.
     Toplevels(crate::toplevels::Settings),
     /// Whether `zwlr-output-management-v1` is offered:
-    /// `sol.output_management`, from `config.output_management` (#51). See
+    /// `output_management`, from `config.output_management` (#51). See
     /// `crate::output_management`.
     OutputManagement(bool),
     /// Who draws a Wayland window's frame, Solium or the application:
-    /// `sol.frames`, from `config.frames` (#462). See `crate::framing`.
+    /// `frames`, from `config.frames` (#462). See `crate::framing`.
     Frames(crate::framing::Settings),
     /// Which of a client's layer surfaces below the windows take the pointer
-    /// and touch: `sol.layer_shell`, from `config.layer_shell` (#461). See
+    /// and touch: `layer_shell`, from `config.layer_shell` (#461). See
     /// `crate::layer::Settings`.
     LayerShell(crate::layer::Settings),
-    /// Override the input profile's focus policy: `sol.focus_mode`, which
+    /// Override the input profile's focus policy: `focus_mode`, which
     /// `lua/modes.lua` calls on every mode change and `init.lua` once at
     /// load, both from `config.focus` (#219).
     ///
@@ -480,7 +480,7 @@ pub(crate) enum Command {
     /// resolved in `cursor::theme::Settings::resolve`, not here, so that it is
     /// in one place and testable without Lua.
     Cursor(crate::cursor::theme::Configured),
-    /// `sol.effects{ rules = … }`: the user's rules, parsed, or every error
+    /// `effects{ rules = … }`: the user's rules, parsed, or every error
     /// in them, applied whole or not at all
     /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`); and the
     /// engine's own keys beside them, `sandbox`, `limits`, `present`, `xray`
@@ -490,21 +490,20 @@ pub(crate) enum Command {
         rules: Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::rules::RuleError>>,
         settings: Result<crate::effect::settings::Settings, String>,
     },
-    /// `sol.startup{ first_frame = … }`: the first frame's gate, read and
+    /// `startup{ first_frame = … }`: the first frame's gate, read and
     /// checked (`warm::startup`), or why it was refused
     /// (`tests::sol_startup_reaches_the_compositor`).
     Startup(Result<crate::warm::FirstFrame, String>),
 }
 
-/// What moved the keyboard, as the `focus` event tells it and
-/// `sol.focus_source()` answers (#220). A policy hangs off it: the shipped
-/// one takes the pointer along for a key and not for a click
-/// (`lua/follow.lua`).
+/// What moved the keyboard, as the `focused` event tells it (#220). A policy
+/// hangs off it: the shipped window manager takes the pointer along for a
+/// key and not for a click.
 ///
-/// A `sol.focus` is told with what its handler was answering, and a call
+/// A `focus` is told with what its handler was answering, and a call
 /// inside the handler can say more: a key binding's handler is `Binding`,
-/// but a `sol.focus` a `sol.focus_direction` asks for while its listeners
-/// run is `Direction`, whatever called it. The compositor's own changes of
+/// but a `focus` a window manager sends for a direction says `Direction`,
+/// whatever called it. The compositor's own changes of
 /// focus say what they are.
 /// `tests::the_focus_event_says_what_moved_the_keyboard`,
 /// `state::tests::real_client::follow::the_compositors_own_focus_changes_say_what_they_are`.
@@ -512,9 +511,9 @@ pub(crate) enum Command {
 pub(crate) enum FocusSource {
     /// A key binding's handler.
     Binding,
-    /// A `sol.focus_direction`'s listeners.
+    /// A window manager answering a key that moves the keyboard in a direction.
     Direction,
-    /// A `sol.move_direction`'s listeners.
+    /// A window manager answering a key that moves a window in a direction.
     Move,
     /// A press on a window, or a `click` listener while a script holds
     /// input.
@@ -535,7 +534,7 @@ pub(crate) enum FocusSource {
     Activate,
     /// The keyboard finding a window after the one it was on went.
     Settle,
-    /// `sol.focus` from anything else.
+    /// `focus` from anything else.
     #[default]
     Script,
 }
@@ -627,7 +626,7 @@ impl Default for Loading {
 /// (#115): a floating window's edge drag, which no layout is asked about.
 ///
 /// The layouts ask the same question of the same settings in `sizes.lua`,
-/// which is what hands them over, with `sol.client_sizes`, when it loads:
+/// which is what hands them over, with `client_sizes`, when it loads:
 /// `floating.client_limits`, and `tiling.client_size_ignore`. The default is
 /// the one a configuration that never says so gets -- every application
 /// believed. See `Solium::outer_limits`, and
@@ -661,7 +660,7 @@ impl ClientSizes {
     }
 }
 
-/// What became of one `sol.act`: whether the compositor did it, and if not,
+/// What became of one `act`: whether the compositor did it, and if not,
 /// why: `"unknown-action"`, `"unknown-window"` or `"bad-data"` (Ruling 15).
 /// `tests::sol_act_returns_an_attempt_and_done_hears_the_outcome_once`,
 /// `state::tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
@@ -683,7 +682,7 @@ pub(crate) struct Outcome {
     pub(crate) grab: Option<bool>,
     /// What the compositor should show as the active mode, if it changed.
     pub(crate) status: Option<String>,
-    /// The timing the last `sol.animate` in this dispatch set, or `None` when
+    /// The motion this dispatch's answer set, or `None` when
     /// nothing called it: what a `fullscreen` or `maximize` listener answers
     /// the compositor's own move with.
     /// `tests::a_change_is_answered_with_the_motion_sol_animate_set`.

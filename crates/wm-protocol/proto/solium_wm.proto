@@ -1067,6 +1067,13 @@ message Hello {
   // name, as its `keep` commands last said: nothing for the first
   // of a session.
   repeated Kept keeps = 3;
+  // Whether this window manager is started in place of one that
+  // kept stopping, or would not start. It reads none of the user's
+  // own configuration, so the session has keys that work and the
+  // user can mend what stopped the last one; a reload tries theirs
+  // again. The compositor starts its shipped window manager so,
+  // whatever `wm.toml` names.
+  bool safe = 4;
 }
 
 // The window manager's reply to `hello`: the protocol it was built
@@ -1077,6 +1084,10 @@ message HelloAnswer {
   string version = 1;
   // Applied before the first frame is drawn.
   repeated Command commands = 2;
+  // Where the window manager's configuration is, when it has one:
+  // the file a problem with what it asked for names, such as a
+  // setting the compositor refused.
+  optional string source = 3;
 }
 
 // A view of a session service: its name, and the document of its rows.
@@ -1582,10 +1593,10 @@ message Message {
     Asked query = 6;
     // From the compositor: the answer to the query of that serial.
     Replied reply = 7;
-    // From the compositor: the configuration at this path is to be
-    // loaded again (the user asked for a reload, or it changed on
-    // disk). Answered with `reloaded`.
-    string reload = 8;
+    // From the compositor: load the configuration again, from wherever
+    // the window manager found it (the user asked for a reload, or a
+    // file under the configuration changed). Answered with `reloaded`.
+    Unit reload = 8;
     // From the window manager, in answer to `reload`.
     Reloaded reloaded = 9;
     // Either side is closing the connection, and says why. A window
