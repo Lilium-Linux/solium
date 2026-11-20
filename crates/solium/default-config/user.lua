@@ -31,6 +31,27 @@ local motion = require("motion")
 -- it, so they are this copy's own and not whatever ~/.config holds.
 local here = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/solium"
 
+-- Solium's own wallpaper, beside the QML that ships. Installed, that is
+-- `share/solium/qml`, next to the `lua` this configuration's modules come
+-- from; in a build tree the Lua and the QML are two crates, `solium-lua` and
+-- `solium`, side by side. Nil when neither has it, which is the plain colour.
+local function shipped_wallpaper()
+    local shipped = package.searchpath("wallpaper", package.path)
+    if not shipped then
+        return nil
+    end
+    local root = shipped:gsub("/lua/wallpaper%.lua$", "")
+    for _, qml in ipairs({ root .. "/qml", root .. "/../solium/qml" }) do
+        local path = qml .. "/wallpaper/solium.png"
+        local file = io.open(path, "rb")
+        if file then
+            file:close()
+            return path
+        end
+    end
+    return nil
+end
+
 return {
     -- Monitors: Solium places them itself. To arrange them, name each by its
     -- connector (`solium --probe` lists them), for example:
@@ -74,8 +95,7 @@ return {
     -- Solium's own picture, by its path where Solium is installed: the bare
     -- name "solium" would be looked for beside qml/wallpaper.qml here, not
     -- beside the shipped one. Any image path works (`~` is expanded).
-    wallpaper = package.searchpath("wallpaper", package.path):gsub("/lua/wallpaper%.lua$", "")
-        .. "/qml/wallpaper/solium.png",
+    wallpaper = shipped_wallpaper(),
 
     -- Effects (the rules are looks.lua's): an effect re-runs on every frame
     -- while a window moves, so a blurred backdrop keeps up with each
