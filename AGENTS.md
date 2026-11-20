@@ -30,9 +30,9 @@ file is out of date.
 | `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
-| `crates/animation/`, `crates/layout/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the window arrangements, the effect format, and where a program of Solium's finds its shipped files and the user's |
+| `crates/animation/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the effect format, and where a program of Solium's finds its shipped files and the user's |
 | `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
-| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
+| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, their arithmetic (the dwindle tree, the scrolling strip, the overview grid) is `layouts/`, with its cases in `specs/`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
 | `sdk/csharp/` | The package a window manager in C# is built on: the protocol's types, generated from the `.proto` by protobuf's own generator, the connection, the desktop kept current, and a whole window manager on it (`Tiny/`). Built with `dotnet`, not by the gate |
@@ -58,7 +58,7 @@ cannot do it itself.
 | check a change, as every pull request must | `dev/gate.sh`, or `SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh` in the image |
 | build | `cargo build` |
 | run the tests whose names contain a phrase | `cargo test -p solium <phrase>` (the crate is a binary: there is no `--lib`) |
-| test another crate | `cargo test -p solium-animation`, `-p solium-layout`, `-p solium-effects`, `-p solium-auth` |
+| test another crate | `cargo test -p solium-animation`, `-p solium-lua` (with the shipped layouts' specs), `-p solium-effects`, `-p solium-auth` |
 | check that the Lua configuration loads | `./target/debug/solium --check` |
 | format | `cargo fmt --all` |
 | build the documentation site | `dev/docs.sh` |
@@ -127,6 +127,10 @@ Most review findings are one of these.
   changes the behaviour.
 - **A new mode needs no new Rust.** If it does, the transform layer is missing
   something: fix the layer, do not special-case the mode.
+- **Arrangements are configuration.** Tiling, scrolling, the overview grid and
+  any other layout's arithmetic are Lua in `crates/solium-lua/lua/layouts/`,
+  never Rust, in the compositor or in the window manager's runtime: not as a
+  helper, not as a fast path (a test refuses it).
 - **Windows answer at once.** Opening, resizing and closing a window respond on
   the next frame, and the application catches up. Waiting for the application
   is an option a layout may set, never the default.

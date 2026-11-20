@@ -11,6 +11,7 @@
 -- something and *that* is the bug to fix -- not this file.
 
 local monitors = require("monitors")
+local grid = require("layouts.grid")
 
 -- Kept across `super+shift+r`, because the grab and the thumbnails outlive a
 -- reload: a fresh `false` here left an overview Escape could not leave.
@@ -88,13 +89,13 @@ function overview.enter()
     -- other screen to be shown is a window you then have to find. Windows stay
     -- on the monitor they are on; they only get smaller.
     --
-    -- The grid comes from `sol.layout`, the same arrangement the preview page
-    -- draws, so what is tuned there is what happens here.
+    -- The grid is `layouts/grid.lua`: each window keeps its shape in its cell
+    -- and is never made larger than it is.
     sol.animate(ENTER)
     for _, each in ipairs(monitors.each(windows)) do
         if #each.windows > 0 then
             local area = each.monitor
-            local slots = sol.layout.grid(each.windows, {
+            local slots = grid.arrange(each.windows, {
                 x = area.x,
                 y = area.y,
                 w = area.w,

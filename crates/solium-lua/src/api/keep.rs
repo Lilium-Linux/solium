@@ -13,8 +13,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // Answers the table the last configuration had under this name, or the
     // defaults on the first load. Mutate it in place and the next reload gets
     // what you left in it; see [`Kept`] for what may be in one -- plain data,
-    // and the trees and strips `sol.layout` makes, which is how `tiling.lua`
-    // and `scrolling.lua` keep their arrangement (#118).
+    // which is what `tiling.lua`'s trees and `scrolling.lua`'s strips are, so
+    // they keep their arrangement (#118).
     //
     // **Why this is the host's job and not a script's.** Two shipped scripts
     // had already invented an answer to surviving a reload, and neither could

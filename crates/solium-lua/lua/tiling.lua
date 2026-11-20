@@ -6,13 +6,12 @@
 -- pointing at when you opened a terminal changes the result, and no function
 -- of "how many windows are there" can recover that afterwards.
 --
--- So the arrangement is a tree, and the tree lives here, in the script that
--- owns the layout. `sol.layout.tree()` builds one; the compositor holds no
--- opinion about tiling at all.
+-- So the arrangement is a tree, and the tree lives here, in the configuration
+-- that owns the layout: `layouts/dwindle.lua` is the tree and its arithmetic,
+-- and this file decides which tree a window goes in and when. The compositor
+-- holds no opinion about tiling at all.
 --
--- Reimplemented from Hyprland's `CDwindleAlgorithm::addTarget`
--- (src/layout/algorithm/tiled/dwindle/, BSD-3-Clause), not copied: that is
--- C++ against its own window types. The behaviour is the specification.
+-- Behaviour modelled on Hyprland's dwindle layout, with no Hyprland code.
 
 local config = require("config")
 local workspaces = require("workspaces")
@@ -21,6 +20,7 @@ local monitors = require("monitors")
 local dialogs = require("dialogs")
 local sizes = require("sizes")
 local direction = require("direction")
+local dwindle = require("layouts.dwindle")
 
 -- `exiled` is the ids this layout has taken out of its trees because they are
 -- modal dialogs, and it is what makes `unset_modal` reversible: only a window
@@ -38,8 +38,9 @@ local direction = require("direction")
 --
 -- `trees` is the arrangement, one tree per desk (see `tree_for`), and
 -- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
--- of configuration, not of arrangement. A tree is userdata, and the host carries
--- it across whole, split ratios included. Before it did, the trees died with
+-- of configuration, not of arrangement. A tree is plain data, which the host
+-- carries across whole, split ratios included, and `dwindle.adopt` makes a
+-- tree again. Before it did, the trees died with
 -- the Lua state and `adopt` built new ones from `sol.windows()`, which lists the
 -- windows topmost first -- so the window in use went in first and took the
 -- screen, and windows not stacked in the order they were opened in traded
@@ -62,6 +63,14 @@ local direction = require("direction")
 local kept = sol.keep("tiling", { trees = {}, cramped = {}, minimized = {} })
 kept.cramped = kept.cramped or {}
 kept.minimized = kept.minimized or {}
+-- A tree that comes back as something else is left out, and its desk tiled
+-- again from the windows on it, by `adopt`.
+for key, tree in pairs(kept.trees) do
+    kept.trees[key] = dwindle.adopt(tree)
+    if not kept.trees[key] then
+        sol.log("tiling: what was kept for " .. tostring(key) .. " is not a tree; that desk is tiled again")
+    end
+end
 local tiling = {
     active = false,
     trees = kept.trees,
@@ -194,7 +203,7 @@ end
 local function tree_for(monitor)
     local key = monitors.key(workspaces.on(monitor), monitor)
     if not tiling.trees[key] then
-        tiling.trees[key] = sol.layout.tree()
+        tiling.trees[key] = dwindle.new()
     end
     return tiling.trees[key]
 end
@@ -434,7 +443,7 @@ function tiling.adopt()
                 -- the tree of the desk in view only when that is where it is.
                 local key = monitors.key(workspaces.at(window.id, name), name)
                 present[window.id] = key
-                local tree = tiling.trees[key] or sol.layout.tree()
+                local tree = tiling.trees[key] or dwindle.new()
                 tiling.trees[key] = tree
                 if not tree:contains(window.id) then
                     -- `rejoin`, never `open_in`: these windows are open
@@ -524,7 +533,7 @@ local function open_in(id, monitor, target, cursor)
                 -- wanted, and a leaf left in it would keep half the screen for
                 -- a window that is not there. See
                 -- `a_workspace_left_empty_by_a_send_is_given_whole`.
-                local fresh = sol.layout.tree()
+                local fresh = dwindle.new()
                 tiling.trees[monitors.key(index, monitor)] = fresh
                 fresh:insert(id, nil, nil, nil, area)
                 sol.log(string.format(
@@ -782,7 +791,7 @@ local function home_of(id)
     local monitor = monitors.of(id)
     local key = monitors.key(workspaces.at(id, monitor), monitor)
     if not tiling.trees[key] then
-        tiling.trees[key] = sol.layout.tree()
+        tiling.trees[key] = dwindle.new()
     end
     return tiling.trees[key], key, monitor
 end
@@ -916,7 +925,7 @@ workspaces.moved(function(id, _, to, why, x, y)
     end
     local monitor = monitors.of(id)
     local key = monitors.key(to, monitor)
-    local tree = tiling.trees[key] or sol.layout.tree()
+    local tree = tiling.trees[key] or dwindle.new()
     tiling.trees[key] = tree
     if why == "dropped" then
         let_go(tree, id, x, y, monitor)
@@ -1007,11 +1016,10 @@ sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side)
     -- gets its own edge -- `edge_x` for the vertical seam, `edge_y` for the
     -- horizontal one -- and `drag_seam` reads only the one its side names, so
     -- neither axis can borrow the other's.
-    if horizontal_side then
-        tree:drag_seam(id, horizontal_side, edge_x, edge_y, options(monitor))
-    end
-    if vertical_side then
-        tree:drag_seam(id, vertical_side, edge_x, edge_y, options(monitor))
+    for _, side in ipairs({ horizontal_side or false, vertical_side or false }) do
+        if side and not tree:drag_seam(id, side, edge_x, edge_y, options(monitor)) then
+            once("resize: " .. tostring(side) .. " is not a side a window has (left, right, top or bottom)")
+        end
     end
     -- Placed immediately. An animation would be chasing the pointer, and the
     -- pointer wins.

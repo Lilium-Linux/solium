@@ -57,8 +57,7 @@ impl Host {
     ///  1. **Whatever it handed to `sol.keep`, and nothing else.** A reload
     ///     throws the whole Lua state away, so a script's own variables are
     ///     gone by construction. `sol.keep` is the one exception, it is opt-in,
-    ///     and it holds plain data and the layouts `sol.layout` makes, nothing
-    ///     else — see [`Kept`].
+    ///     and it holds plain data, nothing else — see [`Kept`].
     ///  2. **The world as it now is, re-announced.** `restore`, then
     ///     `monitors`, then `layout` — see `solium::state::Solium::reload`.
     ///     A script that can rebuild itself from `sol.windows()` and

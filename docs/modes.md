@@ -653,10 +653,10 @@ local state = sol.keep("my-mode", { showing = 1 })
 
 You get the table the last load left under that name, or the defaults the first
 time. Mutate it in place; the host takes a copy when the reload happens. It
-holds plain data — numbers, strings, booleans and tables of those — and the
-trees and strips `sol.layout.tree()` and `sol.layout.scroller()` make, which
-come back whole. A function in there cannot cross and is named in the log
-rather than dropped in silence.
+holds plain data — numbers, strings, booleans and tables of those — which is
+what the shipped layouts' trees and strips are, so they come back whole; a
+layout's `adopt` makes one a tree or a strip again. A function in there cannot
+cross and is named in the log rather than dropped in silence.
 
 Keep as little as you can. Anything you can work out again from `sol.windows()`
 and `sol.monitors()` should be worked out again, because a keep is a claim about
@@ -1242,28 +1242,36 @@ window to its new rectangle
 
 ## The arrangements that ship
 
-You do not have to compute geometry yourself.
+You do not have to compute geometry yourself. The arrangements are shipped
+configuration, in `lua/layouts/` beside the modes, and like the rest of it
+they are Lua you can read, copy into `~/.config/solium/layouts/` and change:
+the copy is what `require` finds. They are arithmetic on rectangles and
+nothing else, with no `sol` in them, and their cases are
+`crates/solium-lua/specs/`.
 
 ```lua
-local slots = sol.layout.grid(windows, area)          -- overview's grid
-local slots = sol.layout.master_stack(count, area)    -- one big, the rest beside
-local slots = sol.layout.strip(columns, area)         -- a row, with an offset
+local grid = require("layouts.grid")
+local slots = grid.arrange(windows, area)     -- overview's grid: windows in, rectangles out
+
+local dwindle = require("layouts.dwindle")
+local tree = dwindle.new()                    -- a dwindle tree
+
+local scroller = require("layouts.scroller")
+local strip = scroller.new(config.scrolling, sol.log)  -- niri's model; a width it
+                                                       -- cannot use is said to sol.log
 ```
 
-These are pure: windows in, rectangles out. Two are not, and cannot be:
-
-```lua
-local tree = sol.layout.tree()        -- dwindle
-local scroller = sol.layout.scroller(config.scrolling)  -- niri's model
-```
-
-A dwindle tree is stateful because the arrangement is. Where a window lands
+The grid is pure. A tree and a strip are not, and cannot be: a dwindle tree
+is stateful because the arrangement is. Where a window lands
 depends on which window was split and where the pointer was, and no function of
 "how many windows are there" can recover that afterwards. Same for a scroller:
 which column is active and where the view sits relative to it are not in the
 window list.
 
-They are held by the script that made one, not by the compositor:
+They are held by the script that made one, not by the compositor, as plain
+tables: `sol.keep` carries one across a reload as it is, and `dwindle.adopt`
+or `scroller.adopt` makes what comes back a tree or a strip again, or answers
+`nil` for something that is not one.
 
 ```lua
 tree:insert(id, target, x, y, options)
@@ -1303,7 +1311,7 @@ hard against a seam stops there rather than vanishing, and to whatever keeps
 every tile on either side of the seam at `options.minimum`. Those clamps are
 the only bounds on a tiled drag: the compositor sends an unfloored edge,
 deliberately, because a floor measured in a window's pixels cannot bound a
-seam's position — see `Tiling::drag_seam`. A tile already under the minimum
+seam's position — see `drag_seam` in `layouts/dwindle.lua`. A tile already under the minimum
 is not snapped up to it when grabbed, which would move it on the first frame:
 it cannot be shrunk further, and can be grown only while the tiles across the
 seam have room to give. A seam with a tile under the minimum on both sides
@@ -1326,35 +1334,34 @@ for is laid out short, and its slot says `cramped = true`. The scroller reads
 floor in it.
 
 `options` is a monitor's work area with `gap`, `split`, `minimum` and `floors`
-added — and, for the other arrangements, `ratio` (the master window's share,
-for `master_stack`), `column` (a column's share, for `sol.layout.scrolling`)
-and `padding` (around each thumbnail, for `grid`).
+added, and for the grid `padding` around each thumbnail.
 Passing the monitor in rather than the tree asking for it is what lets one tree
 per workspace *per monitor* exist without any of them knowing about either.
 Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
 snapshot.
 
-A scroller holds columns, and each column holds windows stacked top to bottom:
+A strip holds columns, and each column holds windows stacked top to bottom:
 
 ```lua
-scroller:insert(id, options)              -- a new column, right of the active one
-scroller:insert_into_column(id, options)  -- into the active column instead
-scroller:remove(id)
-scroller:focus_window(id, options)        -- focus it, and bring its column into view
-scroller:focus_sideways(by, options)      -- by columns: -1 left, 1 right
-scroller:focus_vertically(by)             -- within the active column
-scroller:move_column(by, options)         -- swap the active column with a neighbour
-scroller:consume()                        -- pull the next column's focused window in
-scroller:expel(options)                   -- push the focused window out into a column
-scroller:move_to_column_of(id, target, options)  -- what a drop means here
-scroller:widen(id, by, options)           -- by a share of the view, clamped
-scroller:cycle_width(options)             -- through config.scrolling.widths
-scroller:configure(config.scrolling)      -- new widths, same columns and view
-scroller:scroll_by(dx)                    -- move the view, not the focus
-scroller:focused()
-scroller:contains(id)
-scroller:windows()                        -- left to right, then top to bottom
-scroller:layout(options)                  -- the slots, to hand to sol.place
+strip:insert(id, options)              -- a new column, right of the active one
+strip:insert_into_column(id, options)  -- into the active column instead
+strip:remove(id)
+strip:focus_window(id, options)        -- focus it, and bring its column into view
+strip:focus_sideways(by, options)      -- by columns: -1 left, 1 right
+strip:focus_vertically(by)             -- within the active column
+strip:move_vertically(by)              -- trade places within the column
+strip:move_column(by, options)         -- swap the active column with a neighbour
+strip:consume()                        -- pull the next column's focused window in
+strip:expel(options)                   -- push the focused window out into a column
+strip:move_to_column_of(id, target, options)  -- what a drop means here
+strip:widen(id, by, options)           -- by a share of the view, clamped
+strip:cycle_width(options)             -- through config.scrolling.widths
+strip:configure(config.scrolling, sol.log)  -- new widths, same columns and view
+strip:scroll_by(dx)                    -- move the view, not the focus
+strip:focused()
+strip:contains(id)
+strip:windows()                        -- left to right, then top to bottom
+strip:layout(options)                  -- the slots, to hand to sol.place
 ```
 
 Every column shares one width, so `widen` on any window in a column widens the
@@ -1363,11 +1370,6 @@ what keeps a focused column from hanging off the edge of the screen.
 `configure` is for a strip `sol.keep` carried across a reload, which is not
 made again and would otherwise go on with the widths of the file it was made
 from.
-
-Three more pure helpers sit beside `strip`: `sol.layout.scrolling(count,
-options)` lays out `count` columns, each `options.column` of the width, and
-`sol.layout.scroll_to` and `sol.layout.strip_scroll_to` answer how far to
-scroll to bring a column into view.
 
 ### When a new window has no room
 

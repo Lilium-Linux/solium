@@ -16,7 +16,6 @@ pub mod dispatch;
 mod files;
 mod found;
 mod keep;
-mod layouts;
 mod listens;
 mod load;
 mod motion;
@@ -25,16 +24,17 @@ mod pending;
 mod reference;
 mod runs;
 mod serve;
+#[cfg(test)]
+mod specs;
 pub mod to_wire;
 
 pub use api::*;
 pub use bindings::*;
-pub use convert::describe_value;
+pub use convert::{describe_value, number};
 pub use deadline::*;
 pub use files::*;
 pub use found::{Files, shipped};
 pub use keep::*;
-pub use layouts::*;
 pub use listens::{listen, listen_if_changed, listens};
 pub use load::{keeps_of, stores_of};
 pub use motion::*;

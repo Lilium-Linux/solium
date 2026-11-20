@@ -2779,8 +2779,8 @@ taking focus, a drag ending, the monitors changing, and the rest
 [modes.md lists](modes.md#what-a-mode-is-told) — and asks for placements.
 `tiling.lua` is Hyprland's dwindle and `scrolling.lua` is niri's model; each
 decides where windows go and when, and leaves the arithmetic of the tree and
-the strip to `crates/layout`. Copy either into your own directory and it takes
-over.
+the strip to `layouts/dwindle.lua` and `layouts/scroller.lua`. Copy any of them
+into your own directory, `layouts/` included, and the copy takes over.
 
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.

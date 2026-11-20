@@ -12,6 +12,7 @@
 //! The module was one test's and was named after it. It is two now, and the
 //! fixture was always the expensive part of it.
 
+mod dwindle;
 mod explicit_sync;
 mod river;
 use super::*;
@@ -5429,8 +5430,9 @@ macro_rules! tiled_fixture {
 /// **The cross-boundary test, and the only one there is.** Every other
 /// test of this gesture lives on one side of the call or the other:
 /// `input::resize::dragged_edge_tests` is arithmetic on rectangles the
-/// test itself made up, and `solium_layout::tree::dragged_edge_tests`
-/// feeds the tree a number the same tree produced. Neither can see the
+/// test itself made up, and the dwindle specs
+/// (`crates/solium-lua/specs/dwindle.lua`) feed the tree a number the same
+/// tree produced. Neither can see the
 /// link that actually broke — `Solium`'s rectangle for a pane against
 /// the tree's — because neither crosses it. This one does: a real
 /// `Tiling` is laid out, placed through `Solium::place` exactly as
@@ -5460,9 +5462,8 @@ macro_rules! tiled_fixture {
 /// of the disagreement. A version of this test on `Edge::Left` passes
 /// against the defect.
 ///
-/// **Off-centre first**, for the reason
-/// `solium_layout::tree::dragged_edge_tests::a_window_handed_its_own_edge_does_not_move`
-/// gives at length: a fixture at `split: 0.5` is where a skew is least
+/// **Off-centre first**, for the reason "a window handed its own edge does
+/// not move" in `crates/solium-lua/specs/dwindle.lua` gives: a fixture at `split: 0.5` is where a skew is least
 /// visible, and a test that cannot fail is not evidence. The seam is
 /// dragged somewhere lopsided and re-placed before the client is ever
 /// asked to disagree.
@@ -5475,7 +5476,7 @@ macro_rules! tiled_fixture {
 /// `drag_seam` entirely.
 #[test]
 fn a_client_that_rounds_its_size_does_not_move_the_seam() {
-    use solium_layout::tree::{Edge, Tiling};
+    use crate::state::tests::real_client::dwindle::{Edge, Tiling};
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let (left, _left_toplevel, left_surface) =
@@ -5612,7 +5613,7 @@ fn tiled_alone(
     state: &mut Solium,
     window: &Window,
 ) -> (crate::pane::PaneId, Rectangle<i32, Logical>) {
-    use solium_layout::tree::Tiling;
+    use crate::state::tests::real_client::dwindle::Tiling;
 
     state.sync_panes();
     let pane = state
@@ -5678,7 +5679,7 @@ fn past_patience(state: &mut Solium) {
 /// being on top, and the last two assertions would pass on stage.
 #[test]
 fn a_tiled_client_that_commits_more_than_its_tile_is_held_inside_it() {
-    use solium_layout::tree::Tiling;
+    use crate::state::tests::real_client::dwindle::Tiling;
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let (left, _left_toplevel, left_surface) =
@@ -8019,7 +8020,7 @@ fn a_press_on_a_gliding_window_lands_on_the_pixel_under_it() {
 /// drag, begun on a maximised window.
 #[test]
 fn a_drag_on_a_maximised_tiled_window_starts_from_its_tile() {
-    use solium_layout::tree::{Edge, Tiling};
+    use crate::state::tests::real_client::dwindle::{Edge, Tiling};
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let output = one_screen(&mut state);
@@ -8188,7 +8189,7 @@ fn a_maximised_window_brought_back_onto_a_screen_brings_its_tile() {
 /// the buffer a masked client is captured at, and of the hit test.
 #[test]
 fn a_titled_tiled_client_is_held_inside_its_tile_frame_and_all() {
-    use solium_layout::tree::Tiling;
+    use crate::state::tests::real_client::dwindle::Tiling;
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let (window, _toplevel, surface) = open_surface(&mut display, &mut state, &conn, &client, &qh);
@@ -8898,7 +8899,7 @@ fn one_window(fixture: &mut Fixture) -> (crate::pane::PaneId, Window) {
 /// Two windows tiled beside each other on the fixture's one monitor
 /// (not [`side_by_side`], which is two monitors).
 fn side_by_side_windows(fixture: &mut Fixture) -> (crate::pane::PaneId, crate::pane::PaneId) {
-    use solium_layout::tree::Tiling;
+    use crate::state::tests::real_client::dwindle::Tiling;
     let (left, right) = (open_kept(fixture), open_kept(fixture));
     fixture.state.sync_panes();
     let (left_id, right_id) = (
@@ -12538,7 +12539,7 @@ fn a_pane_no_monitor_shows_gathers_no_fact_and_wants_no_slot() {
 /// that opened one leaves it.
 #[test]
 fn a_menu_past_its_parents_tile_takes_the_press() {
-    use solium_layout::tree::Tiling;
+    use crate::state::tests::real_client::dwindle::Tiling;
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let (left, _left_toplevel, left_surface, left_xdg) =
@@ -12923,23 +12924,21 @@ fn a_press_on_what_an_anchored_picture_cuts_away_is_not_the_clients() {
 }
 
 /// The work area every tiled-tree fixture in this module lays out over.
-fn tiled_area() -> solium_layout::Rect {
-    solium_layout::Rect::new(0.0, 0.0, 1000.0, 600.0)
+fn tiled_area() -> dwindle::Rect {
+    dwindle::Rect::new(0.0, 0.0, 1000.0, 600.0)
 }
 
 /// The shipped gap, because at `gap: 0` the two sides of a seam are one
 /// line and half the arithmetic under test disappears.
-fn tiled_settings() -> solium_layout::Settings {
-    solium_layout::Settings {
+fn tiled_settings() -> dwindle::Settings {
+    dwindle::Settings {
         gap: 12.0,
         split: 0.5,
-        ..solium_layout::Settings::default()
     }
 }
 
-/// Where a tree has put one window. `rect_at` in the layout crate's own
-/// suite, which is not public.
-fn leaf_of(tiling: &solium_layout::tree::Tiling, id: u64) -> solium_layout::Rect {
+/// Where a tree has put one window.
+fn leaf_of(tiling: &dwindle::Tiling, id: u64) -> dwindle::Rect {
     tiling
         .layout(tiled_area(), tiled_settings())
         .into_iter()
@@ -12953,7 +12952,7 @@ fn leaf_of(tiling: &solium_layout::tree::Tiling, id: u64) -> solium_layout::Rect
 ///
 /// `sol.place` is `Solium::place`, and a script's rect is the pane's
 /// *outer* rectangle — `place` subtracts the insets itself.
-fn sweep(state: &mut Solium, tiling: &solium_layout::tree::Tiling) {
+fn sweep(state: &mut Solium, tiling: &dwindle::Tiling) {
     for (id, rect) in tiling.layout(tiled_area(), tiled_settings()) {
         state.place(
             id,
@@ -12999,7 +12998,7 @@ fn sweep(state: &mut Solium, tiling: &solium_layout::tree::Tiling) {
 /// rounding. See `crate::input::resize::dragged_edge`.
 #[test]
 fn a_tiled_drag_measures_from_where_the_grab_began_and_not_from_the_last_frame() {
-    use solium_layout::tree::{Edge, Tiling};
+    use crate::state::tests::real_client::dwindle::{Edge, Tiling};
 
     tiled_fixture!(display, state, conn, queue, client, qh);
     let (left, _left_toplevel, _left_surface) =

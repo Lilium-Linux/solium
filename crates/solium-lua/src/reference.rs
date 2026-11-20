@@ -70,15 +70,14 @@ fn keys(table: &Table) -> BTreeSet<String> {
 }
 
 /// Every name this window manager puts in `sol`, in each table inside it,
-/// and on the objects it hands out (the two `sol.layout` makes, the
-/// timer `sol.after` and `sol.every` do, and the watch `sol.watch` does),
-/// spelled the way `sol.lua` declares them: `sol.keep`, `sol.layout.grid`,
-/// `Tree:insert`, `Timer:cancel`.
+/// and on the objects it hands out (the timer `sol.after` and `sol.every`
+/// make, and the watch `sol.watch` does), spelled the way `sol.lua` declares
+/// them: `sol.keep`, `sol.<table>.<name>`, `Timer:cancel`.
 ///
 /// The tables are read from the real `sol` table, built the way a load builds
 /// it, so nothing here can be a stale copy. Every table-valued key is walked
-/// into, not only `sol.layout`: a namespace added later has its functions
-/// checked too. A key starting with `_` is its own bookkeeping,
+/// into, so a namespace added has its functions checked too. A key starting
+/// with `_` is its own bookkeeping,
 /// declared in `sol.lua` as a field but not walked into. The objects' methods
 /// are read from their `impl mlua::UserData` blocks instead, because mlua keeps
 /// a userdata's methods behind a closure that Lua cannot list.
@@ -103,16 +102,12 @@ fn registered() -> BTreeSet<String> {
         names.insert(format!("sol.{name}"));
     }
     assert!(
-        names.iter().any(|name| name.starts_with("sol.layout.")),
-        "no sol.layout.* names found; the walk into sol's tables is broken"
+        names.len() >= 50,
+        "found {} names in sol; the walk of the sol table is broken",
+        names.len()
     );
 
-    for (object, userdata, least) in [
-        ("Tree", "TilingTree", 5),
-        ("Scroller", "Scrolling", 5),
-        ("Timer", "TimerHandle", 1),
-        ("Watch", "WatchHandle", 1),
-    ] {
+    for (object, userdata, least) in [("Timer", "TimerHandle", 1), ("Watch", "WatchHandle", 1)] {
         let methods = userdata_methods(userdata);
         assert!(
             methods.len() >= least,
@@ -184,8 +179,8 @@ struct Declared {
 ///
 /// ```lua
 /// function sol.keep(name, defaults) end
-/// function sol.layout.grid(sizes, options) end
-/// function Tree:insert(id, target, x, y, options) end
+/// function sol.table.name(argument) end
+/// function Timer:cancel() end
 /// sol.decoration = sol.pane
 /// ```
 fn declared() -> Vec<Declared> {

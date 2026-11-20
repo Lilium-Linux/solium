@@ -98,6 +98,24 @@ pub fn describe_value(value: &Value) -> String {
     }
 }
 
+/// A Lua number, whatever Lua happened to store it as.
+///
+/// `widths = { 1/3, 1/2, 1 }` puts two floats and an *integer* in one list, and
+/// asking mlua for an `f64` on the wrong one is a conversion error rather than
+/// a `None` -- which, with a `?` on it, would take the whole configuration down
+/// over a list that is perfectly well written.
+pub fn number(value: &Value) -> Option<f64> {
+    match value {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a setting written as a whole number: 1, not 2^53"
+        )]
+        Value::Integer(whole) => Some(*whole as f64),
+        Value::Number(fraction) => Some(*fraction),
+        _ => None,
+    }
+}
+
 /// How deep a settings table is followed before it is taken for a ring: no
 /// setting is nested this far, and a table holding itself must be an error,
 /// not a stack that runs out.
@@ -147,17 +165,6 @@ impl Kept {
                 }
                 Some(Self::Table(pairs))
             }
-            // A copy, so the running scripts are left as they were: see
-            // `Scripts::kept` for why reading the keep must not damage them,
-            // and `a_reload_leaves_a_tiled_desk_exactly_as_it_was`.
-            Value::UserData(held) if held.is::<TilingTree>() => held
-                .borrow::<TilingTree>()
-                .ok()
-                .map(|tree| Self::Tree(tree.0.clone())),
-            Value::UserData(held) if held.is::<Scrolling>() => held
-                .borrow::<Scrolling>()
-                .ok()
-                .map(|strip| Self::Strip(strip.0.clone())),
             // `nil` is not a failure: a key that has been cleared is a key that
             // is not there, and Lua's own iteration never yields one.
             Value::Nil => None,
@@ -166,9 +173,8 @@ impl Kept {
                     tracing::warn!(
                         key = where_it_is,
                         kind = other.type_name(),
-                        "only plain data and the layouts sol.layout makes survive a reload, and \
-                         this is neither; it will be missing from the keep when the \
-                         configuration is read again"
+                        "only plain data survives a reload, and this is not plain data; it \
+                         will be missing from the keep when the configuration is read again"
                     );
                 }
                 None
@@ -190,8 +196,6 @@ impl Kept {
                 }
                 Value::Table(table)
             }
-            Self::Tree(tree) => Value::UserData(lua.create_userdata(TilingTree(tree))?),
-            Self::Strip(strip) => Value::UserData(lua.create_userdata(Scrolling(strip))?),
         })
     }
 }

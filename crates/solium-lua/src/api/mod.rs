@@ -5,7 +5,6 @@ use mlua::{Lua, Table};
 mod bindings;
 mod input;
 mod keep;
-mod layout;
 mod monitors;
 mod present;
 mod process;
@@ -69,7 +68,6 @@ pub fn build_api(lua: &Lua) -> mlua::Result<Table> {
     input::register(lua, &sol)?;
     bindings::register(lua, &sol)?;
     process::register(lua, &sol)?;
-    layout::register(lua, &sol)?;
 
     Ok(sol)
 }

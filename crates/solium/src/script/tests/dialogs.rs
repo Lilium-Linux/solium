@@ -1230,7 +1230,7 @@ mod reflow_on_close {
     fn a_strip_lists_its_windows_in_reading_order() {
         let (scripts, _) = layout_with("scrolling", "");
         let order = scripts.evaluate(
-            "local view = sol.layout.scroller()\n\
+            "local view = require(\"layouts.scroller\").new()\n\
              local area = { x = 0, y = 0, w = 2560, h = 1440, gap = 12 }\n\
              for id = 1, 4 do view:insert(id, area) end\n\
              -- Focus the first column and pull the second's window into it.\n\
@@ -1476,7 +1476,8 @@ mod reflow_on_close {
 ///
 /// Against the shipped `tiling.lua` and `workspaces.lua`, as the modules
 /// above run them. The chain is `tiling.lua`'s and the tree steps it calls
-/// are `solium_layout::tree::minimum_tests`'; this is the chain.
+/// are the minimum cases in `crates/solium-lua/specs/dwindle.lua`; this is
+/// the chain.
 ///
 /// Most tests set a minimum of 1300x800 on a 2560x1440 screen at the
 /// shipped 12px gap. The first window takes the whole 2536x1416 tile, and
@@ -2301,7 +2302,7 @@ mod overflow {
             "local function try(minimum)\n\
                  local area = { x = 0, y = 0, w = 300, h = 200, gap = 0, split = 0.5,\n\
                      minimum = minimum }\n\
-                 local tree = sol.layout.tree()\n\
+                 local tree = require(\"layouts.dwindle\").new()\n\
                  tree:insert(1, nil, nil, nil, area)\n\
                  return tostring(tree:insert_fitting(2, nil, 150, 100, area))\n\
              end\n\
@@ -2747,7 +2748,7 @@ mod client_sizes {
             scripts.evaluate(&format!(
                 "local area = {{ x = 0, y = 0, w = 2000, h = 1000, gap = 0, split = 0.5,\n\
                      floors = {floors} }}\n\
-                 local tree = sol.layout.tree()\n\
+                 local tree = require(\"layouts.dwindle\").new()\n\
                  tree:insert(1, nil, nil, nil, area)\n\
                  tree:insert(2, 1, nil, nil, area)\n\
                  local out = {{}}\n\

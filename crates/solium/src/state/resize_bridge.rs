@@ -787,8 +787,8 @@ impl Solium {
     /// client's minimum is read since #115 (`state::limits_of`) and the layouts
     /// keep a window at it where there is room, so a refusal that reaches this
     /// is one they could not avoid: a tile laid out `cramped`, or a size the
-    /// client never declared. `floor_tests::a_sibling_gives_no_more_than_it_holds`
-    /// in the layout crate has a cramped one.
+    /// client never declared. "a sibling gives no more than it holds" in the
+    /// shipped dwindle tree's specs has a cramped one.
     fn land_on(
         &mut self,
         window: &Window,

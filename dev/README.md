@@ -1147,10 +1147,10 @@ to six decimal places. A reimplementation of the curves in JavaScript would
 drift the first time either side changed, and the drift would be invisible —
 the page would still animate plausibly.
 
-That includes the geometry. The tiling and scrolling scenarios are arranged by
-`crates/layout`, the same arrangements the compositor's scripts ask for, also
-compiled to WebAssembly. What the page still owns is where a window starts and
-ends in the overview and open and close scenarios.
+The geometry is the page's own: where a window starts and the arrangements it
+moves to are simple ones written for the page. The shipped arrangements are Lua
+in the window manager's configuration (`crates/solium-lua/lua/layouts/`), and
+what the page judges is the motion between two places, not the places.
 
 Curves live in `crates/animation`, which depends on nothing so it keeps building
 for the browser. Add one there and it is available to scripts by name

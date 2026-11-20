@@ -2337,7 +2337,6 @@ dependencies = [
  "solium-auth",
  "solium-effects",
  "solium-json",
- "solium-layout",
  "solium-lua",
  "solium-paths",
  "solium-wm-protocol",
@@ -2380,10 +2379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "solium-layout"
-version = "0.0.0"
-
-[[package]]
 name = "solium-lua"
 version = "0.0.0"
 dependencies = [
@@ -2392,7 +2387,6 @@ dependencies = [
  "solium-animation",
  "solium-effects",
  "solium-json",
- "solium-layout",
  "solium-paths",
  "solium-wm-protocol",
  "tracing",

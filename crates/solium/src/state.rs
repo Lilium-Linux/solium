@@ -1275,8 +1275,8 @@ pub(crate) struct ResizeRequest {
     /// read off [`Self::wanted`], which is in the client's space and already
     /// floored at a window's minimum size. See
     /// [`crate::input::resize::dragged_edge`] for the whole of the reasoning,
-    /// including which space this is in and why that has to be the space
-    /// `solium_layout::tree::Tiling::node_box` measures in.
+    /// including which space this is in and why that has to be the space a
+    /// layout measures its seams in.
     pub(crate) edge_at: (f64, f64),
     /// Which edges the pointer has hold of.
     ///

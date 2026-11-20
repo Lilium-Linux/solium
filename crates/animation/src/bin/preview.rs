@@ -1,11 +1,11 @@
 //! Build the animation preview page.
 //!
-//! Embeds two engines — the animation curves and the window arrangements, both
-//! compiled to WebAssembly — into `preview/index.html`, and writes the result.
-//! The page calls them directly, so what is tuned in a browser is the code that
-//! moves and arranges real windows. A reimplementation in JavaScript would
-//! drift the first time either side changed, and the drift would be invisible
-//! because the page would still look plausible.
+//! Embeds the animation curves, compiled to WebAssembly, into
+//! `preview/index.html`, and writes the result. The page calls them directly,
+//! so what is tuned in a browser is the code that moves real windows. A
+//! reimplementation in JavaScript would drift the first time either side
+//! changed, and the drift would be invisible because the page would still look
+//! plausible.
 //!
 //! Driven by `dev/preview`, which builds the wasm first.
 //!
@@ -19,9 +19,9 @@ use solium_animation::Curve;
 
 fn main() {
     let mut args = std::env::args_os().skip(1).map(PathBuf::from);
-    let (Some(animation), Some(layout)) = (args.next(), args.next()) else {
-        eprintln!("usage: preview <animation.wasm> <layout.wasm>");
-        eprintln!("       run dev/preview instead, which builds them first");
+    let Some(animation) = args.next() else {
+        eprintln!("usage: preview <animation.wasm>");
+        eprintln!("       run dev/preview instead, which builds it first");
         std::process::exit(2);
     };
 
@@ -33,7 +33,6 @@ fn main() {
         }
     };
     let bytes = read(&animation);
-    let layout_bytes = read(&layout);
 
     let names: Vec<String> = Curve::all()
         .into_iter()
@@ -43,8 +42,7 @@ fn main() {
     const PAGE: &str = include_str!("../../preview/index.html");
     let page = PAGE
         .replace("/*CURVES*/ null", &format!("[{}]", names.join(", ")))
-        .replace("/*WASM*/ \"\"", &format!("{:?}", base64(&bytes)))
-        .replace("/*LAYOUT*/ \"\"", &format!("{:?}", base64(&layout_bytes)));
+        .replace("/*WASM*/ \"\"", &format!("{:?}", base64(&bytes)));
 
     let mut stdout = std::io::stdout().lock();
     if let Err(err) = stdout.write_all(page.as_bytes()) {

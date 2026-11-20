@@ -31,9 +31,6 @@ solium-animation = { path = "../animation" }
 solium-effects = { path = "../effects" }
 
 solium-json = { path = "../json", features = ["lua"] }
-# The window arrangements, as a crate so the same code that arranges real
-# windows arranges the boxes in the preview. See crates/layout.
-solium-layout = { path = "../layout" }
 # The window manager protocol: what the compositor says to whichever window
 # manager it started, and hears from it.
 solium-wm-protocol = { path = "../wm-protocol" }

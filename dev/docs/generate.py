@@ -856,10 +856,10 @@ def lua_api(rev):
 
     functions = [item for item in items if item["kind"] == "function"]
     fields = [item for item in items if item["kind"] == "field"]
-    public_fields = [item for item in fields if not item["name"].startswith("sol._") and item["name"] != "sol.layout"]
+    public_fields = [item for item in fields if not item["name"].startswith("sol._")]
     private = [item for item in fields if item["name"].startswith("sol._")]
     types = [item for item in items if item["kind"] in ("class", "alias")
-             and item["name"] not in ("sol", "sol.layout", "sol.Event")]
+             and item["name"] not in ("sol", "sol.Event")]
     events = next(item for item in items if item["name"] == "sol.Event")
 
     count = len(functions) + len(fields)
@@ -888,19 +888,12 @@ def lua_api(rev):
         out.append(f"| `{shown.strip().strip(chr(34))}` | {text.strip().replace('|', chr(92) + '|')} |")
     out += ["", "## `sol` {#sol}", ""]
     for item in functions:
-        if item["name"].startswith("sol.") and not item["name"].startswith("sol.layout."):
+        if item["name"].startswith("sol."):
             out += function_entry(item)
     for item in public_fields:
         anchor = item["name"].replace(".", "-").lower()
         out += [f"### `{item['name']}` {{#{anchor}}}", "", description(item["doc"]), ""]
-    out += ["## `sol.layout` {#sol-layout}", "",
-            description(next(item for item in items if item["name"] == "sol.layout")["doc"]), ""]
-    for item in functions:
-        if item["name"].startswith("sol.layout."):
-            out += function_entry(item)
-    for prefix, title, anchor, cls in (("Tree:", "A dwindle tree", "tree", "sol.Tree"),
-                                       ("Scroller:", "A scrolling strip", "scroller", "sol.Scroller"),
-                                       ("Timer:", "A timer", "timer", "sol.Timer"),
+    for prefix, title, anchor, cls in (("Timer:", "A timer", "timer", "sol.Timer"),
                                        ("Watch:", "A watch", "watch", "sol.Watch")):
         out += [f"## {title} {{#{anchor}}}", ""]
         doc = next(item for item in items if item["name"] == cls)

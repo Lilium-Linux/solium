@@ -114,7 +114,6 @@
 // Injected by dev/preview.
 const CURVES = /*CURVES*/ null;
 const WASM_BASE64 = /*WASM*/ "";
-const LAYOUT_BASE64 = /*LAYOUT*/ "";
 
 // Solium's own coordinates, so a scenario reads the way the compositor sees it.
 const OUTPUT = { w: 1600, h: 900 };
@@ -122,30 +121,7 @@ const BAR = 34, PADDING = 24, SCALE = 800 / OUTPUT.w;
 
 const el = id => document.getElementById(id);
 const lerp = (a, b, t) => a + (b - a) * t;
-let engine = null, layout = null, springIndex = -1;
-
-/* ---------- the layout engine ---------- */
-
-// Arrangements are read out of the layout module's own memory: it writes them
-// into a fixed buffer and returns how many, so nothing is allocated on either
-// side of the boundary.
-function slots(written) {
-  const base = layout.solium_layout_scratch();
-  const view = new Float64Array(layout.memory.buffer, base, written * 4);
-  const out = [];
-  for (let i = 0; i < written; i++) {
-    out.push({ x: view[i*4], y: view[i*4+1], w: view[i*4+2], h: view[i*4+3] });
-  }
-  return out;
-}
-
-function writeSizes(sizes) {
-  const base = layout.solium_layout_scratch();
-  const view = new Float64Array(layout.memory.buffer, base, sizes.length * 4);
-  sizes.forEach((s, i) => {
-    view[i*4] = s.x; view[i*4+1] = s.y; view[i*4+2] = s.w; view[i*4+3] = s.h;
-  });
-}
+let engine = null, springIndex = -1;
 
 const tuning = () => ({
   gap: +el("gap").value,
@@ -188,35 +164,50 @@ function floating(count) {
 
 const WORK = { x: 0, y: BAR, w: OUTPUT.w, h: OUTPUT.h - BAR };
 
-// Every arrangement here is computed by the layout engine, not reimplemented.
-// The page owns only *which* arrangement and what starts where.
+const inset = (r, by) => win(r.x + by, r.y + by, r.w - by * 2, r.h - by * 2);
+
+// Somewhere for the windows to go. Not the shipped layouts, which are Lua in
+// the window manager's configuration (`crates/solium-lua/lua/layouts/`): an
+// arrangement is only the far end of the motion being judged here.
+
+// One window on the left at `master` of the width, the rest stacked beside it.
+function mainAndStack(count, t) {
+  const area = inset(WORK, t.gap);
+  if (count === 1) return [area];
+  const main = area.w * t.ratio - t.gap / 2, rows = count - 1;
+  const h = (area.h - t.gap * (rows - 1)) / rows;
+  const out = [win(area.x, area.y, main, area.h)];
+  for (let i = 0; i < rows; i++) {
+    out.push(win(area.x + main + t.gap, area.y + i * (h + t.gap), area.w - main - t.gap, h));
+  }
+  return out;
+}
+
+// A row of columns `column` of the width wide, scrolled by `scroll`.
+function columns(count, t) {
+  const area = inset(WORK, t.gap), w = WORK.w * t.column;
+  return Array.from({ length: count },
+    (_, i) => win(area.x + i * (w + t.gap) - t.offset, area.y, w, area.h));
+}
+
+const moveTo = (from, to) => from.map((w, i) => ({ from: { ...w, opacity: 1 },
+                                                   to: { ...to[i], opacity: 1 } }));
+
+// The page owns which arrangement and what starts where.
 const SCENARIOS = {
-  "tiling": () => {
+  "arrange: main and stack": () => {
     const from = floating(+el("count").value);
-    const t = tuning();
-    const to = slots(layout.solium_layout_master_stack(
-      from.length, WORK.x, WORK.y, WORK.w, WORK.h, t.gap, t.ratio));
-    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
-                                 to: { ...to[i], opacity: 1 } }));
+    return moveTo(from, mainAndStack(from.length, tuning()));
   },
 
-  "scrolling": () => {
+  "arrange: columns": () => {
     const from = floating(+el("count").value);
-    const t = tuning();
-    const to = slots(layout.solium_layout_scrolling(
-      from.length, WORK.x, WORK.y, WORK.w, WORK.h, t.gap, t.column, t.offset));
-    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
-                                 to: { ...to[i], opacity: 1 } }));
+    return moveTo(from, columns(from.length, tuning()));
   },
 
   "overview: enter": () => {
     const from = floating(+el("count").value);
-    writeSizes(from);
-    const t = tuning();
-    const to = slots(layout.solium_layout_grid(
-      from.length, WORK.x, WORK.y, WORK.w, WORK.h, 24));
-    return from.map((w, i) => ({ from: { ...w, opacity: 1 },
-                                 to: { ...to[i], opacity: 1 } }));
+    return moveTo(from, from.map((w, i) => fit(w, cell(i, from.length))));
   },
 
   "overview: leave": () => SCENARIOS["overview: enter"]()
@@ -245,17 +236,10 @@ function configLines() {
     : "";
 
   return `-- ~/.config/solium/init.lua${spring}
-local ANIMATION = { duration = ${duration}, easing = "${curve}" }
+require("config").gap = ${t.gap}
 
-local GAP = ${t.gap}
-local MASTER = ${t.ratio.toFixed(2)}    -- share of the width for the master window
-local COLUMN = ${t.column.toFixed(2)}    -- share of the width for a scrolling column
-
--- master and stack
-local area = sol.monitor()
-area.gap, area.ratio = GAP, MASTER
-local slots = sol.layout.master_stack(#sol.windows(), area)
-sol.animate(ANIMATION)`;
+-- Handed to sol.animate before the windows are placed.
+local ANIMATION = { duration = ${duration}, easing = "${curve}" }`;
 }
 
 /* ---------- the engine: everything about *when* ---------- */

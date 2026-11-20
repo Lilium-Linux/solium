@@ -22,8 +22,9 @@ other than its layout rectangle and animate between the two.
 The window manager composes these primitives into modes. **If a new mode
 needs new Rust, the transform layer is missing something:** extend the generic
 primitive rather than hardcoding the mode. Floating, tiling, scrolling and
-overview ship as Lua modules of the shipped window manager; their geometry
-calculations use the layout crate.
+overview ship as Lua modules of the shipped window manager, and so does their
+geometry: the dwindle tree, the scrolling strip and the overview grid are
+`lua/layouts/`, configuration like the modes that use them.
 
 ## Layers
 
@@ -35,7 +36,7 @@ calculations use the layout crate.
 | Desktop UI | Frames, wallpaper, reusable QML types | `crates/solium/qml/` |
 | Effect definitions | Geometry and fragment effects | `crates/solium/effects/` |
 | Compositor | Protocols, state, input, the window manager's connection, scene hosting, frame scheduling | `crates/solium/src/` |
-| Reusable calculations | Animation, layout, deformation and effect formats | `crates/animation/`, `crates/layout/`, `crates/effects/` |
+| Reusable calculations | Animation, deformation and effect formats | `crates/animation/`, `crates/effects/` |
 | External probes | Protocol checks from a separate Wayland client, and window-manager checks from a separate X11 one | `crates/wl-probe/`, `crates/x11-probe/`, `dev/` |
 
 The animation, layout and effects crates keep calculations independent of the
@@ -104,7 +105,10 @@ way (`crates/paths`): a packager's `SOLIUM_DATADIR`, the build tree, then
 `share/solium` beside the binary.
 
 Presentation commands work on stable window IDs and selections. Arrangements
-come from `crates/layout`; Lua decides when to apply them. Configuration reload
+are configuration too: the dwindle tree, the scrolling strip and the overview
+grid are Lua in `lua/layouts/`, and the modes decide when to apply them. No
+arrangement is written in Rust, in the compositor or in the window manager's
+runtime. Configuration reload
 keeps existing layout state where supported, and a failed load keeps the
 previous configuration. `solium --check` validates loading and declared QML
 scenes without starting a session.

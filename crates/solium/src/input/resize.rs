@@ -350,12 +350,11 @@ pub(crate) const fn pulls_top(edges: ResizeEdge) -> bool {
 /// a seam from an axis: a window that is the second child of a vertical split
 /// has that split's seam on its left and no seam on its right, and "the
 /// horizontal axis is being dragged" is true in both cases. That conflation is
-/// #120. See `solium_layout::tree::Edge`.
+/// #120.
 ///
-/// `&'static str` rather than a layout type because these cross into Lua,
-/// where an edge is spelled — and the spellings have to match
-/// `solium_layout::tree::Edge`'s parser in `script.rs`, which is the one place
-/// they are read back.
+/// `&'static str` rather than a type of the compositor's because these cross
+/// to the window manager in the `resize` event, spelled `left`, `right`, `top`
+/// and `bottom`, which is what a layout reads back.
 pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'static str>) {
     // Two questions per axis, and only the first is this function's own:
     // whether the axis is in play at all, and then which of its two sides the
@@ -464,12 +463,11 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// **The value is in the layout's outer coordinate space, by construction
 /// rather than by argument.** `laid_out` is the rectangle `place` was
 /// handed — `Solium::place` takes a script's rect as the pane's outer rectangle
-/// and subtracts the insets itself — so this is the space `tree:layout` returns
-/// and therefore the space `solium_layout::tree::Tiling::node_box` measures a
-/// seam in. It is the layout's own number going back to the layout. Verified
+/// and subtracts the insets itself — so this is the space a layout returns
+/// rectangles in, and therefore the space it measures a seam in. It is the layout's own number going back to the layout. Verified
 /// across that boundary rather than assumed:
 /// `crate::state::tests::real_client::a_client_that_rounds_its_size_does_not_move_the_seam`
-/// lays a real `Tiling` out through `Solium::place`, lets its client commit a
+/// lays a real tree out through `Solium::place`, lets its client commit a
 /// cell less than it was asked for, and pins that the edge this hands over
 /// still leaves the tree's own seam where it was.
 ///
@@ -482,7 +480,7 @@ pub(crate) const fn sides(edges: ResizeEdge) -> (Option<&'static str>, Option<&'
 /// window is what is being sized. Applying it here put a window's floor on a
 /// seam's position, which is the sub-`MINIMUM` jump above. The layout's floor
 /// does not jump either: a tile already under it is held where it is rather
-/// than moved up to it -- see `solium_layout::tree::minimum_tests::a_drag_on_a_seam_already_under_the_minimum_does_not_jump`.
+/// than moved up to it.
 ///
 /// An axis the drag has no hold of has no dragged edge, and there the
 /// pointer's own coordinate is passed through unchanged. The only shipped

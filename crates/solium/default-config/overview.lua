@@ -10,6 +10,7 @@
 -- Windows minimised into the taskbar (taskbar.lua) stay where they are.
 
 local monitors = require("monitors")
+local grid = require("layouts.grid")
 
 local kept = sol.keep("overview", { active = false })
 
@@ -86,7 +87,7 @@ function overview.enter()
     for _, each in ipairs(monitors.each(windows)) do
         if #each.windows > 0 then
             local area = each.monitor
-            local slots = sol.layout.grid(each.windows, {
+            local slots = grid.arrange(each.windows, {
                 x = area.x,
                 y = area.y,
                 w = area.w,

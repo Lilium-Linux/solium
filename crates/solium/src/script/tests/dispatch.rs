@@ -272,13 +272,13 @@ fn the_open_animation_is_the_one_the_configuration_names() {
 /// column opens.**
 ///
 /// The other two settings that were documented and read by nothing: the
-/// strip used the constant list in `crates/layout/src/scroller.rs`, so a
-/// configuration asking for quarters got thirds (#117).
+/// strip used a constant list of its own, so a configuration asking for
+/// quarters got thirds (#117).
 ///
-/// Driven through the shipped `scrolling.lua` rather than by calling
-/// `sol.layout.scroller` from a fixture, because the missing link was the
-/// *call site* -- the constructor took no argument, and no test of the
-/// layout crate could have seen that. 0.8 of a 1600-wide screen is
+/// Driven through the shipped `scrolling.lua` rather than by making a strip
+/// from a fixture, because the missing link was the *call site* -- the
+/// constructor took no argument, and no test of the strip alone could have
+/// seen that. 0.8 of a 1600-wide screen is
 /// unmistakably neither of the shipped presets near it.
 #[test]
 fn the_configured_widths_are_what_a_column_opens_at() {

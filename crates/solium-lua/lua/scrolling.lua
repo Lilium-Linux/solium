@@ -1,9 +1,9 @@
 -- Scrolling: columns and a moving view, as niri does it.
 --
--- Behaviour modelled on niri's scrolling layout, with no niri code. The
--- algorithm itself -- columns, the view offset and how the view follows focus
--- -- lives in `crates/layout/src/scroller.rs`, reached here through
--- `sol.layout.scroller`; this file is the glue between it and the compositor.
+-- Behaviour modelled on niri's scrolling layout, with no niri code. The strip
+-- itself -- columns, the view offset and how the view follows focus -- is
+-- `layouts/scroller.lua`; this file decides which strip a window goes in and
+-- when.
 --
 -- The unit is a column, not a window. A column holds a stack sharing its
 -- width, and that width is a share of the *view* — so opening a tenth window
@@ -23,11 +23,12 @@ local dialogs = require("dialogs")
 local sizes = require("sizes")
 local direction = require("direction")
 local follow = require("follow")
+local scroller = require("layouts.scroller")
 
 -- `views` is the arrangement, one strip per desk (see `view_for`), and
 -- `sol.keep` holds it so that it outlives `super+shift+r`: a reload is a change
--- of configuration, not of arrangement. A strip is userdata, and the host
--- carries it across whole -- which windows share a column, the columns' order
+-- of configuration, not of arrangement. A strip is plain data, which the host
+-- carries across whole -- which windows share a column, the columns' order
 -- and widths, which one is focused and where the view sits. Before it did,
 -- `adopt` built each strip in view again from `sol.windows()`, a column per
 -- window in stacking order at the width a column opens at, and a strip out of
@@ -56,12 +57,30 @@ local scrolling = {
     minimized = kept.minimized,
 }
 
+-- A line in the log the first time it is said, and never again until the
+-- next reload: the widths are read for every strip, and one wrong number
+-- would otherwise be said once per desk.
+local told = {}
+local function once(message)
+    if not told[message] then
+        told[message] = true
+        sol.log(message)
+    end
+end
+
 -- A strip that came across a reload keeps its columns and takes this file's
 -- widths. `scrolling.widths` and `default_width` are configuration, read where
 -- a strip is made (#117), and a strip carried across is not made again. See
--- `a_reload_keeps_the_strip_and_takes_the_widths_the_file_now_names`.
-for _, view in pairs(scrolling.views) do
-    view:configure(config.scrolling)
+-- `a_reload_keeps_the_strip_and_takes_the_widths_the_file_now_names`. One that
+-- comes back as something else is left out, and its desk laid out again from
+-- the windows on it, by `adopt`.
+for key, view in pairs(kept.views) do
+    kept.views[key] = scroller.adopt(view)
+    if kept.views[key] then
+        kept.views[key]:configure(config.scrolling, once)
+    else
+        sol.log("scrolling: what was kept for " .. tostring(key) .. " is not a strip; that desk is laid out again")
+    end
 end
 
 -- When the strip closes the gap a window being closed leaves: "immediate",
@@ -89,16 +108,12 @@ local function view_for(monitor)
     monitor = monitor or (monitors.active() or {}).name
     local key = monitors.key(workspaces.on(monitor), monitor)
     if not scrolling.views[key] then
-        -- The whole section, not a repackaging of it: `sol.layout.scroller`
-        -- reads `widths` and `default_width` and ignores the rest. Handed over
-        -- here, once per strip, rather than through `options()` -- which is
-        -- rebuilt on every keystroke, and the widths cannot change between two
-        -- of them.
-        --
-        -- This call took no argument until #117, which is the whole reason
-        -- those two settings were documented and read by nothing: the strip
-        -- used the constant list in `crates/layout/src/scroller.rs` instead.
-        scrolling.views[key] = sol.layout.scroller(config.scrolling)
+        -- The whole section, not a repackaging of it: `scroller.new` reads
+        -- `widths` and `default_width` and ignores the rest. Handed over here,
+        -- once per strip, rather than through `options()` -- which is rebuilt
+        -- on every keystroke, and the widths cannot change between two of
+        -- them.
+        scrolling.views[key] = scroller.new(config.scrolling, once)
     end
     return scrolling.views[key]
 end
@@ -238,7 +253,7 @@ function scrolling.adopt()
                 -- Its own workspace's strip on the screen it is on.
                 local key = monitors.key(workspaces.at(window.id, name), name)
                 present[window.id] = key
-                local view = scrolling.views[key] or sol.layout.scroller(config.scrolling)
+                local view = scrolling.views[key] or scroller.new(config.scrolling, once)
                 scrolling.views[key] = view
                 if not view:contains(window.id) then
                     view:insert(window.id, options(name))
@@ -367,7 +382,7 @@ local function home_of(id)
     local monitor = monitors.of(id)
     local key = monitors.key(workspaces.at(id, monitor), monitor)
     if not scrolling.views[key] then
-        scrolling.views[key] = sol.layout.scroller(config.scrolling)
+        scrolling.views[key] = scroller.new(config.scrolling, once)
     end
     return scrolling.views[key], key, monitor
 end
@@ -498,7 +513,7 @@ workspaces.moved(function(id, _, to, why, x, y)
     end
     local monitor = monitors.of(id)
     local key = monitors.key(to, monitor)
-    local view = scrolling.views[key] or sol.layout.scroller(config.scrolling)
+    local view = scrolling.views[key] or scroller.new(config.scrolling, once)
     scrolling.views[key] = view
     local area = options(monitor)
     view:insert(id, area)

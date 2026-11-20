@@ -5,22 +5,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use solium_layout::plain::Plain;
 use solium_wm_protocol::{Doc, DocField, DocNode, DocNumbered, DocTable};
 
 /// What a script handed the host to hold while the Lua state is replaced.
 ///
-/// Plain data and the layouts `sol.layout` makes, because those are the only
-/// things that can cross. A reload builds a whole new Lua state; a table, a
-/// closure, an upvalue — every Lua value there is — dies with the old one. So
-/// what crosses is this, and it is rebuilt as a fresh value in the new state.
-///
-/// A tree or a strip is userdata and dies with the state like the rest, but
-/// what it holds is a Rust value, which the host can copy out of the old state
-/// and into the new one whole -- a closure it cannot. Both shipped layouts keep
-/// their arrangement in one, and before they could keep it a reload rebuilt
-/// the layouts in view from the window list, topmost first, and windows traded
-/// places (#118). See `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
+/// Plain data, because that is the only thing that can cross. A reload builds
+/// a whole new Lua state; a table, a closure, an upvalue — every Lua value
+/// there is — dies with the old one. So what crosses is this, and it is
+/// rebuilt as a fresh value in the new state. Both shipped layouts keep their
+/// arrangement as plain data (`lua/layouts/`), and before they could keep it
+/// a reload rebuilt the layouts in view from the window list, topmost first,
+/// and windows traded places (#118). See
+/// `a_reload_leaves_a_tiled_desk_exactly_as_it_was` and
 /// `a_reload_leaves_every_scrolling_strip_as_it_was`.
 ///
 /// Tables are a list of pairs rather than a map for two reasons. Lua has one
@@ -40,10 +36,6 @@ pub enum Kept {
     Number(f64),
     Text(String),
     Table(Vec<(Kept, Kept)>),
-    /// A dwindle tree, split ratios and all: `sol.layout.tree()`.
-    Tree(solium_layout::tree::Tiling),
-    /// A scrolling strip, columns, widths, focus and view: `sol.layout.scroller()`.
-    Strip(solium_layout::scroller::Scroller),
 }
 
 /// Everything kept, under the names the scripts gave it: `sol.keep`'s
@@ -93,11 +85,6 @@ pub struct KeepsSent(pub HashMap<String, Doc>);
 #[derive(Debug, Default)]
 pub struct KeepWarnings(pub HashSet<String>);
 
-/// The field that tells a layout from a table, in the document a keep
-/// crosses as, and the field its data is under.
-const LAYOUT: &str = "solium.layout";
-const PLAIN: &str = "plain";
-
 /// How deep a document is followed when it is read back. No keep is this
 /// deep, so one whose tables lead round in a ring is refused rather than
 /// followed for ever.
@@ -105,8 +92,7 @@ const DOC_DEPTH: usize = 64;
 
 impl Kept {
     /// As a document, for the compositor to hold: a table's whole-number
-    /// keys and its named ones, a tree or a strip as a table of one marked
-    /// field and its plain data. A key that is neither a whole number nor
+    /// keys and its named ones. A key that is neither a whole number nor
     /// text does not cross, and is said.
     pub fn to_doc(&self) -> Doc {
         let mut nodes = Vec::new();
@@ -165,15 +151,12 @@ impl Kept {
                 }
                 put(nodes, at, DocNode::Table(table));
             }
-            Self::Tree(tree) => layout_node("tree", &tree.to_plain(), nodes),
-            Self::Strip(strip) => layout_node("strip", &strip.to_plain(), nodes),
         }
         at
     }
 
     /// The keep a document was made from, or `None` when it is not one: a
-    /// table that leads back to itself, a child that is not there, a layout
-    /// whose data is not a layout.
+    /// table that leads back to itself, or a child that is not there.
     pub fn from_doc(doc: &Doc) -> Option<Self> {
         Self::read_node(doc, 0, 0).ok().flatten()
     }
@@ -196,30 +179,6 @@ impl Kept {
             DocNode::Text(text) => Self::Text(text.clone()),
             DocNode::Nil | DocNode::Other(_) => return Ok(None),
             DocNode::Table(table) => {
-                let field = |name: &str| {
-                    table
-                        .fields
-                        .iter()
-                        .find(|field| field.name == name)
-                        .map(|field| field.node)
-                };
-                if let Some(kind) = field(LAYOUT) {
-                    let plain = field(PLAIN)
-                        .and_then(|at| plain_of(doc, at, depth + 1))
-                        .ok_or(NotADocument)?;
-                    let kind = usize::try_from(kind).ok().and_then(|at| doc.get(at));
-                    return match kind {
-                        Some(DocNode::Text(kind)) if kind == "tree" => {
-                            solium_layout::tree::Tiling::from_plain(&plain).map(Self::Tree)
-                        }
-                        Some(DocNode::Text(kind)) if kind == "strip" => {
-                            solium_layout::scroller::Scroller::from_plain(&plain).map(Self::Strip)
-                        }
-                        _ => None,
-                    }
-                    .map(Some)
-                    .ok_or(NotADocument);
-                }
                 let mut pairs = Vec::new();
                 let listed = (1..)
                     .zip(&table.list)
@@ -258,75 +217,6 @@ fn put(nodes: &mut [DocNode], at: u32, node: DocNode) {
     }
 }
 
-/// A layout as a table of its kind and its plain data.
-fn layout_node(kind: &str, plain: &Plain, nodes: &mut Vec<DocNode>) {
-    let at = place(nodes);
-    nodes.push(DocNode::Nil);
-    let data = plain_node(plain, nodes);
-    let named = place(nodes);
-    nodes.push(DocNode::Text(kind.to_owned()));
-    put(
-        nodes,
-        at,
-        DocNode::Table(DocTable {
-            list: Vec::new(),
-            fields: vec![
-                DocField {
-                    name: PLAIN.to_owned(),
-                    node: data,
-                },
-                DocField {
-                    name: LAYOUT.to_owned(),
-                    node: named,
-                },
-            ],
-            numbered: Vec::new(),
-        }),
-    );
-}
-
-fn plain_node(plain: &Plain, nodes: &mut Vec<DocNode>) -> u32 {
-    let at = place(nodes);
-    match plain {
-        Plain::Int(whole) => nodes.push(DocNode::Integer(*whole)),
-        Plain::Num(number) => nodes.push(DocNode::Number(*number)),
-        Plain::List(items) => {
-            nodes.push(DocNode::Nil);
-            let list = items.iter().map(|item| plain_node(item, nodes)).collect();
-            put(
-                nodes,
-                at,
-                DocNode::Table(DocTable {
-                    list,
-                    fields: Vec::new(),
-                    numbered: Vec::new(),
-                }),
-            );
-        }
-    }
-    at
-}
-
-fn plain_of(doc: &Doc, at: u32, depth: usize) -> Option<Plain> {
-    if depth > DOC_DEPTH {
-        return None;
-    }
-    Some(match doc.get(usize::try_from(at).ok()?)? {
-        DocNode::Integer(whole) => Plain::Int(*whole),
-        DocNode::Number(number) => Plain::Num(*number),
-        DocNode::Table(table) if table.fields.is_empty() && table.numbered.is_empty() => {
-            Plain::List(
-                table
-                    .list
-                    .iter()
-                    .map(|item| plain_of(doc, *item, depth + 1))
-                    .collect::<Option<Vec<Plain>>>()?,
-            )
-        }
-        _ => return None,
-    })
-}
-
 /// How deep a kept table is followed.
 ///
 /// A budget rather than a cycle check. A table holding itself — directly, or
@@ -339,46 +229,58 @@ pub(super) const KEEP_DEPTH: usize = 8;
 
 #[cfg(test)]
 mod tests {
-    use solium_layout::{Rect, Settings, scroller::Scroller, tree::Tiling};
     use solium_wm_protocol::{DocNode, DocTable};
 
     use super::{Keep, Kept};
 
-    fn area() -> Rect {
-        Rect::new(0.0, 0.0, 1000.0, 600.0)
+    fn int(value: i64) -> Kept {
+        Kept::Int(value)
     }
 
-    /// A keep as `workspaces.lua`, `tiling.lua` and `scrolling.lua` leave
-    /// one: window ids for keys, names for keys, a list, a tree and a strip.
-    fn kept() -> (Kept, Tiling, Scroller) {
-        let mut tree = Tiling::new();
-        tree.insert(7, None, None, area(), Settings::default());
-        tree.insert_largest(9, area(), Settings::default());
-        let mut strip = Scroller::with_widths(&[0.4, 0.8], 1);
-        for id in [7, 9, 11] {
-            strip.insert(id, area(), Settings::default());
-        }
-        let table = Kept::Table(vec![
+    fn text(value: &str) -> Kept {
+        Kept::Text(value.to_owned())
+    }
+
+    /// A keep as `workspaces.lua` and `tiling.lua` leave one: window ids for
+    /// keys, names for keys, a list, and a tree as `layouts/dwindle.lua`
+    /// holds it -- its nodes under numbers with holes between them, each a
+    /// window or a split whose sides are a list.
+    fn kept() -> Kept {
+        Kept::Table(vec![
             (
-                Kept::Text("of".to_owned()),
-                Kept::Table(vec![
-                    (Kept::Int(7), Kept::Int(2)),
-                    (Kept::Int(9), Kept::Int(1)),
-                ]),
+                text("of"),
+                Kept::Table(vec![(int(7), int(2)), (int(9), int(1))]),
             ),
             (
-                Kept::Text("order".to_owned()),
+                text("order"),
+                Kept::Table(vec![(int(1), text("left")), (int(2), text("right"))]),
+            ),
+            (text("ratio"), Kept::Number(0.5)),
+            (text("on"), Kept::Bool(true)),
+            (
+                text("tree"),
                 Kept::Table(vec![
-                    (Kept::Int(1), Kept::Text("left".to_owned())),
-                    (Kept::Int(2), Kept::Text("right".to_owned())),
+                    (text("root"), int(5)),
+                    (text("serial"), int(5)),
+                    (
+                        text("nodes"),
+                        Kept::Table(vec![
+                            (int(1), Kept::Table(vec![(text("id"), int(7))])),
+                            (int(4), Kept::Table(vec![(text("id"), int(9))])),
+                            (
+                                int(5),
+                                Kept::Table(vec![
+                                    (int(1), int(1)),
+                                    (int(2), int(4)),
+                                    (text("axis"), text("x")),
+                                    (text("ratio"), Kept::Number(0.375)),
+                                ]),
+                            ),
+                        ]),
+                    ),
                 ]),
             ),
-            (Kept::Text("ratio".to_owned()), Kept::Number(0.5)),
-            (Kept::Text("on".to_owned()), Kept::Bool(true)),
-            (Kept::Text("tree".to_owned()), Kept::Tree(tree.clone())),
-            (Kept::Text("strip".to_owned()), Kept::Strip(strip.clone())),
-        ]);
-        (table, tree, strip)
+        ])
     }
 
     /// The value under `name` in a kept table.
@@ -395,7 +297,7 @@ mod tests {
 
     #[test]
     fn a_keep_comes_back_from_its_document_as_it_went() {
-        let (kept, tree, strip) = kept();
+        let kept = kept();
         let back = Kept::from_doc(&kept.to_doc()).expect("a keep");
         assert_eq!(back.to_doc(), kept.to_doc(), "the same document again");
         assert!(matches!(under(&back, "ratio"), Kept::Number(ratio) if *ratio == 0.5));
@@ -406,20 +308,12 @@ mod tests {
             under(&back, "of"),
             Kept::Table(pairs) if pairs.iter().any(|pair| matches!(pair, (Kept::Int(7), Kept::Int(2))))
         ));
-        let Kept::Tree(same) = under(&back, "tree") else {
-            panic!("the tree came back as something else");
-        };
-        assert_eq!(
-            same.layout(area(), Settings::default()),
-            tree.layout(area(), Settings::default())
-        );
-        let Kept::Strip(same) = under(&back, "strip") else {
-            panic!("the strip came back as something else");
-        };
-        assert_eq!(
-            same.layout(area(), Settings::default()),
-            strip.layout(area(), Settings::default())
-        );
+        // And a node's number past a hole is still that number.
+        let nodes = under(under(&back, "tree"), "nodes");
+        assert!(matches!(
+            nodes,
+            Kept::Table(pairs) if pairs.iter().any(|pair| matches!(pair, (Kept::Int(4), Kept::Table(_))))
+        ));
     }
 
     #[test]
@@ -430,20 +324,19 @@ mod tests {
             fields: Vec::new(),
             numbered: Vec::new(),
         })];
-        // A layout whose data is not one.
-        let mut broken = Kept::Tree(Tiling::new()).to_doc();
-        for node in &mut broken {
-            if let DocNode::Integer(root) = node {
-                *root = 40;
-            }
-        }
+        // A table whose child is not there.
+        let missing = vec![DocNode::Table(DocTable {
+            list: vec![40],
+            fields: Vec::new(),
+            numbered: Vec::new(),
+        })];
         let held = |name: &str, document| solium_wm_protocol::Kept {
             name: name.to_owned(),
             document,
         };
         let keep = Keep::from_wire(&[
             held("ring", ring),
-            held("broken", broken),
+            held("missing", missing),
             held("whole", Kept::Int(3).to_doc()),
         ]);
         let names: Vec<&String> = keep.keeps.keys().collect();

@@ -9,12 +9,10 @@ its code, and the licences of what Solium links.
 
 | Where | From | Licence |
 |---|---|---|
-| `fit` in `crates/layout/src/scroller.rs` | niri's `compute_new_view_offset`, `src/layout/scrolling.rs` at [niri-wm/niri@97c96a1](https://github.com/niri-wm/niri/blob/97c96a13829ec74c83e976c2ea34e7cc717b02ec/src/layout/scrolling.rs), © the niri contributors | GPL-3.0-or-later |
 | `texture_mat` in `crates/solium/src/clip.rs` | smithay's `build_texture_mat` and `y_inverted` flip, `src/backend/renderer/gles/mod.rs` in smithay 0.7.0, © 2017 Victor Berger and Victoria Brekenfeld | MIT |
 
-GPL-3.0-or-later code may be used in a GPL-3.0-only work, and the file's own
-header says which passage it is. MIT code may be used in a GPL-3.0-only work
-with its notice kept, and the notice is kept beside the function.
+MIT code may be used in a GPL-3.0-only work with its notice kept, and the
+notice is kept beside the function.
 
 ## Behaviour modelled on other projects, with no code from them
 
@@ -26,8 +24,8 @@ applies here. They are credited because the ideas are theirs.
 |---|---|---|
 | `crates/solium/src/explicit_sync.rs` | [Smithay 0.7](https://github.com/Smithay/smithay/tree/v0.7.0/src/wayland/drm_syncobj)'s acquire-transaction blocker and last-buffer-reference release contract; integration and GPU retirement are Solium's own | MIT |
 | `crates/solium/src/xwayland/focus.rs` | [Smithay 0.7](https://github.com/Smithay/smithay/tree/v0.7.0/src/xwayland/xwm/surface.rs)'s `X11Surface` keyboard target: ICCCM §4.1.7's input models read from `WM_HINTS.input` and `WM_TAKE_FOCUS`, the focus reverting to nothing, and `None` when an X11 window loses the keyboard | MIT |
-| `crates/solium-lua/lua/scrolling.lua`, and the rest of `crates/layout/src/scroller.rs` | [niri](https://github.com/niri-wm/niri)'s scrolling layout: columns, and a view anchored to the focused one | GPL-3.0-or-later |
-| `crates/solium-lua/lua/tiling.lua`, `crates/layout/src/tree.rs` | [Hyprland](https://github.com/hyprwm/Hyprland)'s dwindle layout (`CDwindleAlgorithm`) | BSD-3-Clause |
+| `crates/solium-lua/lua/scrolling.lua`, `crates/solium-lua/lua/layouts/scroller.lua` | [niri](https://github.com/niri-wm/niri)'s scrolling layout: columns, and a view anchored to the focused one | GPL-3.0-or-later |
+| `crates/solium-lua/lua/tiling.lua`, `crates/solium-lua/lua/layouts/dwindle.lua` | [Hyprland](https://github.com/hyprwm/Hyprland)'s dwindle layout (`CDwindleAlgorithm`) | BSD-3-Clause |
 | `crates/solium/protocols/river-*.xml`, `crates/solium/src/river/` | [river](https://codeberg.org/river/river)'s `river-window-management-v1` and `river-xkb-bindings-v1` protocols, © Isaac Freund: their interface (names, types, versions and order, which a window manager written for river and this compositor must agree on) is written out in `protocols/` without river's descriptions, and what Solium does with each message is its own | MIT |
 | `crates/solium/src/services/tray/` | [KDE Plasma](https://invent.kde.org/plasma/plasma-workspace)'s `StatusNotifierWatcher` and tray host where the specification is silent: an item's name as its bus name and object path together, a path registered on the sender's own connection, and the menu opened when an item refuses `Activate` | GPL-2.0-or-later |
 | `crates/solium/src/services/media/` | [playerctl](https://github.com/altdesktop/playerctl)'s `playerctld`: the player that most recently started playing is the one media keys reach, and `playerctld` itself, which repeats that player under a name of its own, is left out | LGPL-3.0 |
