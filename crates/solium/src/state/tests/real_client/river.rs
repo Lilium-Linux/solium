@@ -504,6 +504,90 @@ fn a_river_window_manager_can_leave_a_window_its_own_size() {
     ));
 }
 
+/// **A window placed before its first frame opens where it was placed.** A
+/// terminal that takes a while to draw (foot started through podman, as
+/// `dev/foot` starts it) is told of, managed and placed by the river window
+/// manager before it has drawn anything; when it draws, it opens. Answered
+/// with no place, its opening put it where the compositor puts a window
+/// nobody placed, centred at its own size, and the window manager, having
+/// changed nothing, never placed it again: rrwm's first terminal sat in the
+/// middle of the screen at the size of the whole of it.
+#[test]
+fn a_window_placed_before_its_first_frame_opens_where_it_was_placed() {
+    let mut display = Display::<Solium>::new().expect("creating a test wayland display");
+    let mut state = Solium::new(display.handle());
+    let output = one_screen(&mut state);
+    let screen = state
+        .space
+        .output_geometry(&output)
+        .expect("the monitor is mapped");
+    state.start_scripts(Some(Scripts::river_here().expect("the river bridge")));
+    let mut river = connect_river(&mut display, &mut state);
+    settle(&mut display, &mut state, &mut river);
+
+    let (conn, mut event_queue, mut client) = connect(&mut display, &mut state);
+    let qh = event_queue.handle();
+    let compositor = client.compositor.clone().expect("wl_compositor bound");
+    let wm_base = client.wm_base.clone().expect("xdg_wm_base bound");
+    let before: Vec<Window> = state.space.elements().cloned().collect();
+    let surface = compositor.create_surface(&qh, ());
+    let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+    let toplevel = xdg_surface.get_toplevel(&qh, ());
+    client.leave_frame(&toplevel, &qh);
+    // Named before it draws, as foot names its window: a name is what tells
+    // the window manager of a window that has not drawn yet.
+    toplevel.set_title("foot".to_owned());
+    toplevel.set_app_id("foot".to_owned());
+    surface.commit();
+    pump(
+        &mut display,
+        &mut state,
+        &conn,
+        &qh,
+        &mut event_queue,
+        &mut client,
+    );
+    settle(&mut display, &mut state, &mut river);
+    assert_eq!(
+        river.wm.tiles.len(),
+        1,
+        "the premise: the window manager was told of the window before it drew"
+    );
+    let early: Vec<_> = state
+        .panes
+        .iter()
+        .map(|pane| (pane.slot(), pane.placed(), pane.client().is_some()))
+        .collect();
+    assert!(
+        early.iter().any(|(_, placed, _)| *placed == Some(screen)),
+        "the premise: it was placed before it drew: {early:?}"
+    );
+
+    commit_buffer(&client, &qh, &surface, 64, 64);
+    pump(
+        &mut display,
+        &mut state,
+        &conn,
+        &qh,
+        &mut event_queue,
+        &mut client,
+    );
+    settle(&mut display, &mut state, &mut river);
+    let window = state
+        .space
+        .elements()
+        .find(|window| !before.contains(window))
+        .cloned()
+        .expect("the window is on the desktop");
+    // Where the space has it, which is where it is drawn and where it stays
+    // once its application has had long enough to answer.
+    assert_eq!(
+        state.space.element_location(&window),
+        Some(screen.loc),
+        "it opened somewhere other than where the window manager put it"
+    );
+}
+
 /// **Only the window manager `wm.toml` started is answered**: a second
 /// client that binds the global, while one is bound, is told it is
 /// unavailable.

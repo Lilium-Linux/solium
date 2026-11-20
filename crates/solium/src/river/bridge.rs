@@ -324,18 +324,20 @@ impl Bridge {
         }
         for event in batch.events {
             match event {
-                // Not drawn until the river window manager has placed it,
-                // unless it already has: a window's row can come in an
-                // earlier batch than its opening, and the window be placed
-                // and drawn by then.
+                // Not drawn until the river window manager has placed it. It
+                // may have already: a window's row comes before its opening
+                // when its application names it before drawing (foot does),
+                // and the river window manager places it then. Its first
+                // frame put it where the compositor puts a window nobody
+                // placed, so the answer places it again; the river window
+                // manager, which changed nothing, would not.
                 wire::Event::Opened(id) if self.bound.is_some() => {
                     answer.handled = true;
-                    let placed = self
-                        .bound
-                        .as_ref()
-                        .and_then(|bound| bound.windows.get(&id))
-                        .is_some_and(|window| window.revealed);
-                    if !placed {
+                    let window = self.bound.as_ref().and_then(|bound| bound.windows.get(&id));
+                    if let Some(placed) = window.and_then(|window| window.placed) {
+                        answer.commands.push(place(id, placed));
+                    }
+                    if !window.is_some_and(|window| window.revealed) {
                         answer.commands.push(hidden(id));
                     }
                 }
@@ -671,17 +673,7 @@ impl Bridge {
                 if let Some((x, y)) = window.position {
                     let placed = (x, y, size.0, size.1);
                     if window.placed != Some(placed) {
-                        commands.push(wire::Command::Place(wire::Place {
-                            id: *id,
-                            rect: wire::Rect {
-                                x: f64::from(x),
-                                y: f64::from(y),
-                                w: f64::from(size.0),
-                                h: f64::from(size.1),
-                            },
-                            tile: true,
-                            ..wire::Place::default()
-                        }));
+                        commands.push(place(*id, placed));
                         window.placed = Some(placed);
                     }
                 }
@@ -898,6 +890,22 @@ fn managed_differs(before: &wire::Window, after: &wire::Window) -> bool {
         || before.max != after.max
         || before.fullscreen != after.fullscreen
         || before.maximized != after.maximized
+}
+
+/// Window `id` placed where a river window manager put it, at the size it
+/// was told: `(x, y, width, height)`.
+fn place(id: u64, (x, y, w, h): (i32, i32, i32, i32)) -> wire::Command {
+    wire::Command::Place(wire::Place {
+        id,
+        rect: wire::Rect {
+            x: f64::from(x),
+            y: f64::from(y),
+            w: f64::from(w),
+            h: f64::from(h),
+        },
+        tile: true,
+        ..wire::Place::default()
+    })
 }
 
 /// The command that keeps a window from being drawn.
