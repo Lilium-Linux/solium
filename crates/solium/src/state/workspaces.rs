@@ -163,15 +163,11 @@ impl Solium {
             .flatten()
     }
 
-    /// Where one monitor's instance of a scripted surface is actually drawn.
-    ///
-    /// The surface half of [`Self::drawn_at`], and deliberately a rectangle
-    /// rather than a `Frame`: a selection reaches a surface as a displacement
-    /// and an opacity, and no further. A matrix or a deformation on a group
-    /// reaches its *panes* — bending a surface means capturing it into a texture
-    /// first, and a scripted surface is a memory buffer on the software path,
-    /// where there is no texture to bend. That is `offscreen::pane_job` for
-    /// surfaces, which is a change of its own and not a line of this one.
+    /// Where one monitor's instance of a scripted surface is drawn, as a
+    /// rectangle: its area moved by its selections. A selection that bends
+    /// it, with a matrix or a pose, has it drawn through a capture instead,
+    /// as a window is ([`Self::surface_bends`], `render::Gpu::warps`), and
+    /// this rectangle is only where it would be at rest.
     pub(crate) fn carried(
         &self,
         id: crate::scripted::SurfaceId,
@@ -198,6 +194,17 @@ impl Solium {
             area.size,
         );
         moved
+    }
+
+    /// Whether a selection bends one monitor's instance of a scripted
+    /// surface, with a matrix or a pose in three dimensions, so it is drawn
+    /// through a capture wherever that puts it and not at its rectangle.
+    pub(crate) fn surface_bends(&self, id: crate::scripted::SurfaceId, output: &Output) -> bool {
+        !self.groups.is_empty()
+            && self
+                .groups
+                .on_surface(id, &output.name(), self.clock.now())
+                .bends()
     }
 
     /// How much of a scripted surface a selection is showing.

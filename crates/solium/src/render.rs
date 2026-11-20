@@ -306,6 +306,51 @@ pub(crate) struct Prepared {
     /// measured (amended 2026-10-14, live under motion and warps).
     /// `tests::the_walk_draws_at_the_passs_instant`.
     pub(crate) now: Option<std::time::Duration>,
+    /// Every scene a group poses in three dimensions this pass, captured to
+    /// be drawn through its frame's matrix ([`Posed`]).
+    scenes: Vec<Posed>,
+}
+
+/// A scene a group poses in three dimensions, as this pass draws it on one
+/// monitor: where its group puts it, and the capture of it drawn through
+/// that, with its program and the id and commit its element carries; no
+/// capture when it faces away, and then nothing of it is drawn.
+#[derive(Clone, Debug)]
+pub(crate) struct Posed {
+    surface: crate::scripted::SurfaceId,
+    monitor: String,
+    frame: present::Frame,
+    drawn: Option<(GlesTexture, crate::warp::Program, Id, CommitCounter)>,
+}
+
+impl Posed {
+    /// What it draws on `screen`, at `scale`: its capture through its
+    /// frame's matrix, cut where it reaches behind the viewer; nothing when
+    /// it faces away or is wholly behind them.
+    /// `tests::a_posed_scene_is_drawn_through_its_frame_and_not_at_its_rectangle`.
+    fn element(&self, screen: Rectangle<i32, Logical>, scale: f64) -> Option<Element> {
+        let (texture, program, id, commit) = self.drawn.as_ref()?;
+        let mesh = posed_mesh(screen, &self.frame, scale)?;
+        Some(Element::Warped(crate::warp::Warp::new(
+            id.clone(),
+            *commit,
+            texture.clone(),
+            mesh,
+            self.frame.opacity,
+            *program,
+        )))
+    }
+}
+
+/// A posed scene's mesh on `screen`: its whole rectangle through its frame,
+/// or nothing when none of it is in front of the viewer.
+fn posed_mesh(
+    screen: Rectangle<i32, Logical>,
+    frame: &present::Frame,
+    scale: f64,
+) -> Option<crate::warp::Mesh> {
+    warp_mesh_on(screen, frame, None, crate::warp::UnitRect::WHOLE, scale)
+        .filter(|mesh| !mesh.is_empty())
 }
 
 /// One warp `prepare` made: the capture drawn through it, the program, the id
@@ -1119,6 +1164,14 @@ impl Prepared {
         self.overs.iter().find(|each| each.pane == pane)
     }
 
+    /// The scene `id`'s instance on `monitor`, posed this pass, if a group
+    /// poses it: drawn through its capture and not as a rectangle.
+    fn scene(&self, id: crate::scripted::SurfaceId, monitor: &str) -> Option<&Posed> {
+        self.scenes
+            .iter()
+            .find(|each| each.surface == id && each.monitor == monitor)
+    }
+
     /// Whether nothing of `pane` is drawn this pass: a refused present
     /// geometry under `failed = "hide"`.
     /// `tests::a_refused_present_follows_its_failed_policy`.
@@ -1202,6 +1255,7 @@ pub(crate) fn prepare(
         warps: Vec::new(),
         overs: Vec::new(),
         hidden: Vec::new(),
+        scenes: Vec::new(),
         pass: 0,
         drawing,
     };
@@ -1218,6 +1272,7 @@ pub(crate) fn prepare(
         warps,
         overs,
         hidden,
+        scenes,
         ..
     } = gpu;
     // Once a pass, after the sweep, whatever the number of monitors: the
@@ -1231,6 +1286,7 @@ pub(crate) fn prepare(
         slots,
         held,
         now: state.presented.at(),
+        scenes,
     }
 }
 
@@ -1361,6 +1417,7 @@ struct Gpu<'a> {
     warps: Vec<Warped>,
     overs: Vec<Warped>,
     hidden: Vec<crate::pane::PaneId>,
+    scenes: Vec<Posed>,
     /// The store's pass, set by `resolve`.
     pass: u64,
     /// The monitors this pass draws: a cut of another is kept as it is
@@ -1374,6 +1431,7 @@ impl std::fmt::Debug for Gpu<'_> {
             .field("warps", &self.warps.len())
             .field("overs", &self.overs.len())
             .field("hidden", &self.hidden.len())
+            .field("scenes", &self.scenes.len())
             .field("pass", &self.pass)
             .finish_non_exhaustive()
     }
@@ -1951,11 +2009,25 @@ impl Phases for Gpu<'_> {
             release(state);
         }
 
+        // Every scene a group poses, captured as a window is and drawn
+        // through its frame by the walk.
+        self.scenes.extend(scene_jobs(state, renderer, &mut jobs));
+
         // Every list is built, from the slots as the chains left them: draw
         // them all, on one carrier, and place what they made
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
+                Then::Scene(program, mut posed, shape) => {
+                    let commit = state.scene_captures.warp_commit(
+                        posed.surface,
+                        &posed.monitor,
+                        shape,
+                        true,
+                    );
+                    posed.drawn = Some((texture, program, id, commit));
+                    self.scenes.push(*posed);
+                }
                 Then::Warp(program, pane, shape, part, grid, (holes, scale), pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                     let under = unders(state, slots, &holes, scale, commit);
@@ -2014,6 +2086,109 @@ impl Phases for Gpu<'_> {
     }
 }
 
+/// Every scene a group poses in three dimensions this pass, on each monitor
+/// it has an instance on, for [`Gpu::warps`]: those whose capture is kept as
+/// it was, ready, and a job pushed onto `jobs` for each one that must be
+/// drawn again, which `warps` places once drawn. One facing away is listed
+/// with no capture, so nothing of it is drawn, and one posed no longer gives
+/// its target back. With no warp program none is listed, and the walk draws
+/// a posed scene flat, as it draws a window it cannot bend.
+fn scene_jobs(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    jobs: &mut Vec<(crate::offscreen::Job, Then)>,
+) -> Vec<Posed> {
+    let now = pass_now(state);
+    let mut wanted = Vec::new();
+    if !state.groups.is_empty() {
+        let outputs: Vec<smithay::output::Output> = state.space.outputs().cloned().collect();
+        for surface in state.surfaces.iter() {
+            for output in &outputs {
+                let id = surface.id();
+                let (Some(area), Some(screen)) = (
+                    instance_area(state, id, output),
+                    state.space.output_geometry(output),
+                ) else {
+                    continue;
+                };
+                let shift = state.groups.on_surface(id, &output.name(), now);
+                if shift.bends() {
+                    let frame = shift.apply(present::Frame::real(area));
+                    let scale = scene_capture_scale(
+                        output.current_scale().fractional_scale(),
+                        shift.grow,
+                        area.size,
+                        screen.size,
+                    );
+                    wanted.push((id, output.clone(), frame, scale));
+                }
+            }
+        }
+    }
+    let posed: Vec<(crate::scripted::SurfaceId, String)> = wanted
+        .iter()
+        .map(|(id, output, ..)| (*id, output.name()))
+        .collect();
+    state.scene_captures.keep(&posed, &mut state.pool);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let Some(program) = state.programs.warp(renderer) else {
+        return Vec::new();
+    };
+    let mut ready = Vec::new();
+    for (id, output, frame, scale) in wanted {
+        let mut each = Posed {
+            surface: id,
+            monitor: output.name(),
+            frame,
+            drawn: None,
+        };
+        // Facing away, or nothing of it drawn yet: listed with no capture,
+        // so the walk draws nothing of it rather than its flat rectangle.
+        let job = if frame.shows() {
+            crate::offscreen::scene_job(state, renderer, id, &output, scale)
+        } else {
+            None
+        };
+        let Some(job) = job else {
+            tracing::debug!(surface = ?id, shows = frame.shows(), "a posed scene has nothing to draw this pass");
+            ready.push(each);
+            continue;
+        };
+        let shape = Shape::of(&frame, None, scale);
+        match crate::offscreen::kept(state, &job) {
+            Some((texture, gl, _commit)) => {
+                let commit = state
+                    .scene_captures
+                    .warp_commit(id, &each.monitor, shape, false);
+                each.drawn = Some((texture, program, gl, commit));
+                ready.push(each);
+            }
+            None => jobs.push((job, Then::Scene(program, Box::new(each), shape))),
+        }
+    }
+    ready
+}
+
+/// The scale a posed scene is captured at: its monitor's, times how many
+/// times its own size its poses draw it (`group::Shift::grow`), so a wall
+/// posed at twice its scene's size is as sharp as a scene made at that size.
+/// Never below the monitor's, and never past four times the monitor's pixels
+/// in all, which is the most a full-screen scene posed at twice its size
+/// takes: a scene blown up further is drawn from that many pixels, magnified.
+/// `tests::a_posed_scene_is_captured_at_its_posed_size_within_four_monitors`.
+fn scene_capture_scale(
+    monitor_scale: f64,
+    grow: f64,
+    scene: Size<i32, Logical>,
+    monitor: Size<i32, Logical>,
+) -> f64 {
+    let pixels = |size: Size<i32, Logical>| f64::from(size.w.max(1)) * f64::from(size.h.max(1));
+    let most = (4.0 * pixels(monitor) / pixels(scene)).sqrt();
+    monitor_scale * grow.min(most).max(1.0)
+}
+
 /// Whether any monitor shows a pane, asked of the rectangle `elements` asks
 /// it of: `prepare`'s cull, which [`build_slots`] makes too. A minimized
 /// window put away is shown on none, so it is neither captured nor given a
@@ -2058,6 +2233,9 @@ enum Then {
         Option<crate::warp::Grid>,
         Option<crate::warp::Pixels>,
     ),
+    /// A posed scene's, its capture still to be placed in it: boxed, as it
+    /// holds a whole frame.
+    Scene(crate::warp::Program, Box<Posed>, Shape),
 }
 
 /// The commit `pane`'s `kind` of warp carries this pass, its own or its
@@ -5967,9 +6145,15 @@ pub(crate) fn stacked_elements(
         }
         Stacked::Surface(id, area, alpha) => {
             if let Some(output) = output {
-                elements.extend(scripted(
-                    state, renderer, output, id, area, alpha, screen, now, raster,
-                ));
+                // Posed by a group: its capture through its frame, or
+                // nothing where it faces away or is behind the viewer, and
+                // never the flat rectangle it would be at rest.
+                match prepared.scene(id, &output.name()) {
+                    Some(posed) => elements.extend(posed.element(screen, scale)),
+                    None => elements.extend(scripted(
+                        state, renderer, output, id, area, alpha, screen, now, raster,
+                    )),
+                }
             }
         }
         Stacked::Panes(nodes) => panes(
@@ -6265,14 +6449,19 @@ fn push_warp(
             scale,
         )
     {
+        // Wholly behind the viewer: nothing of it, or of its popups, is in
+        // front to draw, and it is not drawn flat instead.
+        if pane_mesh.is_empty() {
+            return true;
+        }
         let (texture, program, id, commit) = (
             warped.texture.clone(),
             warped.program,
             warped.id.clone(),
             warped.commit,
         );
-        // The pane's own mesh first: it can fail (a vertex behind the
-        // viewer), and then nothing of the warp is pushed and the pane
+        // The pane's own mesh first: it can fail (a grid short of its
+        // points), and then nothing of the warp is pushed and the pane
         // falls through to the flat path below, as before. A popups' mesh
         // that fails alone drops the popups for that frame and keeps the
         // pane. Popups first, nearer the front:
@@ -6293,6 +6482,7 @@ fn push_warp(
                             over.part,
                             scale,
                         )
+                        && !mesh.is_empty()
                     {
                         elements.push(Element::Warped(
                             crate::warp::Warp::new(
@@ -7063,7 +7253,10 @@ fn wanted(
                 &output,
                 surface.area_on(&output, geometry, primary.as_ref())?,
             );
-            area.overlaps(screen)
+            // A scene a group poses is drawn wherever its pose puts it, which
+            // its rectangle does not say: kept, and its mesh says what of it
+            // this screen shows.
+            (state.surface_bends(id, &output) || area.overlaps(screen))
                 .then(|| Stacked::Surface(id, area, state.carried_alpha(id, &output)))
         })
         .collect()
@@ -9529,6 +9722,73 @@ pub(crate) mod tests {
 
     /// **A genie on the second monitor lands on its target**: at progress 1 the
     /// whole window is inside the target, moved onto the screen with it.
+    /// **A posed scene is captured at its posed size, within four
+    /// monitors**: a wall posed at twice its scene's size is captured at
+    /// twice its monitor's scale; a floor posed at 4.4 times a 720 by 900
+    /// scene on a 1600 by 900 monitor at the most four of that monitor's
+    /// pixels buy; and one posed smaller at the monitor's own scale.
+    #[test]
+    fn a_posed_scene_is_captured_at_its_posed_size_within_four_monitors() {
+        let monitor = smithay::utils::Size::from((1600, 900));
+        let wall = super::scene_capture_scale(1.0, 2.0, (1600, 650).into(), monitor);
+        assert!((wall - 2.0).abs() < 1e-9, "{wall}");
+        let floor = super::scene_capture_scale(1.0, 4.44, (720, 900).into(), monitor);
+        let most = (4.0_f64 * 1600.0 * 900.0 / (720.0 * 900.0)).sqrt();
+        assert!((floor - most).abs() < 1e-9, "{floor}");
+        let small = super::scene_capture_scale(1.5, 0.5, (400, 300).into(), monitor);
+        assert!((small - 1.5).abs() < 1e-9, "{small}");
+    }
+
+    /// **A posed scene is drawn through its frame and not at its
+    /// rectangle**: a scene laid flat below the eye, as a floor is, by a
+    /// pose, has its mesh where the pose puts it, its far edge narrower than
+    /// its near one and nothing of it nearer the viewer than the cut; moved
+    /// wholly behind the viewer, it has none, and nothing is drawn.
+    #[test]
+    fn a_posed_scene_is_drawn_through_its_frame_and_not_at_its_rectangle() {
+        use crate::group::{Pose, Shift};
+        let screen = smithay::utils::Rectangle::new((0, 0).into(), (1600, 900).into());
+        let area = smithay::utils::Rectangle::new((400, 0).into(), (800, 900).into());
+        let floor = |z: f64| {
+            Shift {
+                backface: true,
+                ..Shift::NONE.posed(Pose {
+                    // Laid flat about its middle, its top edge away from the
+                    // viewer, 300 below the eye, which is 800 in front of
+                    // the screen's middle.
+                    rotate: [90.0, 0.0, 0.0],
+                    origin: [800.0, 450.0, 0.0],
+                    translate: [0.0, 300.0, z],
+                    perspective: 800.0,
+                    ..Pose::NONE
+                })
+            }
+            .apply(crate::present::Frame::real(area))
+        };
+        let frame = floor(-400.0);
+        assert!(frame.shows(), "a floor below faces the eye above it");
+        let mesh = super::posed_mesh(screen, &frame, 1.0).expect("a floor in front");
+        let width = |v: f32| {
+            let xs: Vec<f32> = mesh
+                .vertices()
+                .iter()
+                .filter(|corner| (corner.v - v).abs() < 1e-6)
+                .map(|corner| corner.x)
+                .collect();
+            xs.iter().copied().fold(f32::MIN, f32::max)
+                - xs.iter().copied().fold(f32::MAX, f32::min)
+        };
+        // Its far edge (v = 0) is 850 into the screen and its near edge
+        // (v = 1) 50 out of it, both in front of the viewer.
+        assert!(width(0.0) < width(1.0), "{} {}", width(0.0), width(1.0));
+        assert!(width(0.0) < 800.0 && width(1.0) > 800.0);
+        assert!(
+            mesh.vertices().iter().all(|corner| corner.y > 450.0),
+            "every point of a floor is drawn below the eye"
+        );
+        assert!(super::posed_mesh(screen, &floor(3000.0), 1.0).is_none());
+    }
+
     #[test]
     fn a_genie_on_the_second_monitor_lands_on_its_target() {
         let screen = smithay::utils::Rectangle::new((1920, 0).into(), (1920, 1080).into());

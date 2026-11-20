@@ -264,7 +264,18 @@ a turn keeps its speed, and a turn passes through every angle between.
   carries are ordered by depth.
 - **With `backface`**, a window turned away is neither drawn nor takes the
   pointer. That is how a turning cube shows only the faces toward you, and
-  how only the front face takes clicks at rest.
+  how only the front face takes clicks at rest. Turned away means the viewer
+  is behind the plane it lies in, however much of it reaches behind them: a
+  wall beside you that runs past you still faces you.
+- **What reaches behind the viewer is cut away** where it comes too near, and
+  the rest drawn: a floor running under your feet is drawn up to them, and a
+  window wholly behind you is not drawn at all.
+- **Scenes turn with their group** as windows do. A scene in a posed group is
+  drawn into a texture and that is bent, at as many times its pixels as its
+  poses enlarge it (no more than four monitors' worth), so a wall posed at
+  twice its scene's size is as sharp as a scene that big. A scene is placed
+  on its monitor, so one larger than a monitor is declared smaller and posed
+  larger. Within a layer, the scene declared first is drawn on top.
 - **At rest**, a window whose pose leaves it exactly where it lives (a front
   face, a docked window) is drawn as any window is, on the cheap path, and is
   used as any window is. While a pose turns it, it is drawn where the pose
@@ -274,8 +285,9 @@ a turn keeps its speed, and a turn passes through every angle between.
   and moves them with the pose.
 
 `examples/space` is a window manager in C# with three such desktops: four
-desks on a cube, every window a card on a ring, and windows standing about in
-space that you fly among and dock in.
+desks on a cube, every window a card on a ring, and a room whose walls, floor
+and ceiling are QML scenes, the windows hung on its walls, which you walk
+through as in a game and step up to a window in.
 
 ### 8. Questions
 

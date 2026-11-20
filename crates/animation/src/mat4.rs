@@ -156,6 +156,31 @@ impl Mat4 {
         Some((out_x / out_w, out_y / out_w, out_w))
     }
 
+    /// A point through the matrix before the divide: `[x, y, w]`, whatever
+    /// side of the viewer it lands on. What a shape that reaches past the
+    /// viewer is cut with, since a cut must be made before the divide, where
+    /// every point of a straight edge is still on a straight line.
+    pub fn homogeneous(&self, x: f32, y: f32, z: f32) -> [f32; 3] {
+        let m = &self.0;
+        [
+            m[0] * x + m[4] * y + m[8] * z + m[12],
+            m[1] * x + m[5] * y + m[9] * z + m[13],
+            m[3] * x + m[7] * y + m[11] * z + m[15],
+        ]
+    }
+
+    /// Which way the plane z = 0 faces through this matrix: positive when
+    /// the viewer is on its front, the side +z is, and negative when they are
+    /// behind it, zero edge on. One answer for the whole plane, however much
+    /// of it is behind the viewer: a floor that runs under the viewer's feet
+    /// faces them all the way. It is the determinant of what the matrix does
+    /// to the plane's `(x, y, 1)`, which is 1 for the identity.
+    pub fn facing(&self) -> f32 {
+        let m = &self.0;
+        m[0] * (m[5] * m[15] - m[13] * m[7]) - m[4] * (m[1] * m[15] - m[13] * m[3])
+            + m[12] * (m[1] * m[7] - m[5] * m[3])
+    }
+
     /// Project a point, dividing through by `w`.
     ///
     /// Returns `None` when the point lands at or behind the viewer, where the
@@ -197,6 +222,38 @@ mod tests {
             Mat4::scale(2.0, 3.0, 1.0).project(4.0, 5.0, 0.0),
             Some((8.0, 15.0))
         );
+    }
+
+    /// The plane faces the viewer at rest, faces away turned half round, and
+    /// still faces them moved behind them and turned back: the side the
+    /// viewer is on, not where the plane is.
+    #[test]
+    fn a_plane_faces_the_viewer_on_its_front_wherever_it_is() {
+        let half = Mat4::rotate_y(std::f32::consts::PI);
+        let seen = |m: Mat4| m.then(Mat4::perspective(800.0)).facing();
+        assert!((Mat4::IDENTITY.facing() - 1.0).abs() < 1e-6);
+        assert!(seen(Mat4::IDENTITY) > 0.0);
+        assert!(seen(half) < 0.0);
+        // Behind the viewer, at z = 1600, facing +z as at rest: the viewer
+        // at z = 800 is behind it.
+        assert!(seen(Mat4::translate(0.0, 0.0, 1600.0)) < 0.0);
+        // Turned to face -z there, toward the viewer.
+        assert!(seen(half.then(Mat4::translate(0.0, 0.0, 1600.0))) > 0.0);
+        // Laid flat below the eye, as a floor is, its front up: seen from
+        // above, with part of it under and behind the viewer.
+        let floor =
+            Mat4::rotate_x(std::f32::consts::FRAC_PI_2).then(Mat4::translate(0.0, 300.0, 0.0));
+        assert!(seen(floor) > 0.0, "a floor below faces the eye above it");
+    }
+
+    /// Before the divide, a point keeps its `w`, behind the viewer too.
+    #[test]
+    fn homogeneous_keeps_a_point_behind_the_viewer() {
+        let m = Mat4::translate(0.0, 0.0, 1600.0).then(Mat4::perspective(800.0));
+        let [x, y, w] = m.homogeneous(10.0, 20.0, 0.0);
+        assert_eq!((x, y), (10.0, 20.0));
+        assert!((w + 1.0).abs() < 1e-6, "w is {w}");
+        assert_eq!(m.project(10.0, 20.0, 0.0), None);
     }
 
     /// A quarter turn about z sends +x to +y.

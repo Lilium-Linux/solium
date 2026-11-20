@@ -37,6 +37,9 @@ pub(crate) enum Kind {
     /// A monitor's xray cut, Ruling F29, held in `effect::xray::Xrays` and
     /// never by a pane: `tests::a_pane_holds_no_xray_capture`.
     Xray,
+    /// A scene posed in three dimensions, held in [`Scenes`] and never by a
+    /// pane: what its warp draws.
+    Scene,
 }
 
 /// One element a capture was drawn from: what the damage tracker itself
@@ -257,7 +260,7 @@ impl<T: Clone> Captures<T> {
         match kind {
             Kind::Pane => Some(&mut self.pane),
             Kind::Over => Some(&mut self.over),
-            Kind::Xray => None,
+            Kind::Xray | Kind::Scene => None,
         }
     }
 
@@ -276,6 +279,109 @@ impl<T: Clone> Captures<T> {
                 capture.release(pool);
             }
         }
+    }
+}
+
+/// One scene posed in three dimensions on one monitor: its capture, and the
+/// shape and commit of the warp that draws it.
+#[derive(Debug)]
+pub(crate) struct Scene<T = GlesTexture> {
+    pub(crate) capture: Capture<Target<T>>,
+    warp: (Option<crate::render::Shape>, CommitCounter),
+}
+
+impl<T> Default for Scene<T> {
+    fn default() -> Self {
+        Self {
+            capture: Capture::default(),
+            warp: (None, CommitCounter::default()),
+        }
+    }
+}
+
+/// Every scene a group poses, by the scripted surface and the monitor its
+/// instance is on: drawn through a capture and a warp as a window is, since
+/// a scene on the software path is pixels in memory, with no texture to bend
+/// until it is drawn into one. A scene posed no longer gives its target back
+/// ([`Scenes::keep`]).
+#[derive(Debug)]
+pub(crate) struct Scenes<T = GlesTexture> {
+    held: Vec<((crate::scripted::SurfaceId, String), Scene<T>)>,
+}
+
+impl<T> Default for Scenes<T> {
+    fn default() -> Self {
+        Self { held: Vec::new() }
+    }
+}
+
+impl<T: Clone> Scenes<T> {
+    /// The capture of `id`'s instance on `monitor`, made when first asked.
+    pub(crate) fn capture_mut(
+        &mut self,
+        id: crate::scripted::SurfaceId,
+        monitor: &str,
+    ) -> Option<&mut Capture<Target<T>>> {
+        self.scene_mut(id, monitor).map(|scene| &mut scene.capture)
+    }
+
+    /// The scene held for `id` on `monitor`, made when first asked: never
+    /// `None`, and an `Option` rather than an index that could panic.
+    fn scene_mut(
+        &mut self,
+        id: crate::scripted::SurfaceId,
+        monitor: &str,
+    ) -> Option<&mut Scene<T>> {
+        let found = self
+            .held
+            .iter()
+            .position(|((each, on), _)| *each == id && on == monitor);
+        let held = match found {
+            Some(at) => self.held.get_mut(at),
+            None => {
+                self.held.push(((id, monitor.to_owned()), Scene::default()));
+                self.held.last_mut()
+            }
+        };
+        held.map(|(_, scene)| scene)
+    }
+
+    /// The commit the warp of `id` on `monitor` carries this pass: moved
+    /// when its capture was redrawn or its shape changed, and only then, as
+    /// a window's warp is ([`Captures::warp_commit_for`]).
+    /// `tests::a_posed_scenes_warp_keeps_its_commit_at_rest`.
+    pub(crate) fn warp_commit(
+        &mut self,
+        id: crate::scripted::SurfaceId,
+        monitor: &str,
+        shape: crate::render::Shape,
+        redrawn: bool,
+    ) -> CommitCounter {
+        let Some(scene) = self.scene_mut(id, monitor) else {
+            return CommitCounter::default();
+        };
+        let (held, commit) = &mut scene.warp;
+        if redrawn || *held != Some(shape) {
+            commit.increment();
+            *held = Some(shape);
+        }
+        *commit
+    }
+
+    /// Give back every scene's target but those posed this pass.
+    /// `tests::a_scene_posed_no_longer_gives_its_target_back`.
+    pub(crate) fn keep(
+        &mut self,
+        posed: &[(crate::scripted::SurfaceId, String)],
+        pool: &mut Pool<T>,
+    ) {
+        self.held.retain_mut(|(key, scene)| {
+            let kept = posed.contains(key);
+            if !kept {
+                scene.capture.release(pool);
+            }
+            kept
+        });
     }
 }
 
@@ -556,6 +662,68 @@ mod tests {
             alloc.freed.get(),
             1,
             "with no budget the old one is freed, not kept beside the new"
+        );
+    }
+
+    /// **A posed scene's warp keeps its commit at rest**, moves it when the
+    /// pose moves or its capture is redrawn, and two scenes, or one scene on
+    /// two monitors, commit apart.
+    #[test]
+    fn a_posed_scenes_warp_keeps_its_commit_at_rest() {
+        let mut scenes = super::Scenes::<u32>::default();
+        let wall = crate::scripted::SurfaceId::from_raw(4);
+        let floor = crate::scripted::SurfaceId::from_raw(5);
+        let first = scenes.warp_commit(wall, "DP-1", shape(0.3), false);
+        assert_eq!(scenes.warp_commit(wall, "DP-1", shape(0.3), false), first);
+        let floor_first = scenes.warp_commit(floor, "DP-1", shape(0.3), false);
+        let other_monitor = scenes.warp_commit(wall, "DP-2", shape(0.3), false);
+        assert_eq!(scenes.warp_commit(wall, "DP-1", shape(0.3), false), first);
+        let turned = scenes.warp_commit(wall, "DP-1", shape(0.4), false);
+        assert_ne!(turned, first);
+        assert_ne!(scenes.warp_commit(wall, "DP-1", shape(0.4), true), turned);
+        assert_eq!(
+            scenes.warp_commit(floor, "DP-1", shape(0.3), false),
+            floor_first
+        );
+        assert_eq!(
+            scenes.warp_commit(wall, "DP-2", shape(0.3), false),
+            other_monitor
+        );
+    }
+
+    /// **A scene posed no longer gives its target back**, and one still
+    /// posed keeps its own.
+    #[test]
+    fn a_scene_posed_no_longer_gives_its_target_back() {
+        let (mut scenes, mut pool, mut alloc) =
+            (super::Scenes::<Handle>::default(), Pool::new(0), counting());
+        let (wall, floor) = (
+            crate::scripted::SurfaceId::from_raw(4),
+            crate::scripted::SurfaceId::from_raw(5),
+        );
+        for id in [wall, floor] {
+            let capture = scenes.capture_mut(id, "DP-1").expect("a scene's capture");
+            let target = capture
+                .target_for(&mut pool, &mut alloc, size(800, 600))
+                .expect("a target");
+            capture.drawn(target, nothing(Kind::Scene));
+        }
+        scenes.keep(&[(floor, "DP-1".to_owned())], &mut pool);
+        assert_eq!(alloc.freed.get(), 1, "the wall's target, and only it");
+        assert!(
+            scenes
+                .capture_mut(floor, "DP-1")
+                .expect("a scene's capture")
+                .target()
+                .is_some()
+        );
+        assert!(
+            scenes
+                .capture_mut(wall, "DP-1")
+                .expect("a scene's capture")
+                .target()
+                .is_none(),
+            "asked again, it is a new capture with nothing drawn"
         );
     }
 

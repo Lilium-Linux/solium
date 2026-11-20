@@ -37,7 +37,7 @@ file is out of date.
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
 | `sdk/csharp/` | The package a window manager in C# is built on: the protocol's types, generated from the `.proto` by protobuf's own generator, the connection, the desktop kept current, and a whole window manager on it (`Tiny/`). Built with `dotnet`, not by the gate |
 | `examples/bad-apple/` | A window manager in C# on that package, which plays a film by moving and resizing real terminals. Built with `dotnet`, not by the gate |
-| `examples/space/` | A window manager in C# on that package with three desktops in three dimensions (a cube of desks, a carousel, flying among windows), all groups posed by the compositor. Built with `dotnet`, not by the gate |
+| `examples/space/` | A window manager in C# on that package with three desktops in three dimensions (a cube of desks, a carousel, a room of QML scenes walked through with the windows on its walls), all groups posed by the compositor. Built with `dotnet`, not by the gate |
 | `crates/x11-probe/` | An X11 client that asks the window manager for fullscreen and maximised, from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |

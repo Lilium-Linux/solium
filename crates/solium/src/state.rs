@@ -934,6 +934,10 @@ pub(crate) struct Solium {
     /// `effects.xray.keep_ms` once nothing reads them.
     /// `effect::xray::tests::a_cut_nobody_wants_is_kept_for_keep_ms`.
     pub(crate) xrays: crate::effect::xray::Xrays,
+    /// Every scene a group poses in three dimensions, captured to be drawn
+    /// through its group's matrix as a window is, held between passes and
+    /// given back once nothing poses it (`render::Gpu::warps`).
+    pub(crate) scene_captures: crate::keyed::Scenes,
     /// Every memo: a T2 chain's backdrop-only prefix, run once per monitor,
     /// cut and prefix result and read by every place whose chain begins the
     /// same way (Ruling F30). Held outside the pool's free-list budget,
@@ -1615,6 +1619,7 @@ impl Solium {
             pool: crate::pool::Pool::new(0),
             store: crate::effect::store::Store::default(),
             xrays: crate::effect::xray::Xrays::default(),
+            scene_captures: crate::keyed::Scenes::default(),
             memos: crate::effect::memo::Memos::default(),
             warm: {
                 let mut warm = crate::warm::Warm::default();

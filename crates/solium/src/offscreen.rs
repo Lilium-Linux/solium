@@ -125,6 +125,9 @@ pub(crate) enum HeldIn {
     Pane(PaneId, crate::keyed::Kind),
     Slot(crate::effect::plan::Owner, crate::effect::rules::Slot),
     Xray(String, crate::effect::xray::Cut),
+    /// A scene posed in three dimensions, by its monitor's name
+    /// ([`scene_job`]).
+    Scene(crate::scripted::SurfaceId, String),
 }
 
 /// One part, padded by `pad` physical pixels on every side, for a slot's
@@ -181,6 +184,40 @@ pub(crate) fn part_job(
     let inputs = crate::keyed::Inputs::of(crate::keyed::Kind::Pane, size, scale, &elements);
     Some(Job {
         into: HeldIn::Slot(owner, slot),
+        size,
+        scale,
+        elements,
+        inputs,
+    })
+}
+
+/// A scene a group poses in three dimensions, on `output`: its instance drawn
+/// flat at its own area, at `scale`, its corner at the target's, which its
+/// warp then bends (`render::Gpu::warps`). Held in
+/// [`crate::keyed::Scenes`] and drawn again only when Qt draws the scene a
+/// new picture, as a window's capture is when its client commits. `None`
+/// with no instance there or nothing drawn yet.
+/// `tests::a_posed_scenes_capture_is_held_in_scenes`.
+pub(crate) fn scene_job(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    id: crate::scripted::SurfaceId,
+    output: &smithay::output::Output,
+    scale: f64,
+) -> Option<Job> {
+    let area = crate::render::instance_area(state, id, output)?;
+    let size = client_pixels(area.size, scale);
+    let elements = vec![crate::render::scripted_instance(
+        state,
+        renderer,
+        id,
+        output,
+        (0, 0).into(),
+        scale,
+    )?];
+    let inputs = crate::keyed::Inputs::of(crate::keyed::Kind::Scene, size, scale, &elements);
+    Some(Job {
+        into: HeldIn::Scene(id, output.name()),
         size,
         scale,
         elements,
@@ -608,10 +645,11 @@ pub(crate) fn draw<T>(
                     let _frame = crate::qml::frame_in_flight();
                     for (job, then) in jobs {
                         let target = {
-                            let (panes, store, xrays, pool) = (
+                            let (panes, store, xrays, scenes, pool) = (
                                 &mut state.panes,
                                 &mut state.store,
                                 &mut state.xrays,
+                                &mut state.scene_captures,
                                 &mut state.pool,
                             );
                             // A slot's self input changes size with its part on
@@ -620,14 +658,16 @@ pub(crate) fn draw<T>(
                             // read through that corner (#428). A warp's capture
                             // and a monitor's xray cut are read whole.
                             let room = matches!(job.into, HeldIn::Slot(..));
-                            capture_in(panes, store, xrays, &job.into).and_then(|capture| {
-                                let alloc = &mut crate::pool::Gl(renderer);
-                                if room {
-                                    capture.target_with_room(pool, alloc, job.size)
-                                } else {
-                                    capture.target_for(pool, alloc, job.size)
-                                }
-                            })
+                            capture_in((panes, store, xrays, scenes), &job.into).and_then(
+                                |capture| {
+                                    let alloc = &mut crate::pool::Gl(renderer);
+                                    if room {
+                                        capture.target_with_room(pool, alloc, job.size)
+                                    } else {
+                                        capture.target_for(pool, alloc, job.size)
+                                    }
+                                },
+                            )
                         };
                         let Some(target) = target else {
                             tracing::warn!(size = ?job.size, "no target for a capture");
@@ -664,12 +704,7 @@ pub(crate) fn draw<T>(
                             };
                         if drawn {
                             crate::pacing::captured();
-                            if let Some(capture) = capture_in(
-                                &mut state.panes,
-                                &mut state.store,
-                                &mut state.xrays,
-                                &job.into,
-                            ) {
+                            if let Some(capture) = capture_in(held(state), &job.into) {
                                 capture.drawn(target.clone(), job.inputs);
                                 done.push((
                                     then,
@@ -701,12 +736,7 @@ pub(crate) fn kept(state: &mut Solium, job: &Job) -> Option<(GlesTexture, Id, Co
     if crate::dev::recapture_always() {
         return None;
     }
-    let capture = capture_in(
-        &mut state.panes,
-        &mut state.store,
-        &mut state.xrays,
-        &job.into,
-    )?;
+    let capture = capture_in(held(state), &job.into)?;
     if capture.stale(&job.inputs) {
         return None;
     }
@@ -734,9 +764,7 @@ pub(crate) fn release(state: &mut Solium, pane: PaneId) {
 /// `tests::a_slots_capture_is_held_in_the_store`,
 /// `tests::an_xrays_capture_is_held_in_xrays`.
 fn capture_in<'s>(
-    panes: &'s mut crate::pane::Panes,
-    store: &'s mut crate::effect::store::Store,
-    xrays: &'s mut crate::effect::xray::Xrays,
+    (panes, store, xrays, scenes): Held<'s>,
     into: &HeldIn,
 ) -> Option<&'s mut crate::keyed::Capture> {
     match into {
@@ -745,7 +773,26 @@ fn capture_in<'s>(
             .and_then(|held| held.captures_mut().get_mut(*kind)),
         HeldIn::Slot(owner, slot) => store.get_mut(owner, *slot).map(|state| &mut state.input),
         HeldIn::Xray(output, cut) => Some(xrays.capture_mut(output, *cut)),
+        HeldIn::Scene(id, monitor) => scenes.capture_mut(*id, monitor),
     }
+}
+
+/// Everything a capture can be held in, borrowed together from the state.
+type Held<'s> = (
+    &'s mut crate::pane::Panes,
+    &'s mut crate::effect::store::Store,
+    &'s mut crate::effect::xray::Xrays,
+    &'s mut crate::keyed::Scenes,
+);
+
+/// [`Held`], from the state.
+fn held(state: &mut Solium) -> Held<'_> {
+    (
+        &mut state.panes,
+        &mut state.store,
+        &mut state.xrays,
+        &mut state.scene_captures,
+    )
 }
 
 /// Whether a finished offscreen frame may be sampled: the compositor's
@@ -1097,25 +1144,30 @@ mod tests {
             index: 0,
             generation: 1,
         };
-        let (mut panes, mut store, mut xrays) = (
+        let (mut panes, mut store, mut xrays, mut scenes) = (
             crate::pane::Panes::default(),
             Store::default(),
             crate::effect::xray::Xrays::default(),
+            crate::keyed::Scenes::default(),
         );
         let into = super::HeldIn::Slot(owner.clone(), Slot::Replace);
-        assert!(super::capture_in(&mut panes, &mut store, &mut xrays, &into).is_none());
+        assert!(
+            super::capture_in((&mut panes, &mut store, &mut xrays, &mut scenes), &into).is_none()
+        );
         let id = store
             .slot_mut(&owner, Slot::Replace, rule)
             .input
             .id()
             .clone();
         assert_eq!(
-            super::capture_in(&mut panes, &mut store, &mut xrays, &into)
+            super::capture_in((&mut panes, &mut store, &mut xrays, &mut scenes), &into)
                 .map(|capture| capture.id().clone()),
             Some(id)
         );
         let pane = super::HeldIn::Pane(crate::pane::PaneId::from_raw(3), crate::keyed::Kind::Pane);
-        assert!(super::capture_in(&mut panes, &mut store, &mut xrays, &pane).is_none());
+        assert!(
+            super::capture_in((&mut panes, &mut store, &mut xrays, &mut scenes), &pane).is_none()
+        );
     }
 
     /// **An xray's capture is held in `Xrays`**, by its monitor and cut,
@@ -1125,17 +1177,18 @@ mod tests {
     fn an_xrays_capture_is_held_in_xrays() {
         use crate::effect::store::Store;
         use crate::effect::xray::{Cut, Xrays};
-        let (mut panes, mut store, mut xrays) = (
+        let (mut panes, mut store, mut xrays, mut scenes) = (
             crate::pane::Panes::default(),
             Store::default(),
             Xrays::default(),
+            crate::keyed::Scenes::default(),
         );
         let into = super::HeldIn::Xray("DP-1".to_owned(), Cut::Background);
-        let id = super::capture_in(&mut panes, &mut store, &mut xrays, &into)
+        let id = super::capture_in((&mut panes, &mut store, &mut xrays, &mut scenes), &into)
             .map(|capture| capture.id().clone());
         assert!(id.is_some());
         assert_eq!(
-            super::capture_in(&mut panes, &mut store, &mut xrays, &into)
+            super::capture_in((&mut panes, &mut store, &mut xrays, &mut scenes), &into)
                 .map(|capture| capture.id().clone()),
             id
         );
@@ -1145,15 +1198,38 @@ mod tests {
         );
         assert_ne!(
             super::capture_in(
-                &mut panes,
-                &mut store,
-                &mut xrays,
+                (&mut panes, &mut store, &mut xrays, &mut scenes),
                 &super::HeldIn::Xray("DP-1".to_owned(), Cut::Bottom)
             )
             .map(|capture| capture.id().clone()),
             id,
             "the other cut is a capture of its own"
         );
+    }
+
+    /// **A posed scene's capture is held in `Scenes`**, by its surface and
+    /// monitor, the same one each time it is asked for, and apart from the
+    /// same scene's on another monitor.
+    #[test]
+    fn a_posed_scenes_capture_is_held_in_scenes() {
+        let (mut panes, mut store, mut xrays, mut scenes) = (
+            crate::pane::Panes::default(),
+            crate::effect::store::Store::default(),
+            crate::effect::xray::Xrays::default(),
+            crate::keyed::Scenes::default(),
+        );
+        let wall = crate::scripted::SurfaceId::from_raw(4);
+        let mut id_of = |monitor: &str| {
+            super::capture_in(
+                (&mut panes, &mut store, &mut xrays, &mut scenes),
+                &super::HeldIn::Scene(wall, monitor.to_owned()),
+            )
+            .map(|capture| capture.id().clone())
+        };
+        let first = id_of("DP-1");
+        assert!(first.is_some());
+        assert_eq!(id_of("DP-1"), first);
+        assert_ne!(id_of("DP-2"), first, "another monitor's is its own");
     }
 
     /// **A rotated monitor's xray has the rotated shape**: a 2560×1440 mode

@@ -99,6 +99,11 @@ pub(crate) struct Shift {
     pub(crate) world: Mat4,
     /// Whether a member turned to face away from the viewer is hidden.
     pub(crate) backface: bool,
+    /// How many times its own size the poses draw a member: their scales
+    /// multiplied. A scene is captured at that many times its pixels, so a
+    /// wall posed at twice its scene's size is as sharp as one made at it
+    /// (`render::scene_capture_scale`).
+    pub(crate) grow: f64,
 }
 
 /// A pose in three dimensions: what the protocol's `pose` says, kept as the
@@ -195,41 +200,15 @@ fn flat(world: &Mat4) -> bool {
         && near(15, 1e-6)
 }
 
-/// Whether `frame`, drawn through its matrix, is seen from behind: its
-/// corners, projected, run the other way round, or one lands behind the
-/// viewer. Edge on is behind too, which is where a turning face hides.
+/// Whether `frame`, drawn through its matrix, is seen from behind: the
+/// viewer is on the back of the plane it lies in. Edge on is behind too,
+/// which is where a turning face hides. One answer for the whole of it,
+/// however much reaches behind the viewer: a wall beside the viewer that
+/// runs past them faces them, and is drawn up to where the renderer cuts it
+/// (`warp::mesh_grid`).
+/// `tests::a_face_reaching_past_the_viewer_still_faces_them`.
 fn faces_away(frame: &Frame) -> bool {
-    let rect = frame.rect;
-    let pivot = (
-        rect.loc.x + rect.size.w * f64::from(frame.pivot.0),
-        rect.loc.y + rect.size.h * f64::from(frame.pivot.1),
-    );
-    let mut corners = [(0.0_f64, 0.0_f64); 4];
-    for (corner, (u, v)) in corners
-        .iter_mut()
-        .zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
-    {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a matrix is f32, and every number here is screen-sized"
-        )]
-        let projected = frame.matrix.project(
-            (rect.loc.x + rect.size.w * u - pivot.0) as f32,
-            (rect.loc.y + rect.size.h * v - pivot.1) as f32,
-            0.0,
-        );
-        match projected {
-            Some((x, y)) => *corner = (f64::from(x), f64::from(y)),
-            None => return true,
-        }
-    }
-    let twice_area: f64 = (0..4)
-        .map(|at| {
-            let (a, b) = (corners[at], corners[(at + 1) % 4]);
-            a.0 * b.1 - b.0 * a.1
-        })
-        .sum();
-    twice_area <= 1e-3
+    frame.matrix.facing() <= 1e-6
 }
 
 /// How near the viewer `world` puts the point `(x, y)` of the screen: the
@@ -259,6 +238,7 @@ impl Shift {
         pose: Pose::NONE,
         world: Mat4::IDENTITY,
         backface: false,
+        grow: 1.0,
     };
 
     /// This, posed: its pose and the matrix that is.
@@ -266,8 +246,16 @@ impl Shift {
         Self {
             pose,
             world: pose.matrix(),
+            grow: pose.scale,
             ..self
         }
+    }
+
+    /// Whether this draws a member anywhere but flat where it is: a matrix
+    /// of its own, or a pose. A scene it carries is then drawn through a
+    /// capture, as a window is, and not as a rectangle.
+    pub(crate) fn bends(&self) -> bool {
+        !(self.matrix.is_identity() && flat(&self.world))
     }
 
     /// Whether this changes anything at all.
@@ -298,6 +286,7 @@ impl Shift {
             pose: Pose::NONE,
             world: self.world.then(then.world),
             backface: self.backface || then.backface,
+            grow: self.grow * then.grow,
         }
     }
 
@@ -1467,6 +1456,35 @@ mod tests {
         assert!(
             facing.shows(),
             "turned 30 degrees, it still faces the viewer"
+        );
+    }
+
+    /// **A face reaching past the viewer still faces them**: a wall to the
+    /// viewer's left, its front toward them, running from in front of them to
+    /// behind them, is drawn with the backface on, and the same wall to their
+    /// right, its back toward them, is hidden. The eye is at (800, 450),
+    /// 1000 in front of the screen.
+    #[test]
+    fn a_face_reaching_past_the_viewer_still_faces_them() {
+        let wall = Frame::real(rect(200, 0, 3000, 900));
+        let at = |x: f64| Shift {
+            backface: true,
+            ..posed(Pose {
+                // A quarter turn about the eye's line puts the wall's front
+                // toward +x and its length into the screen, from z = 600
+                // to z = -2400; moved to x and 900 nearer, it runs from
+                // z = 1500, behind the eye, to z = -1500.
+                rotate: [0.0, 90.0, 0.0],
+                origin: [800.0, 450.0, 0.0],
+                translate: [x - 800.0, 0.0, 900.0],
+                perspective: 1000.0,
+                ..Pose::NONE
+            })
+        };
+        assert!(at(200.0).apply(wall).shows(), "the left wall faces the eye");
+        assert!(
+            !at(1400.0).apply(wall).shows(),
+            "the right wall is seen from behind"
         );
     }
 

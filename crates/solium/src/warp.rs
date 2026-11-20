@@ -131,6 +131,10 @@ impl Mesh {
         reason = "output coordinates are small integers"
     )]
     pub(crate) fn bounds(&self) -> Rectangle<i32, Physical> {
+        // Nothing in front of the viewer covers nothing.
+        if self.vertices.is_empty() {
+            return Rectangle::default();
+        }
         let (mut left, mut right, mut top, mut bottom) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
         for corner in &self.vertices {
             left = left.min(corner.x);
@@ -201,6 +205,11 @@ impl Mesh {
                 at(x0, y1, 0.0, 1.0),
             ],
         }
+    }
+
+    /// Whether nothing of it is in front of the viewer, so nothing is drawn.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.vertices.is_empty()
     }
 
     /// Five floats a vertex, as the program reads them: x, y, u·q, v·q, q.
@@ -334,9 +343,10 @@ pub(crate) fn mesh(
 /// the whole part is the mesh before parts bit for bit,
 /// `tests::the_whole_part_is_the_whole_mesh`.
 ///
-/// Returns `None` when any vertex lands at or behind the viewer: a shape with
-/// one vertex projected from behind is not that shape any more, and drawing it
-/// anyway folds the texture across the screen.
+/// What reaches behind the viewer is cut away before the divide, as
+/// [`mesh_grid`] cuts it: a shape with a vertex projected from behind is not
+/// that shape any more, and drawing it anyway folds the texture across the
+/// screen.
 pub(crate) fn mesh_part(
     rect: Rectangle<f64, smithay::utils::Logical>,
     part: UnitRect,
@@ -365,8 +375,11 @@ pub(crate) fn mesh_part(
 /// it is in the grid, `(c / cols, r / rows)`, across the part's capture.
 /// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
 ///
-/// Returns `None` when the grid has not as many points as its size says, or
-/// any vertex lands at or behind the viewer, as [`mesh_part`] does.
+/// Returns `None` when the grid has not as many points as its size says.
+/// What reaches nearer the viewer than [`NEAR`] is cut away there, triangle by
+/// triangle, and the rest drawn: a floor that runs under the viewer is drawn
+/// up to their feet, and a shape wholly behind them is an empty mesh, which
+/// draws nothing. `tests::a_quad_reaching_behind_the_viewer_is_cut_at_the_near_plane`.
 pub(crate) fn mesh_grid(
     grid: &Grid,
     shift: Point<f64, smithay::utils::Logical>,
@@ -389,9 +402,12 @@ pub(crate) fn mesh_grid(
         rect.loc.y + rect.size.h * f64::from(pivot.1),
     );
     #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
-    let scale32 = scale as f32;
+    let place = Place {
+        origin: ((centre_x * scale) as f32, (centre_y * scale) as f32),
+        scale: scale as f32,
+    };
 
-    let mut corners = Vec::with_capacity(grid.points.len() / 2);
+    let mut points = Vec::with_capacity(grid.points.len() / 2);
     for row in 0..=rows {
         let along_v = f64::from(row) / f64::from(rows);
         for column in 0..=columns {
@@ -402,17 +418,14 @@ pub(crate) fn mesh_grid(
                 grid.points.get(at + 1)? + shift.y,
             );
             #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
-            let offset = (((x - centre_x) as f32), ((y - centre_y) as f32));
-            let (projected_x, projected_y, w) = matrix.project_with_w(offset.0, offset.1, 0.0)?;
-            #[expect(clippy::cast_possible_truncation, reason = "screen-sized floats")]
-            let (origin_x, origin_y) = ((centre_x * scale) as f32, (centre_y * scale) as f32);
+            let [x, y, w] = matrix.homogeneous((x - centre_x) as f32, (y - centre_y) as f32, 0.0);
             #[expect(clippy::cast_possible_truncation, reason = "unit square floats")]
-            corners.push(Corner {
-                x: origin_x + projected_x * scale32,
-                y: origin_y + projected_y * scale32,
+            points.push(Unseen {
+                x,
+                y,
+                w,
                 u: along_u as f32,
                 v: along_v as f32,
-                q: 1.0 / w,
             });
         }
     }
@@ -420,11 +433,7 @@ pub(crate) fn mesh_grid(
     // Two triangles per cell. Indices would save a third of the upload, but
     // this is a few thousand floats a frame at most and a flat list is one
     // less thing to get wrong.
-    let at = |column: u32, row: u32| {
-        corners
-            .get((row * (columns + 1) + column) as usize)
-            .copied()
-    };
+    let at = |column: u32, row: u32| points.get((row * (columns + 1) + column) as usize).copied();
     let mut vertices = Vec::with_capacity((columns * rows * 6) as usize);
     for row in 0..rows {
         for column in 0..columns {
@@ -432,17 +441,106 @@ pub(crate) fn mesh_grid(
             let top_right = at(column + 1, row)?;
             let bottom_right = at(column + 1, row + 1)?;
             let bottom_left = at(column, row + 1)?;
-            vertices.extend_from_slice(&[
-                top_left,
-                top_right,
-                bottom_right,
-                top_left,
-                bottom_right,
-                bottom_left,
-            ]);
+            for triangle in [
+                [top_left, top_right, bottom_right],
+                [top_left, bottom_right, bottom_left],
+            ] {
+                in_front(triangle, place, &mut vertices);
+            }
         }
     }
     Some(Mesh { vertices })
+}
+
+/// How near the viewer a point may come and still be drawn: `w`, the share
+/// of the distance from the viewer to the screen it is at. A fiftieth of the
+/// way, where anything with any size is already far past the screen's edge.
+const NEAR: f32 = 0.02;
+
+/// A point of a mesh through its matrix, before the divide, with its texture
+/// coordinate: what a triangle is cut at [`NEAR`] in, where every point of
+/// an edge is still on a straight line between its ends.
+#[derive(Clone, Copy, Debug)]
+struct Unseen {
+    x: f32,
+    y: f32,
+    w: f32,
+    u: f32,
+    v: f32,
+}
+
+/// Where a mesh's projected points go on the target: the pivot's place in its
+/// pixels, and the scale.
+#[derive(Clone, Copy, Debug)]
+struct Place {
+    origin: (f32, f32),
+    scale: f32,
+}
+
+impl Unseen {
+    /// The point `t` of the way from this one to `to`.
+    fn toward(self, to: Self, t: f32) -> Self {
+        let lerp = |a: f32, b: f32| a + (b - a) * t;
+        Self {
+            x: lerp(self.x, to.x),
+            y: lerp(self.y, to.y),
+            w: lerp(self.w, to.w),
+            u: lerp(self.u, to.u),
+            v: lerp(self.v, to.v),
+        }
+    }
+
+    /// Divided through and placed: a corner of what is drawn.
+    fn corner(self, place: Place) -> Corner {
+        Corner {
+            x: place.origin.0 + self.x / self.w * place.scale,
+            y: place.origin.1 + self.y / self.w * place.scale,
+            u: self.u,
+            v: self.v,
+            q: 1.0 / self.w,
+        }
+    }
+}
+
+/// What of `triangle` is in front of [`NEAR`], as triangles pushed onto
+/// `vertices` in its own winding: itself, nothing, or the one or two a cut
+/// across it leaves.
+fn in_front(triangle: [Unseen; 3], place: Place, vertices: &mut Vec<Corner>) {
+    if triangle.iter().all(|point| point.w >= NEAR) {
+        vertices.extend(triangle.map(|point| point.corner(place)));
+        return;
+    }
+    // Each edge's start, if it is in front, and where the edge crosses the
+    // plane, if it does: at most four points, in order round the triangle.
+    let mut kept: [Option<Unseen>; 4] = [None; 4];
+    let mut count = 0;
+    for at in 0..3 {
+        let (from, to) = (triangle[at], triangle[(at + 1) % 3]);
+        let mut keep = |point: Unseen| {
+            if let Some(slot) = kept.get_mut(count) {
+                *slot = Some(point);
+                count += 1;
+            }
+        };
+        if from.w >= NEAR {
+            keep(from);
+        }
+        if (from.w >= NEAR) != (to.w >= NEAR) {
+            keep(from.toward(to, (NEAR - from.w) / (to.w - from.w)));
+        }
+    }
+    let kept: Vec<Corner> = kept
+        .into_iter()
+        .flatten()
+        .map(|point| point.corner(place))
+        .collect();
+    for at in 1..kept.len().saturating_sub(1) {
+        if let (Some(first), Some(second), Some(third)) =
+            (kept.first(), kept.get(at), kept.get(at + 1))
+        {
+            vertices.extend_from_slice(&[*first, *second, *third]);
+        }
+    }
 }
 
 /// The Rust genie's grid: `deform` placed at every point of its own grid
@@ -836,6 +934,49 @@ mod tests {
             "{:?}",
             flat.vertices()[0]
         );
+    }
+
+    /// **A quad reaching behind the viewer is cut at the near plane**, and
+    /// the rest of it drawn: a floor laid below the eye and running under
+    /// it, toward and past the viewer, keeps triangles, none of them nearer
+    /// than `NEAR`, and the far edge where it was; moved wholly behind the
+    /// viewer it is an empty mesh, which draws nothing.
+    #[test]
+    fn a_quad_reaching_behind_the_viewer_is_cut_at_the_near_plane() {
+        use super::{NEAR, UnitRect, mesh_part};
+        let rect = Rectangle::<f64, Logical>::new((0.0, 0.0).into(), (800.0, 2000.0).into());
+        // Laid flat about its centre (x = 400, y = 1000), its top edge away
+        // from the viewer, 300 px below the eye, its middle at the screen:
+        // the near half reaches 1000 px toward a viewer 800 px away.
+        let floor = Mat4::rotate_x(std::f32::consts::FRAC_PI_2)
+            .then(Mat4::translate(0.0, 300.0, 0.0))
+            .then(Mat4::perspective(800.0));
+        let mesh = mesh_part(rect, UnitRect::WHOLE, floor, (0.5, 0.5), 1.0).expect("a mesh");
+        assert!(!mesh.is_empty(), "what is in front of the viewer is drawn");
+        for corner in mesh.vertices() {
+            assert!(
+                corner.q <= 1.0 / NEAR + 1e-3,
+                "{corner:?} is nearer than the cut"
+            );
+            assert!(corner.q > 0.0, "{corner:?} is behind the viewer");
+        }
+        // Its far corners, where the texture's top is, are untouched: the
+        // far edge 1000 px into the screen, w = 2.25, drawn 300 / 2.25
+        // below the eye.
+        let far = mesh
+            .vertices()
+            .iter()
+            .find(|corner| corner.u == 0.0 && corner.v == 0.0)
+            .expect("the far corner is kept");
+        assert!((1.0 / far.q - 2.25).abs() < 1e-4, "{far:?}");
+        assert!((far.y - (1000.0 + 300.0 / 2.25)).abs() < 1e-2, "{far:?}");
+        // Nothing of the near edge (v = 1) survives: it is behind the viewer.
+        assert!(mesh.vertices().iter().all(|corner| corner.v < 1.0));
+
+        let behind = Mat4::translate(0.0, 0.0, 2000.0).then(Mat4::perspective(800.0));
+        let gone = mesh_part(rect, UnitRect::WHOLE, behind, (0.5, 0.5), 1.0).expect("a mesh");
+        assert!(gone.is_empty());
+        assert_eq!(gone.bounds().size.w * gone.bounds().size.h, 0);
     }
 
     /// **A grid short of its points draws nothing**, rather than a mesh
