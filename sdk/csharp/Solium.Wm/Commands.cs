@@ -74,6 +74,60 @@ public static class Commands
     /// <summary>End the session.</summary>
     public static Command Quit() => new() { Quit = new Unit() };
 
+    /// <summary>
+    /// Name a group of windows; a window in it is carried by the group's
+    /// shift, then by its <paramref name="parent"/>'s and so on up. With
+    /// <paramref name="windows"/> null the name is taken away.
+    /// </summary>
+    public static Command Group(string name, IEnumerable<ulong>? windows, string? parent = null, Motion? motion = null)
+    {
+        var group = new Group { Name = name, Motion = motion ?? new Motion() };
+        if (windows is not null)
+        {
+            group.Selection = new Selection { Windows = { windows } };
+        }
+        if (parent is not null)
+        {
+            group.Parent = parent;
+        }
+        return new Command { Group = group };
+    }
+
+    /// <summary>
+    /// Carry a group to a pose in three dimensions, by a motion: each number
+    /// of the pose is what the motion moves. With <paramref name="backface"/>
+    /// a member seen from behind is hidden.
+    /// </summary>
+    public static Command Carry(string name, Pose pose, Motion motion, bool backface = false) => new()
+    {
+        PresentGroup = new PresentGroup
+        {
+            Name = name,
+            Shift = new Shift
+            {
+                Opacity = 1,
+                Matrix = { Identity },
+                Pose = pose,
+                Backface = backface,
+            },
+            Motion = motion,
+        },
+    };
+
+    /// <summary>Let a group go back to where its members are, by a motion.</summary>
+    public static Command Uncarry(string name, Motion motion) => new()
+    {
+        ClearGroup = new ClearGroup { Name = name, Motion = motion },
+    };
+
+    private static readonly float[] Identity =
+    {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    };
+
     /// <summary>A motion of so many milliseconds, by an easing: <see cref="Ease"/> has them.</summary>
     public static Motion Motion(double milliseconds, Easing? easing = null) =>
         new() { DurationMs = milliseconds, Easing = easing ?? Ease.Linear };
@@ -87,4 +141,13 @@ public static class Ease
     public static Easing OutBack => new() { OutBack = new Unit() };
     public static Easing InOutQuad => new() { InOutQuad = new Unit() };
     public static Easing InOutCubic => new() { InOutCubic = new Unit() };
+
+    /// <summary>
+    /// A spring, which takes as long as it takes and carries the speed of
+    /// the motion it interrupts.
+    /// </summary>
+    public static Easing Spring(double stiffness, double damping, double mass = 1) => new()
+    {
+        Spring = new Spring { Stiffness = stiffness, Damping = damping, Mass = mass, Epsilon = 0.001 },
+    };
 }

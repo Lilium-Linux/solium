@@ -662,6 +662,7 @@ fn a_script_names_a_selection_and_says_where_to_carry_it() {
             name,
             selection: Some(selection),
             animation,
+            parent: None,
         } => {
             assert_eq!(name, "desk-2");
             assert_eq!(selection.windows, vec![3, 7]);

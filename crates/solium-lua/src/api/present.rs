@@ -121,6 +121,10 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     // rather than being replaced by it, so a window tilted inside a moving desk
     // stays tilted within it.
     //
+    // `parent = "name"` puts it in another group: its members are carried by
+    // this group's shift and then by the parent's, so a cube turns its faces
+    // as one and a camera carries a room.
+    //
     // `sol.group(name, false)` takes one away. Re-declaring the same name
     // replaces the membership and keeps the transform, so a mode that rebuilds
     // its groups every time it runs -- which is every mode -- does not restart
@@ -128,11 +132,14 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     sol.set(
         "group",
         lua.create_function(|lua, (name, options): (String, Value)| {
-            let selection = match options {
-                Value::Table(options) => Some(selection_from(&options)?),
+            let (selection, parent) = match options {
+                Value::Table(options) => (
+                    Some(selection_from(&options)?),
+                    options.get::<Option<String>>("parent")?,
+                ),
                 // `false` and `nil` both remove it, the same way `sol.surface`
                 // reads them, so one spelling works for both primitives.
-                _ => None,
+                _ => (None, None),
             };
             with_pending(lua, |pending| {
                 let animation = pending.animation;
@@ -141,6 +148,7 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         name: name.clone(),
                         selection: selection.clone(),
                         motion: to_wire::motion(animation),
+                        parent: parent.clone(),
                     },
                 ));
             })
@@ -158,6 +166,8 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         dy: 0.0,
                         opacity: 1.0,
                         matrix: to_wire::matrix(solium_animation::mat4::Mat4::IDENTITY),
+                        pose: None,
+                        backface: false,
                     },
                 };
                 let (duration, easing) = motion_from(motion.as_ref())?;

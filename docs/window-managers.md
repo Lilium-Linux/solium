@@ -249,7 +249,35 @@ answer before it lands; one in another language needs nothing of it, since the
 rectangles come back in the window rows. `layouts/dwindle.lua` is a dwindle
 layout told this way, and `tiny_wm.rs` a row of columns in one `arrange`.
 
-### 7. Questions
+### 7. Groups in three dimensions
+
+A `group` names windows (and scenes and monitors) that move as one, and
+`present-group` moves it. Its `shift` can carry a `pose`: the group turned,
+moved and scaled about one origin, and seen in perspective, so a desk turns as
+a face of a cube rather than each window about its own middle. A group with a
+`parent` is carried by its own shift and then by the parent's, so a cube's
+faces turn together, and a camera is a parent of the whole room. The numbers
+of a pose are what a motion moves: a spring retargeted part of the way through
+a turn keeps its speed, and a turn passes through every angle between.
+
+- **What is drawn in front** is what comes nearer the viewer: windows a pose
+  carries are ordered by depth.
+- **With `backface`**, a window turned away is neither drawn nor takes the
+  pointer. That is how a turning cube shows only the faces toward you, and
+  how only the front face takes clicks at rest.
+- **At rest**, a window whose pose leaves it exactly where it lives (a front
+  face, a docked window) is drawn as any window is, on the cheap path, and is
+  used as any window is. While a pose turns it, it is drawn where the pose
+  puts it, and clicks still go by where it lives.
+- **A window is drawn on the screen it lives on**, whatever its pose: a
+  window manager posing windows into a room keeps their places on the screen
+  and moves them with the pose.
+
+`examples/space` is a window manager in C# with three such desktops: four
+desks on a cube, every window a card on a ring, and windows standing about in
+space that you fly among and dock in.
+
+### 8. Questions
 
 In the middle of a batch, a window manager can ask the compositor something it
 cannot know from its own copy of the desktop, with `query`, and gets a `reply`
@@ -263,7 +291,7 @@ The compositor may already have sent the next batch when it reads the
 question, so other messages can arrive before the reply. Keep them, and handle
 them after the batch you are in.
 
-### 8. Reload
+### 9. Reload
 
 `reload` asks the window manager to load its configuration again, from
 wherever it found it: the user pressed the reload key, or a file changed under
@@ -278,7 +306,7 @@ wherever it found it: the user pressed the reload key, or a file changed under
 A window manager with no configuration of its own to read answers `loaded`
 with what it said at the start.
 
-### 9. Goodbye
+### 10. Goodbye
 
 Either side may say `goodbye`, with why. The compositor says it as the session
 ends, waits a second for the window manager to exit, and then stops it.

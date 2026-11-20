@@ -16452,6 +16452,7 @@ fn a_close_does_not_hand_the_keyboard_to_a_workspace_nobody_can_see() {
             members: vec![crate::group::Member::Window(desk)],
             on: None,
         },
+        None,
         switch,
     );
     state.groups.present(
@@ -16767,6 +16768,7 @@ fn a_switch_on_its_first_frame(
                 members: vec![crate::group::Member::Window(id)],
                 on: None,
             },
+            None,
             parked,
         );
     }

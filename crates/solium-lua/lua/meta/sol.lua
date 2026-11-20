@@ -325,6 +325,7 @@
 ---@field surfaces? string[] Surfaces, by the name `sol.surface` gave them.
 ---@field monitors? string[] Everything drawn on these monitors.
 ---@field monitor? string Which instance of each surface above: the one on this monitor.
+---@field parent? string The group this one is in: its members are carried by this group's shift and then by the parent's, as far up as there are parents.
 
 ---What `sol.present_group` does to a selection. `x` and `y` are a
 ---displacement, not a destination, and the rest compose with each member's own
@@ -337,6 +338,26 @@
 ---@field rotate_y? number
 ---@field rotate_z? number
 ---@field perspective? number
+---@field pose? sol.Pose The selection posed in three dimensions about one origin, as one thing rather than each member about its own centre.
+---@field backface? boolean Hide a member seen from behind: it is neither drawn nor takes the pointer.
+
+---A pose in three dimensions, in logical pixels: x runs right, y down and z
+---toward the viewer, and the screen is the plane z = 0. A member is scaled and
+---turned about `origin`, then moved; then, with a `perspective`, seen from that
+---far in front of the screen straight through the origin's x and y. Each
+---number is what a motion moves, so a turn from 0 to 90 degrees turns through
+---every angle between. Every key is optional and 0 when left out, but `scale`,
+---which is 1.
+---@class sol.Pose
+---@field x? number Moved this far, after it is turned and scaled.
+---@field y? number
+---@field z? number
+---@field rotate_x? number Degrees about x, turned first.
+---@field rotate_y? number Degrees about y, turned second.
+---@field rotate_z? number Degrees about z, turned last.
+---@field scale? number
+---@field origin? { x?: number, y?: number, z?: number } The point it turns and scales about.
+---@field perspective? number How far in front of the screen it is seen from; 0 is none.
 
 ---What a window does before its application arrives. Every key is optional
 ---and one left out keeps the compositor's default.
@@ -1468,7 +1489,9 @@ function sol.present_clear(id) end
 ---
 ---Declaring the name again replaces the membership and keeps the transform, so
 ---a mode that rebuilds its groups on every pass does not restart its own
----animation. `false` or `nil` takes the name away.
+---animation. `false` or `nil` takes the name away. With `parent`, the group's
+---members are carried by it and then by the parent: the faces of a cube by
+---the cube, the windows of a room by the camera.
 ---@param name string
 ---@param selection sol.Selection|false|nil
 ---@return nil
@@ -1478,7 +1501,14 @@ function sol.group(name, selection) end
 ---
 ---Composes with each member's own `sol.present`, so a window tilted inside a
 ---moving desk stays tilted within it. `motion` sets this call's own timing;
----left out, it is whatever `sol.animate` set.
+---left out, it is whatever `sol.animate` set. With a `pose`, the selection is
+---turned as one about one origin, and a member posed is drawn in front of one
+---it comes nearer the viewer than:
+---
+---```lua
+---sol.present_group("cube", { pose = { rotate_y = -90, perspective = 2400,
+---    origin = { x = 800, y = 450, z = -800 } }, backface = true })
+---```
 ---@param name string
 ---@param shift? sol.Shift
 ---@param motion? sol.Motion

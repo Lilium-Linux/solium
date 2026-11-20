@@ -487,12 +487,60 @@ pub fn selection_from(options: &Table) -> mlua::Result<solium_wm_protocol::Selec
 /// `sol.present` is how a script gives one. An unknown key in this table is
 /// ignored like any other, so a script that writes one gets no window in the
 /// wrong place — it gets nothing, which is the mild half of this note.
+///
+/// **`pose` is the node's answer for a turn**: the whole selection posed in
+/// three dimensions about one origin, which is what turning a desk as one
+/// needs, and what each number of moves on its own:
+///
+/// ```lua
+/// sol.present_group("cube", { pose = { rotate_y = -90, perspective = 1600,
+///     origin = { x = 800, y = 450, z = -800 } }, backface = true })
+/// ```
+///
+/// `x`, `y`, `z` move it after it is turned and scaled; `rotate_x`,
+/// `rotate_y`, `rotate_z` turn it in degrees, in that order; `scale`;
+/// `origin` is the point it turns about; `perspective` how far in front of
+/// the screen it is seen from. `backface = true` hides a member seen from
+/// behind.
 pub fn shift_from(options: &Table) -> mlua::Result<solium_wm_protocol::Shift> {
+    let pose = match options.get::<Option<Table>>("pose")? {
+        Some(pose) => Some(pose_from(&pose)?),
+        None => None,
+    };
     Ok(solium_wm_protocol::Shift {
         dx: options.get::<Option<f64>>("x")?.unwrap_or(0.0),
         dy: options.get::<Option<f64>>("y")?.unwrap_or(0.0),
         opacity: options.get::<Option<f32>>("opacity")?.unwrap_or(1.0),
         matrix: to_wire::matrix(transform_from(options)?.unwrap_or(Mat4::IDENTITY)),
+        pose,
+        backface: options.get::<Option<bool>>("backface")?.unwrap_or(false),
+    })
+}
+
+/// A group's pose from its table, every number 0 when not given but `scale`.
+fn pose_from(pose: &Table) -> mlua::Result<solium_wm_protocol::Pose> {
+    let number = |table: &Table, key: &str| -> mlua::Result<f64> {
+        Ok(table.get::<Option<f64>>(key)?.unwrap_or(0.0))
+    };
+    let origin = pose.get::<Option<Table>>("origin")?;
+    let at = |key: &str| -> mlua::Result<f64> {
+        match &origin {
+            Some(origin) => number(origin, key),
+            None => Ok(0.0),
+        }
+    };
+    Ok(solium_wm_protocol::Pose {
+        x: number(pose, "x")?,
+        y: number(pose, "y")?,
+        z: number(pose, "z")?,
+        rotate_x: number(pose, "rotate_x")?,
+        rotate_y: number(pose, "rotate_y")?,
+        rotate_z: number(pose, "rotate_z")?,
+        scale: pose.get::<Option<f64>>("scale")?,
+        origin_x: at("x")?,
+        origin_y: at("y")?,
+        origin_z: at("z")?,
+        perspective: number(pose, "perspective")?,
     })
 }
 

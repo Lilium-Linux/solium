@@ -221,6 +221,37 @@ fn commands_of_every_shape_are_written_as_protoc_writes_them() {
             motion: motion(0.0, Easing::Linear),
             moved: Some(7),
         }),
+        Command::PresentGroup(PresentGroup {
+            name: "cube".to_owned(),
+            shift: Shift {
+                dx: 0.0,
+                dy: 0.0,
+                opacity: 1.0,
+                matrix: vec![
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+                pose: Some(Pose {
+                    rotate_y: -90.0,
+                    scale: Some(1.0),
+                    origin_x: 800.0,
+                    origin_y: 450.0,
+                    origin_z: -800.0,
+                    perspective: 2400.0,
+                    ..Pose::default()
+                }),
+                backface: true,
+            },
+            motion: motion(0.0, Easing::Linear),
+        }),
+        Command::Group(Group {
+            name: "face-1".to_owned(),
+            selection: Some(Selection {
+                windows: vec![7],
+                ..Selection::default()
+            }),
+            motion: motion(0.0, Easing::Linear),
+            parent: Some("cube".to_owned()),
+        }),
         Command::Grow(Grow {
             window: 7,
             axis: Axis::X,

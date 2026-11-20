@@ -179,8 +179,10 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             name,
             selection,
             motion,
+            parent,
         }) => Command::Group {
             name,
+            parent,
             selection: selection.map(|selection| crate::script::Selection {
                 windows: selection.windows,
                 surfaces: selection.surfaces,
@@ -200,7 +202,16 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
                 dy: shift.dy,
                 opacity: shift.opacity,
                 matrix: matrix(shift.matrix)?,
-            },
+                backface: shift.backface,
+                ..crate::group::Shift::NONE
+            }
+            .posed(
+                shift
+                    .pose
+                    .map(pose)
+                    .transpose()?
+                    .unwrap_or(crate::group::Pose::NONE),
+            ),
             animation: animation(&motion)?,
         },
         W::ClearGroup(wire::ClearGroup { name, motion }) => Command::ClearGroup {
@@ -648,6 +659,38 @@ pub(crate) fn animation(motion: &wire::Motion) -> Result<crate::script::Animatio
     Ok(crate::script::AnimationSpec {
         duration,
         easing: curve(&motion.easing),
+    })
+}
+
+/// A group's pose off the wire, or why it is not one: every number finite,
+/// a scale and a perspective of nothing or more.
+fn pose(pose: wire::Pose) -> Result<crate::group::Pose, String> {
+    let scale = pose.scale.unwrap_or(1.0);
+    let numbers = [
+        pose.x,
+        pose.y,
+        pose.z,
+        pose.rotate_x,
+        pose.rotate_y,
+        pose.rotate_z,
+        scale,
+        pose.origin_x,
+        pose.origin_y,
+        pose.origin_z,
+        pose.perspective,
+    ];
+    if !numbers.iter().all(|number| number.is_finite()) {
+        return Err("a pose with a number that is not one".to_owned());
+    }
+    if scale < 0.0 || pose.perspective < 0.0 {
+        return Err("a pose's scale and perspective are nothing or more".to_owned());
+    }
+    Ok(crate::group::Pose {
+        translate: [pose.x, pose.y, pose.z],
+        rotate: [pose.rotate_x, pose.rotate_y, pose.rotate_z],
+        scale,
+        origin: [pose.origin_x, pose.origin_y, pose.origin_z],
+        perspective: pose.perspective,
     })
 }
 

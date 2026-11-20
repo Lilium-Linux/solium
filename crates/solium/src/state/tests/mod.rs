@@ -2140,6 +2140,7 @@ fn a_slide_that_has_not_started_yet_is_not_where_the_desks_end_up() {
             members: vec![crate::group::Member::Window(7)],
             on: None,
         },
+        None,
         start,
     );
     // A screen and a bit to the left, over 300ms: `workspaces.lua`'s own

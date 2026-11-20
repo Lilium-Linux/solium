@@ -1012,11 +1012,13 @@ impl Solium {
                     name,
                     selection,
                     animation,
+                    parent,
                 } => {
                     let displaced = match selection {
                         Some(selection) => {
                             let selection = crate::group::selection_of(&selection, &self.surfaces);
-                            self.groups.declare(&name, selection, now)
+                            self.groups
+                                .declare(&name, selection, parent.as_deref(), now)
                         }
                         None => self.groups.forget(&name, now),
                     };

@@ -460,12 +460,48 @@ message Selection {
   optional string on = 4;
 }
 
+// A pose in three dimensions, in logical pixels: x runs right, y down
+// and z toward the viewer, and the screen is the plane z = 0. A
+// member is scaled and turned about the origin, then moved; then, with
+// a perspective, seen from that far in front of the screen, straight
+// through the origin's x and y. Each number is what a motion moves, so
+// a turn from 0 to 90 degrees turns through every angle between.
+message Pose {
+  // How far it is moved, after it is turned and scaled.
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  // How far it is turned, in degrees: about the x axis first, then
+  // the y axis, then the z axis.
+  double rotate_x = 4;
+  double rotate_y = 5;
+  double rotate_z = 6;
+  // How much it is scaled; none is 1.
+  optional double scale = 7;
+  // The point it is turned and scaled about.
+  double origin_x = 8;
+  double origin_y = 9;
+  double origin_z = 10;
+  // How far in front of the screen it is seen from; 0 is no
+  // perspective at all. A group with a parent leaves its perspective
+  // to its parent's.
+  double perspective = 11;
+}
+
 // How a whole group is shifted.
 message Shift {
   double dx = 1;
   double dy = 2;
   float opacity = 3;
   repeated float matrix = 4;
+  // Its members posed in three dimensions about one origin, after
+  // `matrix`, as one thing rather than each about its own centre:
+  // a desk turned as a face of a cube, a camera moved through a
+  // room of windows.
+  optional Pose pose = 5;
+  // Whether a member turned to face away from the viewer is hidden:
+  // neither drawn nor taking the pointer.
+  bool backface = 6;
 }
 
 // A place in a window: its id, and where in it, as shares of its width
@@ -916,6 +952,10 @@ message Group {
   string name = 1;
   optional Selection selection = 2;
   Motion motion = 3;
+  // The group this one is in: its members are carried by this
+  // group's shift and then by the parent's, and the parent's
+  // parent's, as far up as there are parents.
+  optional string parent = 4;
 }
 
 // What a group is moved by, and how.

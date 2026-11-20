@@ -115,6 +115,48 @@ submit {
     }
   }
   items {
+    present_group {
+      name: "cube"
+      shift {
+        opacity: 1
+        matrix: 1
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 1
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 1
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 0
+        matrix: 1
+        pose {
+          rotate_y: -90
+          scale: 1
+          origin_x: 800
+          origin_y: 450
+          origin_z: -800
+          perspective: 2400
+        }
+        backface: true
+      }
+      motion { easing { linear {} } }
+    }
+  }
+  items {
+    group {
+      name: "face-1"
+      selection { windows: 7 }
+      motion { easing { linear {} } }
+      parent: "cube"
+    }
+  }
+  items {
     grow {
       window: 7
       axis: AXIS_X

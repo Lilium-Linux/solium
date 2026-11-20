@@ -103,6 +103,9 @@ pub(crate) enum Command {
         name: String,
         selection: Option<Selection>,
         animation: AnimationSpec,
+        /// The group this one is in, whose shift carries its members after
+        /// its own.
+        parent: Option<String>,
     },
     /// Carry a named selection, members and all.
     PresentGroup {

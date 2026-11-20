@@ -48,10 +48,12 @@ docs/superpowers/
 docs/generated/
 
 # What `dotnet build` writes for the C# package in sdk/csharp, the
-# protocol's generated types among them, and for the window manager in
-# examples/bad-apple that is built on it; and the films made for that one.
+# protocol's generated types among them, and for the window managers in
+# examples/ that are built on it; and the films made for Bad Apple.
 examples/bad-apple/bin/
 examples/bad-apple/obj/
+examples/space/bin/
+examples/space/obj/
 sdk/csharp/*/bin/
 sdk/csharp/*/obj/
 *.frames

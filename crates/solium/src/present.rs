@@ -820,7 +820,7 @@ fn leaving_at(carried: f64, own: f64) -> f64 {
 }
 
 /// How many fields that measure a [`Carried`] thing has, at most.
-const RATE_FIELDS: usize = 8;
+const RATE_FIELDS: usize = 16;
 
 /// How fast each field that measures is changing, per second, in the order
 /// [`Carried::measures`] lists them.
@@ -858,6 +858,14 @@ impl Carried for Frame {
             f64::from(self.client_opacity),
             self.zoom.0,
             self.zoom.1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
         ]
     }
 
@@ -865,7 +873,10 @@ impl Carried for Frame {
         clippy::cast_possible_truncation,
         reason = "opacity is a small float either way"
     )]
-    fn with_measures(self, [x, y, w, h, opacity, client_opacity, zoom_x, zoom_y]: Rate) -> Self {
+    fn with_measures(
+        self,
+        [x, y, w, h, opacity, client_opacity, zoom_x, zoom_y, ..]: Rate,
+    ) -> Self {
         Self {
             rect: logical((x, y), (w, h)),
             opacity: opacity.clamp(0.0, 1.0) as f32,

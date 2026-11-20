@@ -1294,7 +1294,10 @@ fn carry(desk: &mut Desk, pane: crate::pane::PaneId, to: crate::group::Shift) {
         members: vec![crate::group::Member::Window(pane.get())],
         on: None,
     };
-    let _ = desk.state.groups.declare("under-test", selection, now);
+    let _ = desk
+        .state
+        .groups
+        .declare("under-test", selection, None, now);
     assert!(
         desk.state.groups.present(
             "under-test",
