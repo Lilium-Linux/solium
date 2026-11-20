@@ -1,5 +1,5 @@
 //! Audio's endpoints as a pure model (03 §3.2.5): what the PipeWire thread
-//! saw, as [`Fact`]s, in; rows for scenes, events for Lua and [`Command`]s for
+//! saw, as [`Fact`]s, in; rows for scenes, events for the window manager and [`Command`]s for
 //! the PipeWire thread, out. Time is passed in; nothing here talks to
 //! PipeWire.
 
@@ -138,7 +138,7 @@ impl App {
 }
 
 /// What a window is matched to its streams by: its id, its process and its
-/// application id, as `sol.windows()` gives them.
+/// application id, as the `window` rows give them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WindowKey {
     pub(crate) id: u64,
@@ -242,7 +242,7 @@ impl Endpoint {
     }
 }
 
-/// An event for `sol.on("audio")`.
+/// An event for `audio`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Event {
     pub(crate) what: &'static str,
@@ -258,7 +258,7 @@ pub(crate) struct Event {
     pub(crate) stream: bool,
 }
 
-/// What the configuration says: `sol.audio{ max, step }`.
+/// What the configuration says: `audio{ max, step }`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Settings {
     pub(crate) max: f64,

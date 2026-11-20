@@ -1,0 +1,28 @@
+//! The settings sections a window manager configures, each read from a
+//! [`Doc`](crate::script::Doc): one file per section, the same parser
+//! whatever language the document was written in.
+
+pub(crate) mod client_sizes;
+pub(crate) mod cursor;
+pub(crate) mod effects;
+pub(crate) mod files;
+pub(crate) mod focus;
+pub(crate) mod frames;
+pub(crate) mod fullscreen;
+pub(crate) mod idle;
+pub(crate) mod input;
+pub(crate) mod keyboard;
+pub(crate) mod layer_shell;
+pub(crate) mod lock;
+pub(crate) mod monitors;
+pub(crate) mod pane;
+pub(crate) mod qml;
+pub(crate) mod read;
+pub(crate) mod reload;
+pub(crate) mod resize;
+pub(crate) mod services;
+pub(crate) mod session;
+pub(crate) mod toplevels;
+pub(crate) mod wm;
+pub(crate) mod workspaces;
+pub(crate) mod x11;

@@ -1,314 +1,19 @@
-//! **The reference pages are generated, and their sources are checked here.**
+//! **The flags-and-environment page is generated, and its source is checked
+//! here.**
 //!
-//! The documentation site builds its Lua API page from `lua/meta/sol.lua` and
-//! its flags-and-environment page from `environment.txt`
-//! (`dev/docs/generate.py`). A generated page cannot drift from its source, but
-//! the source can drift from the code: a function added to `build_api` and not
-//! to `sol.lua` is a function nobody is told about, and a variable renamed in
-//! `dev.rs` leaves a row describing a knob that does nothing. These tests are
-//! what makes "generated from the code" mean the code as it is now.
+//! The documentation site builds that page from `environment.txt`
+//! (`dev/docs/generate.py`). A generated page cannot drift from its source,
+//! but the source can drift from the code: a variable renamed in `dev.rs`
+//! leaves a row describing a knob that does nothing. The Lua API page's
+//! source, `sol.lua`, is the Lua window manager's, and is checked in its
+//! crate (`crates/solium-lua/src/reference.rs`).
 //!
-//! Both compare in both directions, and both refuse to pass on an empty scan:
+//! It compares in both directions, and refuses to pass on an empty scan:
 //! a walk that finds nothing agrees with anything, which is the one way a test
 //! like this can be green and mean nothing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-use mlua::{Lua, Table, Value};
-
-use super::build_api;
-
-/// The definitions file, as the documentation site reads it.
-const SOL_LUA: &str = include_str!("../../lua/meta/sol.lua");
-
-/// The production half of `script.rs`: everything before its first
-/// `#[cfg(test)]`, which is the test module. The same cut
-/// `every_event_listened_for_is_one_that_is_sent` makes, for the same reason.
-fn production_script() -> &'static str {
-    const SOURCE: &str = include_str!("../script.rs");
-    SOURCE.split("#[cfg(test)]").next().unwrap_or_default()
-}
-
-/// Every key of a Lua table, as text.
-fn keys(table: &Table) -> BTreeSet<String> {
-    table
-        .pairs::<Value, Value>()
-        .filter_map(Result::ok)
-        .filter_map(|(key, _)| match key {
-            Value::String(name) => Some(name.to_string_lossy()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Every name the compositor puts in `sol`, in each table inside it, and on
-/// the objects the compositor hands out (the two `sol.layout` makes, the
-/// timer `sol.after` and `sol.every` do, and the watch `sol.watch` does),
-/// spelled the way `sol.lua` declares them: `sol.keep`, `sol.layout.grid`,
-/// `Tree:insert`, `Timer:cancel`.
-///
-/// The tables are read from the real `sol` table, built the way a load builds
-/// it, so nothing here can be a stale copy. Every table-valued key is walked
-/// into, not only `sol.layout`: a namespace added later has its functions
-/// checked too. A key starting with `_` is the compositor's own bookkeeping,
-/// declared in `sol.lua` as a field but not walked into. The objects' methods
-/// are read from their `impl mlua::UserData` blocks instead, because mlua keeps
-/// a userdata's methods behind a closure that Lua cannot list.
-fn registered() -> BTreeSet<String> {
-    let lua = Lua::new();
-    let sol = build_api(&lua).expect("building the sol table");
-    let mut names = BTreeSet::new();
-    for (key, value) in sol.pairs::<Value, Value>().filter_map(Result::ok) {
-        let Value::String(name) = key else {
-            continue;
-        };
-        let name = name.to_string_lossy();
-        if let Value::Table(table) = value
-            && !name.starts_with('_')
-        {
-            names.extend(
-                keys(&table)
-                    .into_iter()
-                    .map(|inner| format!("sol.{name}.{inner}")),
-            );
-        }
-        names.insert(format!("sol.{name}"));
-    }
-    assert!(
-        names.iter().any(|name| name.starts_with("sol.layout.")),
-        "no sol.layout.* names found; the walk into sol's tables is broken"
-    );
-
-    for (object, userdata, least) in [
-        ("Tree", "TilingTree", 5),
-        ("Scroller", "Scrolling", 5),
-        ("Timer", "TimerHandle", 1),
-        ("Watch", "WatchHandle", 1),
-    ] {
-        let methods = userdata_methods(userdata);
-        assert!(
-            methods.len() >= least,
-            "found {} methods on {userdata}; the scan of its impl block is broken",
-            methods.len()
-        );
-        names.extend(
-            methods
-                .into_iter()
-                .map(|method| format!("{object}:{method}")),
-        );
-    }
-    names
-}
-
-/// The method names in `impl mlua::UserData for <name>`.
-///
-/// Every `add_method` and `add_method_mut` in the block is counted, and the
-/// count has to match the names found: a method registered some other way,
-/// or a name that is not a literal right after the call, is a scan that would
-/// otherwise narrow in silence.
-fn userdata_methods(name: &str) -> BTreeSet<String> {
-    let source = production_script();
-    let header = format!("impl mlua::UserData for {name} {{");
-    let start = source
-        .find(&header)
-        .unwrap_or_else(|| panic!("no `{header}` in script.rs"));
-    // The block ends at the first line that closes an item at column zero.
-    let block = &source[start..];
-    let end = block.find("\n}\n").map_or(block.len(), |at| at + 3);
-    let block = &block[..end];
-
-    let mut found = BTreeSet::new();
-    let mut calls = 0;
-    for marker in ["methods.add_method(", "methods.add_method_mut("] {
-        for (at, _) in block.match_indices(marker) {
-            calls += 1;
-            let rest = block[at + marker.len()..].trim_start();
-            if let Some(rest) = rest.strip_prefix('"')
-                && let Some(close) = rest.find('"')
-            {
-                found.insert(rest[..close].to_owned());
-            }
-        }
-    }
-    assert_eq!(
-        found.len(),
-        calls,
-        "{calls} method registrations in {name}'s impl block but {} literal names; \
-         one of them is written some other way and this check cannot see it",
-        found.len()
-    );
-    found
-}
-
-/// One declaration in `sol.lua` and the `---` block above it.
-#[derive(Debug)]
-struct Declared {
-    name: String,
-    line: usize,
-    /// The parameter names in the signature, for a function; `None` for a field.
-    parameters: Option<Vec<String>>,
-    doc: Vec<String>,
-}
-
-/// Every name `sol.lua` declares, with its documentation.
-///
-/// Four shapes, and nothing else counts:
-///
-/// ```lua
-/// function sol.keep(name, defaults) end
-/// function sol.layout.grid(sizes, options) end
-/// function Tree:insert(id, target, x, y, options) end
-/// sol.decoration = sol.pane
-/// ```
-fn declared() -> Vec<Declared> {
-    let mut out = Vec::new();
-    let mut doc: Vec<String> = Vec::new();
-    for (index, line) in SOL_LUA.lines().enumerate() {
-        if let Some(text) = line.strip_prefix("---") {
-            doc.push(text.to_owned());
-            continue;
-        }
-        let taken = std::mem::take(&mut doc);
-        if let Some(rest) = line.strip_prefix("function ") {
-            let Some((name, signature)) = rest.split_once('(') else {
-                continue;
-            };
-            let parameters = signature
-                .split_once(')')
-                .map(|(inside, _)| inside)
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|parameter| !parameter.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
-            out.push(Declared {
-                name: name.to_owned(),
-                line: index + 1,
-                parameters: Some(parameters),
-                doc: taken,
-            });
-        } else if let Some(rest) = line.strip_prefix("sol.")
-            && let Some((name, _)) = rest.split_once(" = ")
-        {
-            out.push(Declared {
-                name: format!("sol.{name}"),
-                line: index + 1,
-                parameters: None,
-                doc: taken,
-            });
-        }
-    }
-    out
-}
-
-/// **`sol.lua` describes exactly the API the compositor registers.**
-///
-/// In both directions: a name the compositor registers and `sol.lua` does not
-/// describe is missing from the editor's completion and from the API page; a
-/// name `sol.lua` describes and the compositor does not register is a promise
-/// the API page makes and a script cannot keep. And every function has what
-/// the page is built from: a description, a `---@param` for each parameter in
-/// its signature, and a `---@return`. Every field has a description.
-///
-/// Also the events: `sol.lua`'s `sol.Event` alias is the event table on the
-/// page, so it has to be the set `script.rs` dispatches.
-#[test]
-fn sol_lua_documents_exactly_the_api_the_compositor_registers() {
-    let registered = registered();
-    let declared = declared();
-    assert!(
-        registered.len() >= 60 && declared.len() >= 60,
-        "the compositor registers {} names and sol.lua declares {}; one of the two \
-         scans is broken",
-        registered.len(),
-        declared.len()
-    );
-
-    let documented: BTreeSet<String> = declared.iter().map(|each| each.name.clone()).collect();
-    let undocumented: Vec<&String> = registered.difference(&documented).collect();
-    let imaginary: Vec<&String> = documented.difference(&registered).collect();
-    assert!(
-        undocumented.is_empty() && imaginary.is_empty(),
-        "crates/solium/lua/meta/sol.lua and the compositor disagree.\n  \
-         registered, not in sol.lua: {undocumented:?}\n  \
-         in sol.lua, not registered: {imaginary:?}"
-    );
-
-    for each in &declared {
-        let described = each
-            .doc
-            .iter()
-            .any(|line| !line.starts_with('@') && !line.trim().is_empty());
-        assert!(
-            described,
-            "sol.lua:{} `{}` has no description",
-            each.line, each.name
-        );
-        let Some(parameters) = &each.parameters else {
-            continue;
-        };
-        for parameter in parameters {
-            let tagged = format!("@param {parameter}");
-            assert!(
-                each.doc.iter().any(|line| {
-                    line.strip_prefix(&tagged)
-                        .is_some_and(|rest| rest.starts_with([' ', '?']))
-                }),
-                "sol.lua:{} `{}` has no `---@param {parameter}`",
-                each.line,
-                each.name
-            );
-        }
-        assert!(
-            each.doc.iter().any(|line| line.starts_with("@return")),
-            "sol.lua:{} `{}` has no `---@return`",
-            each.line,
-            each.name
-        );
-    }
-
-    let mut in_alias = false;
-    let mut events = BTreeSet::new();
-    for line in SOL_LUA.lines() {
-        if line.starts_with("---@alias ") {
-            in_alias = line.trim() == "---@alias sol.Event";
-            continue;
-        }
-        if !in_alias {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("---| \"") else {
-            in_alias = false;
-            continue;
-        };
-        if let Some((event, _)) = rest.split_once('"') {
-            events.insert(event.to_owned());
-        }
-    }
-    // Events, and decision hooks (`call_deciders`), which are events too.
-    let dispatched: BTreeSet<String> = ["call_listeners(lua, \"", "call_deciders(lua, \""]
-        .into_iter()
-        .flat_map(|marker| {
-            production_script()
-                .match_indices(marker)
-                .filter_map(move |(at, _)| {
-                    let rest = &production_script()[at + marker.len()..];
-                    rest.split_once('"').map(|(event, _)| event.to_owned())
-                })
-        })
-        .collect();
-    assert!(
-        dispatched.len() >= 8,
-        "only {} events found in script.rs; the scan is broken",
-        dispatched.len()
-    );
-    assert_eq!(
-        events, dispatched,
-        "sol.lua's `sol.Event` alias is not the set of events script.rs dispatches"
-    );
-}
 
 /// The production code of one of the compositor's source files, with every
 /// line that is not production code blanked, so line numbers still match.
@@ -417,6 +122,7 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
                 .and_then(|end| end.to_str())
                 .is_some_and(|end| ["rs", "lua", "cpp", "h", "qml"].contains(&end))
                 && !path.ends_with("src/script/reference.rs")
+                && !test_file(&path)
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
                 let text = production(&path, &text);
@@ -426,7 +132,9 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = Vec::new();
-    for part in ["src", "lua", "qml"] {
+    // The window manager Solium ships, its Rust and its Lua, reads the
+    // environment the session runs in too, and the page is the session's.
+    for part in ["src", "qml", "../solium-lua/src", "../solium-lua/lua"] {
         walk(&root.join(part), &mut out);
     }
     let build = root.join("build.rs");
@@ -435,6 +143,14 @@ fn compositor_sources() -> Vec<(PathBuf, String)> {
         out.push((build, text));
     }
     out
+}
+
+/// Whether a Rust file is test code throughout: one in a `tests` directory
+/// of `src`, declared from its parent under `#[cfg(test)]`, which has no
+/// `#[cfg(test)]` of its own to cut at.
+fn test_file(path: &Path) -> bool {
+    path.extension().is_some_and(|end| end == "rs")
+        && path.components().any(|part| part.as_os_str() == "tests")
 }
 
 /// Every double-quoted literal in `text` that starts with `prefix` and runs on
@@ -579,4 +295,129 @@ fn after() {
         .map(|(_, name)| name)
         .collect();
     assert_eq!(variables, ["SOLIUM_BETWEEN", "SOLIUM_AFTER"]);
+}
+
+/// The compositor's own production source, file by file: every `.rs` under
+/// `src/` that is not a test file, cut at its first `#[cfg(test)]`, comments
+/// kept.
+fn compositor_production() -> Vec<(PathBuf, String)> {
+    fn walk(directory: &Path, out: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|end| end == "rs")
+                && !test_file(&path)
+                && !test_only_module(&path)
+                && !path.ends_with("src/script/reference.rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                let kept = text.split("#[cfg(test)]").next().unwrap_or_default();
+                out.push((path, kept.to_owned()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
+    assert!(
+        out.len() >= 150,
+        "found {} sources; the walk is broken",
+        out.len()
+    );
+    out
+}
+
+/// Whether the module in `path` is compiled for tests only: a `tests.rs`,
+/// or one its parent declares under `#[cfg(test)]`.
+fn test_only_module(path: &Path) -> bool {
+    let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    if name == "tests" {
+        return true;
+    }
+    let (directory, name) = if name == "mod" {
+        let Some(directory) = path.parent() else {
+            return false;
+        };
+        let Some(name) = directory.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        (directory.parent(), name)
+    } else {
+        (path.parent(), name)
+    };
+    let Some(directory) = directory else {
+        return false;
+    };
+    let parents = [
+        directory.with_extension("rs"),
+        directory.join("mod.rs"),
+        directory.join("main.rs"),
+    ];
+    parents.iter().any(|parent| {
+        std::fs::read_to_string(parent).is_ok_and(|text| {
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            lines.windows(2).any(|pair| {
+                pair[0] == "#[cfg(test)]"
+                    && [format!("mod {name};"), format!("pub(crate) mod {name};")]
+                        .contains(&pair[1].to_owned())
+            })
+        })
+    })
+}
+
+/// **The compositor names nothing of the Lua window manager.**
+///
+/// The window manager is a program of its own, in any language, and the
+/// compositor speaks to it only in the protocol's words: a command, an
+/// event, a settings section. So its production source, comments included,
+/// does not name the Lua API (`sol.place` is the `place` command), and its
+/// code does not name the Lua window manager's files, crate or variables:
+/// that one finds its own configuration and says in `hello-answer` where it
+/// is. `mlua` is nobody's: the compositor runs no Lua, an effect is data
+/// and shaders, and only the tests link it. The one Lua program the
+/// compositor names is the window manager it starts when `wm.toml` names
+/// none.
+#[test]
+fn the_compositor_names_nothing_of_the_lua_window_manager() {
+    let mut found = Vec::new();
+    for (path, text) in compositor_production() {
+        let shown = path
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for (number, line) in text.lines().enumerate() {
+            let at = |what: &str| format!("{shown}:{}: {what}: {}", number + 1, line.trim());
+            // The Lua API, anywhere: `sol.` and a name, but the file `sol.lua`.
+            let api = line.match_indices("sol.").any(|(index, _)| {
+                let before = line[..index].chars().next_back();
+                let after = &line[index + 4..];
+                before.is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    && after.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+                    && !after.starts_with("lua")
+            });
+            if api {
+                found.push(at("names the Lua API"));
+            }
+            let code = line.split("//").next().unwrap_or_default();
+            for word in ["init.lua", "SOLIUM_LUA_INIT", "solium_lua", "package.path"] {
+                if code.contains(word) {
+                    found.push(at(&format!("names `{word}`")));
+                }
+            }
+            if code.contains("mlua") {
+                found.push(at("uses mlua, which only the tests link"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the compositor knows the Lua window manager:\n  {}",
+        found.join("\n  ")
+    );
 }

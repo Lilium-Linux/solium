@@ -2,7 +2,7 @@ title = "Atrium"
 what = "Stage Manager on the floating desktop: the window in use on the stage, every other application a live, tilted card in a strip that slides in at the left edge. A click brings a card's group onto the stage."
 keys = "the pointer at the left edge, a click on a card"
 
-how = """Atrium is part of floating mode, crates/solium/lua/atrium.lua, and placing nothing: the cards are sol.presents of the live windows in perspective, and a click is only a change of focus. The default configuration turns it on in user.lua, with its key."""
+how = """Atrium is part of floating mode, crates/solium-lua/lua/atrium.lua, and placing nothing: the cards are sol.presents of the live windows in perspective, and a click is only a change of focus. The default configuration turns it on in user.lua, with its key."""
 [stage]
 apps = ["log", "notes", "docs"]
 

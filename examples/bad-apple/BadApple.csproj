@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>BadApple</RootNamespace>
+    <AssemblyName>bad-apple</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The protocol's types, the connection and the desktop, for C#. -->
+    <ProjectReference Include="../../sdk/csharp/Solium.Wm/Solium.Wm.csproj" />
+    <!-- The panel's scene, beside the program that names it. -->
+    <None Include="Stats.qml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

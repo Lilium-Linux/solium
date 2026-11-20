@@ -1,6 +1,6 @@
-//! Workspaces, as Lua declares them and the models read them. The compositor
+//! Workspaces, as the window manager declares them and the models read them. The compositor
 //! does not know what a workspace is (`lua/workspaces.lua` is the whole
-//! feature), so Lua says, each time they change, and this joins what it said
+//! feature), so the window manager says, each time they change, and this joins what it said
 //! with the windows (03 §3.2.17).
 //! `state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
 
@@ -43,7 +43,7 @@ pub(crate) struct Group {
     pub(crate) workspaces: Vec<Workspace>,
 }
 
-/// What a script declared with `sol.workspaces`: the arrangement, the groups,
+/// What a script declared with `workspaces`: the arrangement, the groups,
 /// and for each window, by script id, the workspaces it is on.
 /// `script::tests::sol_workspaces_declares_groups_and_windows`,
 /// `state::tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
@@ -119,7 +119,7 @@ pub(crate) fn log_unknown(
                 tracing::warn!(
                     monitor,
                     group = group.id,
-                    "sol.workspaces: no such monitor, so it was left out"
+                    "workspaces: no such monitor, so it was left out"
                 );
             }
         }
@@ -128,7 +128,7 @@ pub(crate) fn log_unknown(
         if !windows.contains(id) && logged.insert(format!("window {id}")) {
             tracing::warn!(
                 window = id,
-                "sol.workspaces: no such window, so it was left out"
+                "workspaces: no such window, so it was left out"
             );
         }
     }
@@ -146,7 +146,7 @@ pub(crate) fn log_unknown(
             if !keys.insert(key.clone()) && logged.insert(format!("twice {key}")) {
                 tracing::warn!(
                     workspace = key,
-                    "sol.workspaces: declared twice, so only the first was kept"
+                    "workspaces: declared twice, so only the first was kept"
                 );
             }
         }
@@ -299,9 +299,9 @@ mod tests {
         });
         assert_eq!(
             (
-                log.matches("sol.workspaces: no such monitor").count(),
+                log.matches("workspaces: no such monitor").count(),
                 log.matches("logged-gone").count(),
-                log.matches("sol.workspaces: no such window").count(),
+                log.matches("workspaces: no such window").count(),
                 log.matches("4242").count(),
             ),
             (1, 1, 1, 1),
@@ -363,7 +363,7 @@ mod tests {
         let stepped = std::panic::catch_unwind(|| crate::models::diff::diff(&[], &rows).len());
         assert_eq!(stepped.ok(), Some(4), "diff did not step to the rows");
         assert_eq!(
-            log.matches("sol.workspaces: declared twice").count(),
+            log.matches("workspaces: declared twice").count(),
             2,
             "one line for twice-1/1 and one for twice-1/1/1:\n{log}"
         );
@@ -390,7 +390,7 @@ mod tests {
             (
                 kept.groups.len(),
                 kept.groups.first().map(|group| group.workspaces.len()),
-                log.matches("sol.workspaces: declared twice").count()
+                log.matches("workspaces: declared twice").count()
             ),
             (1, Some(3), 0),
             "(groups kept, their workspaces, lines saying one was declared twice):\n{log}"

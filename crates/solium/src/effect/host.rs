@@ -1,7 +1,8 @@
 //! The effect host: where effect folders are, what was loaded from them, and
 //! what went wrong, by file and line.
 //!
-//! An effect is `effects/<name>/effect.lua` and the files beside it (\[16\] §2).
+//! An effect is `effects/<name>/effect.toml` and the files beside it (\[16\]
+//! §2).
 //! The user's folder shadows the shipped one name by name, as a pane style's
 //! does (`style::resolve`): `tests::a_user_folder_shadows_the_shipped_one`.
 
@@ -10,13 +11,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use solium_effects::describe::Described;
 use solium_effects::glsl::{self, Sources};
-use solium_effects::spec::{EffectSpec, GridSpec, Rung, Severity, Value};
+use solium_effects::spec::{EffectSpec, Extent, GridSpec, Rung, Severity, Value};
 use solium_effects::stage::{Binding, Plan, Stage};
 
 use super::geometry::{self, Refusal};
-use super::sandbox::{Budget, Sandbox};
-use super::settings::Caps;
 
 /// Where effect folders are looked for: the user's, then the shipped.
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ impl Library {
     /// install's (`assets::effects`).
     pub(crate) fn new() -> Self {
         Self::with(
-            crate::script::Scripts::user_config_dir().map(|dir| dir.join("effects")),
+            solium_paths::user_config_dir().map(|dir| dir.join("effects")),
             crate::assets::effects(),
         )
     }
@@ -42,8 +42,9 @@ impl Library {
     /// The folder the effect called `name` is in, or `None`.
     ///
     /// A bare name only (`tests::an_effect_name_is_a_bare_name`), and a folder
-    /// with no `effect.lua` is skipped so the shipped one still draws
-    /// (`tests::a_folder_without_effect_lua_falls_through`).
+    /// with no `effect.toml` is skipped so the shipped one still draws
+    /// (`tests::a_folder_without_effect_toml_falls_through`), an old
+    /// `effect.lua` included ([`Self::old_lua`]).
     pub(crate) fn resolve(&self, name: &str) -> Option<PathBuf> {
         if !is_name(name) {
             return None;
@@ -52,7 +53,17 @@ impl Library {
             .iter()
             .chain(std::iter::once(&self.shipped))
             .map(|place| place.join(name))
-            .find(|folder| folder.join("effect.lua").is_file())
+            .find(|folder| description_of(folder).is_some())
+    }
+
+    /// The user's folder `name`, when it holds an `effect.lua` and no
+    /// `effect.toml`: an effect described in Lua before effects were data,
+    /// which is skipped and named, so whoever wrote it knows to describe it
+    /// again. `tests::an_old_effect_lua_is_skipped_and_named`.
+    pub(crate) fn old_lua(&self, name: &str) -> Option<PathBuf> {
+        let folder = self.user.as_ref()?.join(name);
+        (is_name(name) && folder.join("effect.lua").is_file() && description_of(&folder).is_none())
+            .then(|| folder.join("effect.lua"))
     }
 
     /// Where a folder's closure (`pixels`, `fallback`, `use`) is looked for when the
@@ -81,6 +92,18 @@ impl Library {
     }
 }
 
+/// What an effect folder of the user's that is still an `effect.lua` is
+/// told (`tests::an_old_effect_lua_is_skipped_and_named`).
+const OLD_LUA: &str = "an effect is described in an effect.toml now, and this effect.lua is not read: \
+    say there what it takes and runs (its params, inputs and stages), and its mesh, if it has one, \
+    in a .vert";
+
+/// The file that says what the effect in `dir` is, its `effect.toml`, if
+/// the folder has one.
+pub(crate) fn description_of(dir: &Path) -> Option<PathBuf> {
+    Some(dir.join("effect.toml")).filter(|file| file.is_file())
+}
+
 /// Whether `name` can name an effect: lower-case letters, digits, `-` and `_`.
 /// `tests::an_effect_name_is_a_bare_name`.
 pub(crate) fn is_name(name: &str) -> bool {
@@ -94,7 +117,7 @@ pub(crate) fn is_name(name: &str) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Problem {
     /// The effect's name, `"config"` for the configuration itself, or
-    /// `"rules"` for a rule `sol.effects` gave
+    /// `"rules"` for a rule `effects` gave
     /// (`state::tests::a_broken_rule_keeps_the_rules_that_ran`).
     pub(crate) effect: String,
     pub(crate) file: PathBuf,
@@ -124,15 +147,18 @@ impl Problem {
     }
 }
 
-/// One effect, loaded: its folder, what its `effect.lua` said, its Lua.
+/// One effect, loaded: its folder, what its `effect.toml` said, and what it
+/// works out from its params.
 /// `P` is the program type a [`Compiler`] makes: GL's in the compositor, a
 /// number in the tests (`tests::a_program_is_compiled_once_per_content`).
 #[derive(Debug)]
 pub(crate) struct Loaded<P = super::gl::Program> {
     name: String,
     dir: PathBuf,
+    /// Its `effect.toml`, which problems with it name.
+    file: PathBuf,
     spec: EffectSpec,
-    sandbox: Sandbox,
+    described: Described,
     /// The params at their defaults, and the stages `stages` gave for them at
     /// load: a bind at the defaults reads these rather than calling
     /// `stages(p)` again (`tests::a_fallback_naming_another_effect_binds_it_at_load`).
@@ -151,10 +177,15 @@ pub(crate) struct Loaded<P = super::gl::Program> {
     /// `frag` and no `pixels`, which the plain warp draws.
     /// `tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`.
     pub(crate) pixels: Option<WarpPixels>,
+    /// A geometry's mesh program, its `.vert`, asked for with its plans and
+    /// among its `needs`; `None` for an effect with no `mesh`.
+    /// `tests::a_geometry_runs_once_its_mesh_compiled_and_rests`.
+    pub(crate) mesh: Option<WarpPixels>,
     _program: std::marker::PhantomData<P>,
 }
 
-/// What a geometry's warp draws its capture through: the program its frag
+/// What a geometry's warp draws its capture through, or its mesh program
+/// runs: the program its frag
 /// (its own `frag`, or that of the effect its `pixels` names) compiles into
 /// in the warp, by key, and the names of that effect's params' slots in the
 /// order [`pack_pixels`] packs them (`p_<name>`, a `vec4` four slots of one
@@ -170,7 +201,7 @@ pub(crate) struct WarpPixels {
 /// most `limit` of them (`effects.limits.params`): refused, as a problem at
 /// its file saying why, for a param it does not have, a word, or more
 /// numbers than the limit, never cut (amended 2026-10-08, configurable).
-/// What a `sol.present` geometry whose `pixels` names another effect packs
+/// What a `present` geometry whose `pixels` names another effect packs
 /// for that effect's frag.
 /// `tests::a_pixels_effect_with_more_params_than_the_limit_is_refused_at_bind`.
 pub(crate) fn pack_pixels<P>(
@@ -178,8 +209,8 @@ pub(crate) fn pack_pixels<P>(
     params: &[(String, Value)],
     limit: usize,
 ) -> Result<geometry::Params, Problem> {
-    let file = loaded.dir().join("effect.lua");
-    let refused = |message: String| Problem::error(loaded.name(), &file, None, message);
+    let file = loaded.file();
+    let refused = |message: String| Problem::error(loaded.name(), file, None, message);
     let (bound, _) = solium_effects::spec::bind(&loaded.spec().params, params).map_err(refused)?;
     geometry::packed(&bound, limit).map_err(refused)
 }
@@ -199,38 +230,32 @@ pub(crate) struct Bound {
 }
 
 impl<P> Loaded<P> {
-    /// Load the effect in `dir` into a sandbox of its own, and read its
-    /// stages at the defaults: a stage that cannot be read refuses the
-    /// version, and the effects its `use`s name are loaded with it.
+    /// Load the effect in `dir` from its `effect.toml`, and read its stages
+    /// at the defaults: a stage that cannot be read refuses the version, and
+    /// the effects its `use`s name are loaded with it.
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`.
-    #[cfg(test)]
     pub(crate) fn load(name: &str, dir: &Path) -> Result<Self, Problem> {
-        Self::load_with(name, dir, Caps::default())
-    }
-
-    /// `Self::load`, its Lua made with `caps` (`effects.sandbox`):
-    /// `tests::a_mesh_stopped_at_load_names_its_budget_and_key`.
-    pub(crate) fn load_with(name: &str, dir: &Path, caps: Caps) -> Result<Self, Problem> {
-        let file = dir.join("effect.lua");
-        let mut sandbox = Sandbox::with_caps(name, &file, caps)?;
-        let spec = sandbox.load_effect()?;
-        let (defaults, _) = solium_effects::spec::bind(&spec.params, &[])
-            .map_err(|message| Problem::error(name, &file, None, message))?;
-        let stages = sandbox.stages(&spec, &defaults)?;
+        let file = dir.join("effect.toml");
+        let refused = |message: String| Problem::error(name, &file, None, message);
+        let (spec, described) = super::described::read(name, &file)?;
+        let (defaults, _) = solium_effects::spec::bind(&spec.params, &[]).map_err(refused)?;
+        let stages = described.stages(&defaults).map_err(refused)?;
         let mut used = Vec::new();
         named_by_use(&stages, &mut used);
         Ok(Self {
             name: name.to_owned(),
             dir: dir.to_owned(),
+            file,
             spec,
-            sandbox,
+            described,
             defaults,
             stages,
             hash: folder_hash(dir),
             used,
             needs: Vec::new(),
             pixels: None,
+            mesh: None,
             _program: std::marker::PhantomData,
         })
     }
@@ -247,8 +272,9 @@ impl<P> Loaded<P> {
         &self.spec
     }
 
-    pub(crate) fn sandbox(&self) -> &Sandbox {
-        &self.sandbox
+    /// Its `effect.toml`.
+    pub(crate) fn file(&self) -> &Path {
+        &self.file
     }
 
     /// The params at their defaults, as a bind with no overrides gives them.
@@ -279,7 +305,9 @@ impl<P> Loaded<P> {
         if params == self.defaults.as_slice() {
             return Ok(self.stages.clone());
         }
-        self.sandbox.stages(&self.spec, params)
+        self.described
+            .stages(params)
+            .map_err(|message| Problem::error(&self.name, &self.file, None, message))
     }
 
     /// Bind with `overrides`: refused for an unknown param or a wrong kind,
@@ -287,14 +315,25 @@ impl<P> Loaded<P> {
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::binding_names_the_effect_and_warns_of_a_clamp`.
     pub(crate) fn bind(&self, overrides: &[(String, Value)]) -> Result<Bound, Problem> {
-        let file = self.dir.join("effect.lua");
-        let (params, warnings) = solium_effects::spec::bind(&self.spec.params, overrides)
-            .map_err(|message| Problem::error(&self.name, &file, None, message))?;
-        let reach = self.sandbox.extent("reach", &params)?;
-        let bleed = self.sandbox.extent("bleed", &params)?;
+        let file = &self.file;
+        let refused = |message: String| Problem::error(&self.name, file, None, message);
+        let (params, warnings) =
+            solium_effects::spec::bind(&self.spec.params, overrides).map_err(refused)?;
+        let fixed = |extent: Extent| match extent {
+            Extent::Fixed(pixels) => pixels,
+            Extent::Function => 0.0,
+        };
+        let reach = self
+            .described
+            .extent(false, fixed(self.spec.reach), &params)
+            .map_err(refused)?;
+        let bleed = self
+            .described
+            .extent(true, fixed(self.spec.bleed), &params)
+            .map_err(refused)?;
         let warnings = warnings
             .into_iter()
-            .map(|message| Problem::warning(&self.name, &file, message))
+            .map(|message| Problem::warning(&self.name, file, message))
             .collect();
         Ok(Bound {
             params,
@@ -350,11 +389,24 @@ pub(crate) fn folder_hash(dir: &Path) -> u64 {
     solium_effects::glsl::content_hash(&slices)
 }
 
-/// What compiles a program: GL in the compositor, a counter in the tests
-/// (`tests::Counting`).
+/// What compiles a program, and runs a mesh program: GL in the compositor, a
+/// counter in the tests (`tests::Counting`).
 pub(crate) trait Compiler {
     type Program: Clone;
     fn compile(&mut self, vertex: &str, sources: &Sources) -> Result<Self::Program, String>;
+    /// A geometry's mesh program: `sources` are its vertex shader's three
+    /// strings (`solium_effects::mesh::assemble`).
+    fn compile_mesh(&mut self, sources: &Sources) -> Result<Self::Program, String>;
+    /// Run a mesh program over a grid of `grid` cells, its params `params`
+    /// (values, and the `p_` name of each): x and y for every point, row by
+    /// row from the top-left (`gl::Program::run_mesh`).
+    fn run_mesh(
+        &mut self,
+        program: &Self::Program,
+        uniforms: &super::gl::MeshUniforms,
+        params: (&[f32], &[String]),
+        grid: (u32, u32),
+    ) -> Result<Vec<f32>, String>;
     fn delete(&mut self, program: Self::Program);
     /// How many lines lower than GLSL ES 1.00's `#line` rule this driver
     /// numbers the user's file (`glsl::line_shift`): asked once, after the
@@ -367,7 +419,7 @@ pub(crate) trait Compiler {
 
 /// An effect version: which folder, and which load of it. A reload that
 /// changes it gives a new generation, and an old id resolves to nothing;
-/// one that reads it as it was, under new caps, keeps the id.
+/// one that reads it as it was keeps the id.
 /// `tests::a_new_version_is_a_new_generation`,
 /// `tests::new_caps_keep_an_unchanged_folders_id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -377,7 +429,7 @@ pub(crate) struct EffectId {
 }
 
 impl EffectId {
-    /// The id of no effect: a `sol.present` geometry whose folder is
+    /// The id of no effect: a `present` geometry whose folder is
     /// missing carries it, and [`Host::by_id`] answers nothing for it, since
     /// a slot's index starts at 1, so the geometry follows its `failed`
     /// (`state::tests::real_client::a_present_deform_is_a_file`).
@@ -401,6 +453,9 @@ impl EffectId {
 struct Asked {
     vertex: &'static str,
     sources: Sources,
+    /// Whether it is a mesh program: `sources` are then its vertex shader's,
+    /// and `vertex` the fragment shader it links with.
+    mesh: bool,
     effect: String,
     frag: PathBuf,
 }
@@ -423,11 +478,6 @@ struct Versions<P> {
     /// a generation past them, so an id a present was given for one never
     /// comes to name another (`state::tests::real_client::a_present_whose_frag_will_not_compile_follows_its_failed`).
     burnt: u32,
-    /// [`Host::revive`] gave the running version up: its folder changed
-    /// since it loaded, or loading it again failed. It is not tried again,
-    /// and its folder not read, until a reload or a new version
-    /// (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
-    given_up: bool,
 }
 
 /// Every effect the configuration wants, loaded GPU-free at config load and
@@ -453,10 +503,6 @@ pub(crate) struct Host<P = super::gl::Program> {
     sweep: bool,
     /// The compiler's [`Compiler::line_shift`], once a compile has failed.
     line_shift: Option<u32>,
-    /// What every effect's Lua is made with, `effects.sandbox`: a version
-    /// loaded under other caps is loaded again
-    /// (`tests::new_caps_load_every_wanted_folder_again`).
-    caps: Caps,
     /// What this GPU renders into: `None` until the first `prepare` probes
     /// it, and then unknown rather than missing, so every rung is kept
     /// (Ruling 11, `tests::a_stage_asking_for_rgba16f_where_it_is_missing_takes_the_fallback`).
@@ -485,7 +531,6 @@ impl<P: Clone> Host<P> {
             held: BTreeSet::new(),
             sweep: false,
             line_shift: None,
-            caps: Caps::default(),
             formats: None,
             problems: Vec::new(),
             generation: 0,
@@ -565,28 +610,6 @@ impl<P: Clone> Host<P> {
         &self.library
     }
 
-    /// What every effect's Lua is made with from now on, `effects.sandbox`;
-    /// whether they changed. Every wanted folder loaded under other caps is
-    /// loaded again now, so an effect a budget refused can load under a
-    /// larger one, and the folders the same `sol.effects` names load under
-    /// the new caps (`tests::new_caps_load_every_wanted_folder_again`); an
-    /// unchanged folder keeps its id, so a present under way is not ended
-    /// (`tests::new_caps_keep_an_unchanged_folders_id`).
-    pub(crate) fn set_caps(&mut self, caps: Caps) -> bool {
-        if caps == self.caps {
-            return false;
-        }
-        self.caps = caps;
-        self.settle_wanted(true);
-        true
-    }
-
-    /// What every effect's Lua is made with, for a test to read.
-    #[cfg(test)]
-    pub(crate) fn caps(&self) -> Caps {
-        self.caps
-    }
-
     /// Every name any origin wants, and their closure: `pixels`, a
     /// `fallback` naming an effect, and a `use` stage at the defaults
     /// (`tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`).
@@ -648,7 +671,7 @@ impl<P: Clone> Host<P> {
         }
     }
 
-    /// `origin` wants `names` as well as what it wanted: `sol.present`'s, so
+    /// `origin` wants `names` as well as what it wanted: `present`'s, so
     /// a second genie does not drop the first's effect mid-flight.
     /// `tests::present_wants_accumulate_until_a_reload`.
     pub(crate) fn add_wanted(
@@ -661,7 +684,7 @@ impl<P: Clone> Host<P> {
     }
 
     /// Read every wanted folder again (a configuration reload), and clear the
-    /// recorded compile failures once (\[16\] §5). `sol.present`'s names go:
+    /// recorded compile failures once (\[16\] §5). `present`'s names go:
     /// its bindings name them again as they run.
     /// `tests::a_failed_content_is_not_retried_until_it_changes_or_a_reload`,
     /// `tests::present_wants_accumulate_until_a_reload`.
@@ -670,7 +693,7 @@ impl<P: Clone> Host<P> {
         self.reload_keeping(Vec::new());
     }
 
-    /// `Self::reload`, `sol.present` keeping `live`, the names a geometry
+    /// `Self::reload`, `present` keeping `live`, the names a geometry
     /// still draws with: an unchanged one keeps its version and its id
     /// (Ruling 7: an unrelated reload rebuilds nothing), and only one whose
     /// folder changed ends a present under way, by its `on_reload`.
@@ -784,34 +807,29 @@ impl<P: Clone> Host<P> {
     /// whether a new version is now pending.
     fn load_one(&mut self, name: &str, again: bool) -> bool {
         let Some(dir) = self.library.resolve(name) else {
-            self.replace_problems(
-                name,
-                vec![Problem::error(
+            let missing = match self.library.old_lua(name) {
+                Some(file) => Problem::error(name, &file, None, OLD_LUA.to_owned()),
+                None => Problem::error(
                     name,
                     Path::new(name),
                     None,
                     format!(
                         "no effect called `{name}` (looked in your effects folder and the shipped one)"
                     ),
-                )],
-            );
+                ),
+            };
+            self.replace_problems(name, vec![missing]);
             return false;
         };
         let hash = folder_hash(&dir);
-        // A running version its budget stopped is read again even when its
-        // folder is unchanged, so a reload rebuilds what `revive` gave up
-        // (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`),
-        // and so is one loaded under other caps
-        // (`tests::new_caps_load_every_wanted_folder_again`).
+        // An unchanged folder whose version runs is not read again.
         if !again
             && let Some(slot) = self.slots.get(name)
             && slot.pending.is_none()
-            && slot.current.as_ref().is_some_and(|current| {
-                current.hash() == hash
-                    && current.dir() == dir
-                    && !current.sandbox().poisoned()
-                    && current.sandbox().caps() == self.caps
-            })
+            && slot
+                .current
+                .as_ref()
+                .is_some_and(|current| current.hash() == hash && current.dir() == dir)
         {
             return false;
         }
@@ -819,22 +837,18 @@ impl<P: Clone> Host<P> {
         {
             self.loads += 1;
         }
-        match Loaded::<P>::load_with(name, &dir, self.caps) {
+        // A folder of the user's still in Lua is skipped for the shipped one
+        // of its name, and named (`tests::an_old_effect_lua_is_skipped_and_named`).
+        let old = self
+            .library
+            .old_lua(name)
+            .map(|file| Problem::warning(name, &file, OLD_LUA.to_owned()));
+        match Loaded::<P>::load(name, &dir) {
             Err(problem) => {
-                self.replace_problems(name, vec![problem]);
+                self.replace_problems(name, old.into_iter().chain([problem]).collect());
                 false
             }
             Ok(loaded) => {
-                // A geometry file is held to drawing the window where it is
-                // at progress 0 before it is a version (Ruling 19), and a
-                // refusal keeps the version that ran:
-                // `tests::a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh`.
-                if loaded.spec().mesh
-                    && let Some(problem) = refused_at_rest(&loaded)
-                {
-                    self.replace_problems(name, vec![problem]);
-                    return false;
-                }
                 let index = self.slots.get(name).map_or_else(
                     || {
                         self.next_index += 1;
@@ -849,10 +863,9 @@ impl<P: Clone> Host<P> {
                     holds: Vec::new(),
                     pending: None,
                     burnt: 0,
-                    given_up: false,
                 });
                 slot.pending = Some(loaded);
-                self.replace_problems(name, Vec::new());
+                self.replace_problems(name, old.into_iter().collect());
                 true
             }
         }
@@ -871,13 +884,17 @@ impl<P: Clone> Host<P> {
             if let Ok((_, mut holds)) = self.bind_plans(name, &[])
                 && let Some(slot) = self.slots.get_mut(name)
             {
-                // And its pixels, which binding its plans does not ask for.
-                holds.extend(
-                    slot.current
-                        .as_ref()
-                        .and_then(|current| current.pixels.as_ref())
-                        .map(|pixels| pixels.key),
-                );
+                // And its pixels and its mesh, which binding its plans does
+                // not ask for.
+                if let Some(current) = slot.current.as_ref() {
+                    holds.extend(
+                        current
+                            .pixels
+                            .iter()
+                            .chain(&current.mesh)
+                            .map(|each| each.key),
+                    );
+                }
                 slot.holds = holds;
             }
             return;
@@ -885,16 +902,19 @@ impl<P: Clone> Host<P> {
         let bound = self.bind_plans(name, &[]).and_then(|(bound, mut needs)| {
             let pixels = self.warp_pixels(name)?;
             needs.extend(pixels.as_ref().map(|pixels| pixels.key));
-            Ok((bound, needs, pixels))
+            let mesh = self.mesh_program(name)?;
+            needs.extend(mesh.as_ref().map(|mesh| mesh.key));
+            Ok((bound, needs, pixels, mesh))
         });
         match bound {
-            Ok((bound, needs, pixels)) => {
+            Ok((bound, needs, pixels, mesh)) => {
                 if let Some(slot) = self.slots.get_mut(name) {
                     if let Some(pending) = slot.pending.as_mut() {
                         pending.pixels = pixels;
+                        pending.mesh = mesh;
                     }
                     // With nothing to compile (a geometry file alone) the
-                    // version is current at once, so a `sol.present` genie
+                    // version is current at once, so a `present` genie
                     // resolves its id on the pass it is named:
                     // `tests::a_version_with_nothing_to_compile_is_current_at_once`.
                     if needs.is_empty() {
@@ -934,10 +954,13 @@ impl<P: Clone> Host<P> {
     /// `pixels` effect that is not loaded or has no `frag` refuses it.
     /// `tests::a_geometrys_pixels_compile_in_the_warp_and_follow_their_frag`.
     fn warp_pixels(&mut self, name: &str) -> Result<Option<WarpPixels>, Vec<Problem>> {
-        let Some(loaded) = self.latest(name).filter(|loaded| loaded.spec().mesh) else {
+        let Some(loaded) = self
+            .latest(name)
+            .filter(|loaded| loaded.spec().mesh.is_some())
+        else {
             return Ok(None);
         };
-        let file = loaded.dir().join("effect.lua");
+        let file = loaded.file().to_owned();
         let source = match (&loaded.spec().frag, &loaded.spec().pixels) {
             (Some(_), _) => name.to_owned(),
             (None, Some(other)) => other.clone(),
@@ -1004,6 +1027,74 @@ impl<P: Clone> Host<P> {
         }))
     }
 
+    /// A geometry version's mesh program, asked for: its `.vert` linted, so a
+    /// lint error refuses the version as a frag's does, and wrapped in the
+    /// mesh prelude with its params (`solium_effects::mesh::assemble`). None
+    /// for an effect with no `mesh`.
+    /// `tests::a_geometry_runs_once_its_mesh_compiled_and_rests`.
+    fn mesh_program(&mut self, name: &str) -> Result<Option<WarpPixels>, Vec<Problem>> {
+        let Some(loaded) = self.latest(name) else {
+            return Ok(None);
+        };
+        let Some(vert) = loaded
+            .spec()
+            .mesh
+            .as_ref()
+            .map(|file| loaded.dir().join(file))
+        else {
+            return Ok(None);
+        };
+        let mut params = Vec::new();
+        let mut names = Vec::new();
+        for (param, spec) in &loaded.spec().params {
+            let Some(kind) = glsl::kind_of(&spec.default) else {
+                continue;
+            };
+            let slots = if kind == glsl::ParamKind::Vec4 { 4 } else { 1 };
+            names.extend(std::iter::repeat_n(format!("p_{param}"), slots));
+            params.push((param.clone(), kind));
+        }
+        let text = std::fs::read_to_string(&vert).map_err(|err| {
+            vec![Problem::error(
+                name,
+                &vert,
+                None,
+                format!("cannot read it: {err}"),
+            )]
+        })?;
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        for lint in solium_effects::mesh::lint(&params, &text) {
+            let problem = Problem {
+                line: Some(lint.line),
+                severity: lint.severity,
+                ..Problem::error(name, &vert, None, lint.message)
+            };
+            match lint.severity {
+                Severity::Error => errors.push(problem),
+                Severity::Warning => warnings.push(problem),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        self.add_problems(warnings);
+        let sources = solium_effects::mesh::assemble(&params, &text);
+        let key = sources.key(solium_effects::mesh::MESH_FRAGMENT);
+        if !self.programs.contains_key(&key) {
+            self.asked.entry(key).or_insert(Asked {
+                vertex: solium_effects::mesh::MESH_FRAGMENT,
+                sources,
+                mesh: true,
+                effect: name.to_owned(),
+                frag: vert,
+            });
+        }
+        Ok(Some(WarpPixels {
+            key,
+            names: names.into(),
+        }))
+    }
+
     /// The newest version of `name`: the one waiting to compile if there is
     /// one, else the one that runs. What a bind at config load reads, since
     /// a cold effect is not current until the next `prepare`.
@@ -1064,7 +1155,7 @@ impl<P: Clone> Host<P> {
                 format!("no effect called `{name}` is loaded"),
             )]
         })?;
-        let file = loaded.dir().join("effect.lua");
+        let file = loaded.file().to_owned();
         let mut bound = loaded.bind(overrides).map_err(|problem| vec![problem])?;
         // Each plan to make: its root effect, its params, and which rung.
         let mut wanted = vec![(name.to_owned(), overrides.to_vec(), None::<String>)];
@@ -1251,6 +1342,7 @@ impl<P: Clone> Host<P> {
             self.asked.entry(key).or_insert(Asked {
                 vertex,
                 sources,
+                mesh: false,
                 effect: effect.to_owned(),
                 frag: frag.to_owned(),
             });
@@ -1272,7 +1364,12 @@ impl<P: Clone> Host<P> {
             if self.programs.contains_key(&key) {
                 continue;
             }
-            match compiler.compile(asked.vertex, &asked.sources) {
+            let compiled = if asked.mesh {
+                compiler.compile_mesh(&asked.sources)
+            } else {
+                compiler.compile(asked.vertex, &asked.sources)
+            };
+            match compiled {
                 Ok(program) => {
                     self.programs.insert(key, Ok(program));
                 }
@@ -1285,6 +1382,7 @@ impl<P: Clone> Host<P> {
                 }
             }
         }
+        let mut refused = Vec::new();
         for slot in self.slots.values_mut() {
             let Some(pending) = slot.pending.take() else {
                 continue;
@@ -1292,15 +1390,43 @@ impl<P: Clone> Host<P> {
             // A version replaced or refused leaves programs that only it
             // needed (`tests::a_replaced_version_gives_its_program_back`).
             self.sweep = true;
-            if pending
+            if !pending
                 .needs
                 .iter()
                 .all(|key| matches!(self.programs.get(key), Some(Ok(_))))
             {
-                swap_in(slot, pending);
-            } else {
                 burn(slot, &pending);
+                continue;
             }
+            // A geometry is held to drawing the window where it is at
+            // progress 0 before it runs (Ruling 19), now that its mesh can
+            // be run; a refusal keeps the version that ran
+            // (`tests::a_geometry_that_moves_the_window_at_rest_is_a_problem_at_its_vert`).
+            let mesh = pending
+                .mesh
+                .as_ref()
+                .and_then(|mesh| match self.programs.get(&mesh.key) {
+                    Some(Ok(program)) => Some(program.clone()),
+                    _ => None,
+                });
+            if let Some(program) = mesh {
+                let grid = pending
+                    .spec()
+                    .grid
+                    .unwrap_or(GridSpec::Fixed { cols: 1, rows: 1 });
+                let mut run = |ask: &geometry::Ask<'_>, cols: u32, rows: u32| {
+                    geometry::run(compiler, &program, ask, cols, rows)
+                };
+                if let Err(refusal) = geometry::at_rest(&mut run, grid, pending.defaults()) {
+                    refused.push(at_rest_problem(&pending, refusal));
+                    burn(slot, &pending);
+                    continue;
+                }
+            }
+            swap_in(slot, pending);
+        }
+        for problem in refused {
+            self.replace_problems(&problem.effect.clone(), vec![problem]);
         }
         if std::mem::take(&mut self.sweep) {
             self.drop_unused(compiler);
@@ -1326,63 +1452,6 @@ impl<P: Clone> Host<P> {
                 compiler.delete(program);
             }
         }
-    }
-
-    /// Rebuild every effect whose Lua its budget stopped, GPU-free, after
-    /// the frame (Ruling 4): the same folder loaded again when its hash is
-    /// unchanged, keeping its programs, its `needs` and its `EffectId`, so
-    /// only the panes whose call came in the pass that overran fade. A folder
-    /// changed since it loaded waits for the reload that reads it.
-    /// `geometry::tests::a_stopped_state_is_rebuilt_after_the_frame`,
-    /// `tests::a_stopped_state_whose_folder_changed_waits_for_the_reload`.
-    pub(crate) fn revive(&mut self) {
-        let caps = self.caps;
-        self.revive_with(|name, dir| Loaded::<P>::load_with(name, dir, caps));
-    }
-
-    /// [`Self::revive`], loading a folder with `load`.
-    fn revive_with(&mut self, load: impl Fn(&str, &Path) -> Result<Loaded<P>, Problem>) {
-        let mut problems = Vec::new();
-        for slot in self.slots.values_mut() {
-            if slot.given_up {
-                continue;
-            }
-            let Some(current) = slot
-                .current
-                .as_ref()
-                .filter(|current| current.sandbox().poisoned())
-            else {
-                continue;
-            };
-            #[cfg(test)]
-            {
-                self.loads += 1;
-            }
-            // Read before, so a changed folder's Lua is not run, and after,
-            // so a save during the load is not swapped in under the old id
-            // (`tests::a_stopped_state_whose_folder_changed_waits_for_the_reload`,
-            // `tests::a_folder_saved_during_a_rebuild_is_not_swapped_in`).
-            if folder_hash(current.dir()) != current.hash() {
-                slot.given_up = true;
-                continue;
-            }
-            match load(current.name(), current.dir()) {
-                Ok(mut fresh) if fresh.hash() == current.hash() => {
-                    // `tests::a_rebuilt_state_keeps_what_its_version_needs`.
-                    fresh.needs.clone_from(&current.needs);
-                    fresh.pixels.clone_from(&current.pixels);
-                    slot.current = Some(Rc::new(fresh));
-                }
-                Ok(_) => slot.given_up = true,
-                // A rebuild that fails is said, once, and not tried again
-                // every frame (`tests::a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload`).
-                Err(problem) => {
-                    slot.given_up = true;
-                    problems.push(problem);
-                }
-            }
-        }
-        self.add_problems(problems);
     }
 
     /// The version of `name` that runs, if one compiled.
@@ -1450,8 +1519,7 @@ impl<P: Clone> Host<P> {
     /// `state::tests::real_client::a_geometry_with_a_frag_presents_before_it_compiled`.
     pub(crate) fn upcoming(&self, name: &str) -> Option<EffectId> {
         let slot = self.slots.get(name)?;
-        // The same folder compiling again under new caps keeps the running
-        // id (`tests::new_caps_keep_an_unchanged_folders_id`).
+        // The same folder compiling again keeps the running id.
         let generation = match (&slot.pending, &slot.current) {
             (Some(pending), _) if same_folder(slot, pending) => slot.generation,
             (Some(_), _) => slot.generation.checked_add(1)?.checked_add(slot.burnt)?,
@@ -1582,7 +1650,6 @@ fn swap_in<P>(slot: &mut Versions<P>, pending: Loaded<P>) {
     }
     slot.holds = pending.needs.clone();
     slot.current = Some(Rc::new(pending));
-    slot.given_up = false;
 }
 
 /// `pending`, dropped without running: the generation it would have taken
@@ -1596,59 +1663,62 @@ fn burn<P>(slot: &mut Versions<P>, pending: &Loaded<P>) {
 }
 
 /// Whether `pending` is the running version's folder as it was, loaded again
-/// only because the caps changed or its state was stopped: the same version,
-/// which keeps its id as [`Host::revive`]'s rebuild does, so new
-/// `effects.sandbox` caps end no present under way
-/// (`tests::new_caps_keep_an_unchanged_folders_id`,
-/// `state::tests::real_client::a_reload_that_changes_only_the_sandbox_keeps_a_present`).
+/// (a reload that changed nothing of it): the same version, which keeps its
+/// id, so a present under way is not ended.
 fn same_folder<P>(slot: &Versions<P>, pending: &Loaded<P>) -> bool {
     slot.current
         .as_ref()
         .is_some_and(|current| current.hash() == pending.hash() && current.dir() == pending.dir())
 }
 
-/// A geometry file held to its rest at its defaults (`geometry::at_rest`),
-/// and why not, as a problem at its file: a Lua error at its own line,
-/// anything else at its `mesh`'s.
-/// `tests::a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh`.
-fn refused_at_rest<P>(loaded: &Loaded<P>) -> Option<Problem> {
-    let grid = loaded
-        .spec()
-        .grid
-        .unwrap_or(GridSpec::Fixed { cols: 1, rows: 1 });
-    let refusal = geometry::at_rest(loaded.sandbox(), grid, loaded.defaults()).err()?;
-    Some(at_rest_problem(loaded, refusal))
-}
-
-/// What a refusal at load says, and where.
-/// `tests::a_mesh_too_slow_for_a_frame_is_a_problem_at_its_mesh`.
+/// Why a geometry's mesh was refused once it compiled, as a problem at its
+/// `.vert`. `tests::a_geometry_that_moves_the_window_at_rest_is_a_problem_at_its_vert`.
 fn at_rest_problem<P>(loaded: &Loaded<P>, refusal: Refusal) -> Problem {
-    let file = loaded.dir().join("effect.lua");
-    let line = loaded.sandbox().mesh_line();
+    let file = loaded
+        .spec()
+        .mesh
+        .as_ref()
+        .map_or_else(|| loaded.file().to_owned(), |vert| loaded.dir().join(vert));
     let message = match refusal {
-        Refusal::Error { line, message } => {
-            return Problem::error(loaded.name(), &file, line, message);
-        }
-        Refusal::Budget => format!(
-            "its mesh ran past the {} ms its checks at load have (`effects.sandbox.load_ms`; progress 0 and 1, every axis and direction), and was stopped",
-            loaded.sandbox().caps().load.as_millis()
-        ),
-        Refusal::Slow { took } => format!(
-            "its mesh takes {:.1} ms a call; a frame gives it {} ms",
-            took.as_secs_f64() * 1000.0,
-            Budget::MESH.as_millis()
-        ),
+        Refusal::Error { message } => message,
         Refusal::Count { wanted, got } => {
-            format!("its mesh wrote {got} numbers, where its grid has {wanted}: x and y for each point")
+            format!("its mesh placed {got} numbers, where its grid has {wanted}: x and y for each point")
         }
-        Refusal::NotFinite => "its mesh wrote a number that is not finite".to_owned(),
+        Refusal::NotFinite => "its mesh placed a point that is not finite".to_owned(),
         Refusal::TooBig => {
             "its mesh put a point more than four monitors' width or height from the window's monitor"
                 .to_owned()
         }
         Refusal::MovesAtRest => "its mesh moves the window at progress 0: at rest a geometry draws the window where it is, arriving, leaving and resizing".to_owned(),
     };
-    Problem::error(loaded.name(), &file, line, message)
+    Problem::error(loaded.name(), &file, None, message)
+}
+
+/// `<file>:<line>: <message>` split into the line and the message; anything
+/// else is the whole first line. Lua writes a chunk name longer than 59 bytes
+/// as `...` and its tail, which is found too, so long as the tail names the
+/// file's folder. `tests::a_located_message_is_split_at_the_file`.
+fn located(text: &str, file: &Path) -> (Option<u32>, String) {
+    let first = |text: &str| text.lines().next().unwrap_or(text).to_owned();
+    let path = file.display().to_string();
+    let whole = text.find(&format!("{path}:")).map(|at| at + path.len() + 1);
+    let after = whole.or_else(|| {
+        text.match_indices("...").find_map(|(at, dots)| {
+            let rest = text.get(at + dots.len()..)?;
+            let tail = rest.get(..rest.find(':')?)?;
+            (tail.contains('/') && path.ends_with(tail)).then_some(at + dots.len() + tail.len() + 1)
+        })
+    });
+    if let Some(rest) = after.and_then(|at| text.get(at..)) {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if let (Some(Ok(line)), Some(message)) = (
+            rest.get(..digits).map(str::parse::<u32>),
+            rest.get(digits..).and_then(|rest| rest.strip_prefix(": ")),
+        ) {
+            return (Some(line), first(message));
+        }
+    }
+    (None, first(text))
 }
 
 /// A configuration error as a problem: the first `<file>.lua:<line>:` in it
@@ -1668,7 +1738,7 @@ pub(crate) fn config_problem(error: &str) -> Problem {
         let (Some(file), Some(from)) = (error.get(start..at + 4), error.get(start..)) else {
             continue;
         };
-        let (line, message) = super::sandbox::located(from, Path::new(file));
+        let (line, message) = located(from, Path::new(file));
         if line.is_some() {
             return Problem::error("config", Path::new(file), line, message);
         }
@@ -1737,6 +1807,7 @@ pub(crate) fn log_problems(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
     use super::Library;
@@ -1750,16 +1821,23 @@ pub(crate) mod tests {
         dir
     }
 
-    /// An effect folder `name` in `place`: its `effect.lua` and any other files.
+    /// An effect folder `name` in `place`: its description and any other
+    /// files. TOML, which begins with `api`, a `#` comment or a `[table]`,
+    /// is written as its `effect.toml`; anything else as its `effect.lua`.
     pub(crate) fn folder(
         place: &Path,
         name: &str,
-        effect_lua: &str,
+        description: &str,
         files: &[(&str, &str)],
     ) -> PathBuf {
         let dir = place.join(name);
         std::fs::create_dir_all(&dir).expect("an effect folder");
-        std::fs::write(dir.join("effect.lua"), effect_lua).expect("writing effect.lua");
+        let start = description.trim_start();
+        let toml = ["api", "#", "["]
+            .iter()
+            .any(|first| start.starts_with(first));
+        let file = if toml { "effect.toml" } else { "effect.lua" };
+        std::fs::write(dir.join(file), description).expect("writing the description");
         for (file, text) in files {
             std::fs::write(dir.join(file), text).expect("writing an effect's file");
         }
@@ -1771,8 +1849,8 @@ pub(crate) mod tests {
     #[test]
     fn a_user_folder_shadows_the_shipped_one() {
         let (user, shipped) = (scratch("user-shadow"), scratch("shipped-shadow"));
-        folder(&shipped, "blur", "return { api = 1 }", &[]);
-        let mine = folder(&user, "blur", "return { api = 1 }", &[]);
+        folder(&shipped, "blur", "api = 2\n", &[]);
+        let mine = folder(&user, "blur", "api = 2\n", &[]);
         let library = Library::with(Some(user.clone()), shipped.clone());
         assert_eq!(library.resolve("blur"), Some(mine));
         let _ = (
@@ -1781,14 +1859,14 @@ pub(crate) mod tests {
         );
     }
 
-    /// **A folder with no `effect.lua` falls through** to the shipped one: an
+    /// **A folder with no `effect.toml` falls through** to the shipped one: an
     /// empty `~/.config/solium/effects/blur/` made and not yet filled does not
     /// cost the blur, as an empty style folder does not cost the frame
     /// (`style::tests::a_bare_name_needs_a_manifest_and_not_merely_a_folder`).
     #[test]
-    fn a_folder_without_effect_lua_falls_through() {
+    fn a_folder_without_effect_toml_falls_through() {
         let (user, shipped) = (scratch("user-empty"), scratch("shipped-empty"));
-        let theirs = folder(&shipped, "blur", "return { api = 1 }", &[]);
+        let theirs = folder(&shipped, "blur", "api = 2\n", &[]);
         std::fs::create_dir_all(user.join("blur")).expect("an empty folder");
         let library = Library::with(Some(user.clone()), shipped.clone());
         assert_eq!(library.resolve("blur"), Some(theirs));
@@ -1806,13 +1884,13 @@ pub(crate) mod tests {
     fn an_effect_name_is_a_bare_name() {
         let root = scratch("names");
         let (user, shipped) = (root.join("user"), root.join("shipped"));
-        folder(&shipped, "ok-name_2", "return { api = 1 }", &[]);
-        let elsewhere = folder(&root, "elsewhere", "return { api = 1 }", &[]);
-        folder(&user.join("a"), "b", "return { api = 1 }", &[]);
-        folder(&user, "Blur", "return { api = 1 }", &[]);
-        folder(&user, "blur ", "return { api = 1 }", &[]);
-        std::fs::write(user.join("effect.lua"), "return { api = 1 }").expect("\"\" as a path");
-        std::fs::write(root.join("effect.lua"), "return { api = 1 }").expect("\"..\" as a path");
+        folder(&shipped, "ok-name_2", "api = 2\n", &[]);
+        let elsewhere = folder(&root, "elsewhere", "api = 2\n", &[]);
+        folder(&user.join("a"), "b", "api = 2\n", &[]);
+        folder(&user, "Blur", "api = 2\n", &[]);
+        folder(&user, "blur ", "api = 2\n", &[]);
+        std::fs::write(user.join("effect.toml"), "api = 2\n").expect("\"\" as a path");
+        std::fs::write(root.join("effect.toml"), "api = 2\n").expect("\"..\" as a path");
         let library = Library::with(Some(user.clone()), shipped.clone());
         let absolute = elsewhere.display().to_string();
         for bad in ["", "a/b", "..", "Blur", "blur ", "/tmp", absolute.as_str()] {
@@ -1830,8 +1908,8 @@ pub(crate) mod tests {
         let (user, shipped) = (scratch("user-list"), scratch("shipped-list"));
         // Made in an order that is neither sorted nor sorted backwards, so a
         // directory listed in the order it was written fails.
-        folder(&user, "fade", "return { api = 1 }", &[]);
-        folder(&user, "zoom", "return { api = 1 }", &[]);
+        folder(&user, "fade", "api = 2\n", &[]);
+        folder(&user, "zoom", "api = 2\n", &[]);
         std::fs::create_dir_all(user.join("blur")).expect("a folder");
         std::fs::create_dir_all(user.join("kawase")).expect("a folder");
         std::fs::write(user.join("notes.txt"), "not a folder").expect("a file");
@@ -1880,8 +1958,8 @@ pub(crate) mod tests {
                 (loaded.name(), loaded.dir(), loaded.hash()),
                 (name, dir.as_path(), super::folder_hash(&dir))
             );
-            assert_eq!(loaded.spec().api, 1, "{name}");
-            assert!(!loaded.sandbox().poisoned() && loaded.needs.is_empty());
+            assert_eq!(loaded.spec().api, 2, "{name}");
+            assert!(loaded.needs.is_empty());
             if name == "frost" {
                 // its stages(p) at the defaults use both.
                 assert_eq!(loaded.used, ["kawase", "tint"]);
@@ -1898,12 +1976,12 @@ pub(crate) mod tests {
     }
 
     /// Binding through a loaded effect names it: a refused override is an
-    /// error at its `effect.lua`, and a clamp a warning there.
+    /// error at its `effect.toml`, and a clamp a warning there.
     #[test]
     fn binding_names_the_effect_and_warns_of_a_clamp() {
         use solium_effects::spec::{Severity, Value};
         let place = scratch("bind");
-        let lua = "return { api = 1, frag = 'effect.frag', params = { amount = { 0.5, min = 0, max = 1 } } }";
+        let lua = "api = 2\nfrag = \"effect.frag\"\n[params]\namount = { default = 0.5, min = 0, max = 1 }\n";
         let dir = folder(&place, "soft", lua, &[("effect.frag", "x")]);
         let loaded = super::Loaded::<()>::load("soft", &dir).expect("loads");
         let bound = loaded
@@ -1917,7 +1995,7 @@ pub(crate) mod tests {
         let warning = &bound.warnings[0];
         assert_eq!(
             (warning.effect.as_str(), warning.severity, &warning.file),
-            ("soft", Severity::Warning, &dir.join("effect.lua"))
+            ("soft", Severity::Warning, &dir.join("effect.toml"))
         );
         let refused = loaded
             .bind(&[("amout".to_owned(), Value::Number(0.2))])
@@ -1937,7 +2015,7 @@ pub(crate) mod tests {
     #[test]
     fn a_folders_hash_is_its_files() {
         let place = scratch("hash");
-        let lua = "return { api = 1, frag = 'effect.frag' }";
+        let lua = "api = 2\nfrag = \"effect.frag\"\n";
         let a = folder(&place, "a", lua, &[("effect.frag", "x")]);
         let b = folder(&place, "b", lua, &[("effect.frag", "x")]);
         let c = folder(&place, "c", lua, &[("effect.frag", "y")]);
@@ -1949,7 +2027,7 @@ pub(crate) mod tests {
             solium_effects::glsl::content_hash(&[
                 b"effect.frag",
                 b"x",
-                b"effect.lua",
+                b"effect.toml",
                 lua.as_bytes()
             ]),
             "each file's name and bytes, in name order, through glsl::content_hash"
@@ -1960,7 +2038,7 @@ pub(crate) mod tests {
     /// The shipped folders sit beside the shipped QML and Lua, wherever those
     /// were found, so an install that has one has the others.
     #[test]
-    fn the_shipped_effects_are_beside_the_qml_and_the_lua() {
+    fn the_shipped_effects_are_beside_the_qml() {
         assert_eq!(
             crate::assets::effects().parent(),
             crate::assets::qml().parent()
@@ -1982,7 +2060,51 @@ pub(crate) mod tests {
         pub(crate) deleted: Vec<u32>,
         pub(crate) shift: u32,
         pub(crate) probed: u32,
+        /// How many mesh runs it made.
+        pub(crate) ran: u32,
         next: u32,
+        meshes: HashMap<u32, String>,
+    }
+
+    /// What a test compiler runs a `.vert` as, with no GPU: the window
+    /// where it is, over the part, as `sol_at(sol_from, uv)` places it,
+    /// changed where the source says one of four words: `MOVES` (every x a
+    /// pixel to the right), `NAN_PAST` (NaN past the window's bottom edge),
+    /// `FAILS_BETWEEN` (no grid between progress 0 and 1) and `DROPS` (the
+    /// window dropped by its height times the progress). The mesh fixtures
+    /// say the word their GLSL does.
+    pub(crate) fn test_mesh(
+        source: &str,
+        uniforms: &crate::effect::gl::MeshUniforms,
+        (cols, rows): (u32, u32),
+    ) -> Result<Vec<f32>, String> {
+        if source.contains("FAILS_BETWEEN") && uniforms.progress > 0.0 && uniforms.progress < 1.0 {
+            return Err("the mesh placed no point".to_owned());
+        }
+        let [x, y, w, h] = uniforms.from;
+        let [u0, v0, u1, v1] = uniforms.part;
+        let mut points = Vec::new();
+        for r in 0..=rows {
+            for c in 0..=cols {
+                #[expect(clippy::cast_precision_loss, reason = "a small test grid")]
+                let (u, v) = (
+                    u0 + (u1 - u0) * (c as f32 / cols as f32),
+                    v0 + (v1 - v0) * (r as f32 / rows as f32),
+                );
+                let mut point = [x + u * w, y + v * h];
+                if source.contains("MOVES") {
+                    point[0] += 1.0;
+                }
+                if source.contains("NAN_PAST") && v > 1.0 {
+                    point[1] = f32::NAN;
+                }
+                if source.contains("DROPS") {
+                    point[1] += uniforms.progress * h;
+                }
+                points.extend(point);
+            }
+        }
+        Ok(points)
     }
 
     impl super::Compiler for Counting {
@@ -1999,6 +2121,22 @@ pub(crate) mod tests {
             }
             self.next += 1;
             Ok(self.next)
+        }
+        fn compile_mesh(&mut self, sources: &solium_effects::glsl::Sources) -> Result<u32, String> {
+            let program = self.compile(solium_effects::mesh::MESH_FRAGMENT, sources)?;
+            self.meshes.insert(program, sources.user.clone());
+            Ok(program)
+        }
+        fn run_mesh(
+            &mut self,
+            program: &u32,
+            uniforms: &crate::effect::gl::MeshUniforms,
+            _params: (&[f32], &[String]),
+            grid: (u32, u32),
+        ) -> Result<Vec<f32>, String> {
+            self.ran += 1;
+            let source = self.meshes.get(program).ok_or("no such mesh program")?;
+            test_mesh(source, uniforms, grid)
         }
         fn delete(&mut self, program: u32) {
             self.deleted.push(program);
@@ -2030,6 +2168,27 @@ pub(crate) mod tests {
             }
             Ok(crate::effect::gl::Program::for_test())
         }
+        fn compile_mesh(
+            &mut self,
+            sources: &solium_effects::glsl::Sources,
+        ) -> Result<crate::effect::gl::Program, String> {
+            let mut program = self.compile(solium_effects::mesh::MESH_FRAGMENT, sources)?;
+            program.source = Some(std::rc::Rc::from(sources.user.as_str()));
+            Ok(program)
+        }
+        fn run_mesh(
+            &mut self,
+            program: &crate::effect::gl::Program,
+            uniforms: &crate::effect::gl::MeshUniforms,
+            _params: (&[f32], &[String]),
+            grid: (u32, u32),
+        ) -> Result<Vec<f32>, String> {
+            test_mesh(
+                program.source.as_deref().unwrap_or_default(),
+                uniforms,
+                grid,
+            )
+        }
         fn delete(&mut self, _program: crate::effect::gl::Program) {}
     }
 
@@ -2058,7 +2217,7 @@ pub(crate) mod tests {
         }
     }
 
-    const ONE_PASS: &str = "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }";
+    const ONE_PASS: &str = "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n";
     const FRAG: &str = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv);\n}\n";
 
     fn host_with(place: &Path) -> super::Host<u32> {
@@ -2093,13 +2252,13 @@ pub(crate) mod tests {
     #[test]
     fn a_pixels_effect_with_more_params_than_the_limit_is_refused_at_bind() {
         let place = scratch("pixels-limit");
-        let params: Vec<String> = (1..=9).map(|n| format!("p{n} = {{ {n}.0 }}")).collect();
+        let params: Vec<String> = (1..=9).map(|n| format!("p{n} = {n}.0\n")).collect();
         let dir = folder(
             &place,
             "nine",
             &format!(
-                "return {{ api = 1, inputs = {{ 'self' }}, params = {{ {} }}, frag = 'effect.frag' }}",
-                params.join(", ")
+                "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n[params]\n{}",
+                params.concat()
             ),
             &[("effect.frag", FRAG)],
         );
@@ -2132,12 +2291,17 @@ pub(crate) mod tests {
         ));
         let place = scratch("warp-pixels");
         let read = |file: &str| std::fs::read_to_string(fixtures.join(file)).expect("a fixture");
-        folder(&place, "fly", &read("fly/effect.lua"), &[]);
+        folder(
+            &place,
+            "fly",
+            &read("fly/effect.toml"),
+            &[("flat.vert", &read("fly/flat.vert"))],
+        );
         let frag = read("rounded/rounded.frag");
         folder(
             &place,
             "rounded",
-            &read("rounded/effect.lua"),
+            &read("rounded/effect.toml"),
             &[("rounded.frag", &frag)],
         );
         let warp = |text: &str| {
@@ -2388,7 +2552,7 @@ pub(crate) mod tests {
                 .any(|each| each.effect == "nowhere" && each.message.contains("no effect"))
         );
         let first = host.effect("a").expect("v1");
-        std::fs::write(dir.join("effect.lua"), "return {").expect("v2");
+        std::fs::write(dir.join("effect.toml"), "api = = 2\n").expect("v2");
         host.reload();
         host.compile_pending(&mut Counting::default());
         assert!(std::rc::Rc::ptr_eq(
@@ -2441,7 +2605,7 @@ pub(crate) mod tests {
         for effect in ["style:a", "style:b", "rules"] {
             host.push_problem(super::Problem::error(
                 effect,
-                Path::new("effects.lua"),
+                Path::new("effects.toml"),
                 None,
                 "wrong".to_owned(),
             ));
@@ -2552,14 +2716,13 @@ pub(crate) mod tests {
         folder(
             &place,
             "listed",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\nuse = \"plain\"\n",
             &[],
         );
         folder(
             &place,
             "called",
-            "return { api = 1, inputs = { 'self' }, params = { n = { 1, int = true } },
-                stages = function(p) return { { 'use', p.n == 1 and 'other' or 'never' } } end }",
+            "api = 2\ninputs = [\"self\"]\n[params]\nn = { default = 1, int = true }\n[[stages]]\nuse = \"other\"\nwhen = \"n == 1\"\n[[stages]]\nuse = \"never\"\nwhen = \"n ~= 1\"\n",
             &[],
         );
         folder(&place, "plain", ONE_PASS, &[("effect.frag", FRAG)]);
@@ -2567,7 +2730,7 @@ pub(crate) mod tests {
         folder(
             &place,
             "broken",
-            "return { api = 1, stages = { { 'pass', 'a.frag', scal = 0.5 } } }",
+            "api = 2\n[[stages]]\npass = \"a.frag\"\nscal = 0.5\n",
             &[],
         );
         let mut host = host_with(&place);
@@ -2620,353 +2783,122 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(place);
     }
 
-    /// **New caps load every wanted folder again**, and only then: an
-    /// effect the default 16 MiB refused loads once `effects.sandbox` gives
-    /// it 64, one compiled and unchanged is loaded again under them (its
-    /// frame-time memory cap is the new one too), and the same caps again
-    /// load nothing.
-    #[test]
-    fn new_caps_load_every_wanted_folder_again() {
-        let place = scratch("new-caps");
-        folder(
-            &place,
-            "big",
-            "local big = string.rep('x', 20 * 1024 * 1024)\nreturn { api = 1, frag = 'effect.frag' }",
-            &[("effect.frag", FRAG)],
-        );
-        folder(&place, "small", ONE_PASS, &[("effect.frag", FRAG)]);
-        let mut host = host_with(&place);
-        host.want("rules", ["big".to_owned(), "small".to_owned()]);
-        assert!(host.latest("big").is_none(), "20 MiB loaded under 16");
-        // Compiled, so `small` is current and nothing of it pending: only
-        // the caps can make its unchanged folder load again.
-        host.compile_pending(&mut Counting::default());
-        assert!(
-            host.effect("small").is_some() && !host.has_pending("small"),
-            "the premise: small runs, and nothing of it waits"
-        );
-        // A long budget beside it, so a busy machine building the string
-        // slowly is not what is tested.
-        let big = crate::effect::settings::Caps {
-            memory: 64 << 20,
-            load: std::time::Duration::from_millis(5000),
-        };
-        assert!(host.set_caps(big));
-        assert_eq!(host.caps(), big);
-        assert!(
-            host.latest("big").is_some(),
-            "not loaded again under 64 MiB: {:?}",
-            host.problems()
-        );
-        assert!(
-            host.problems().iter().all(|each| each.effect != "big"),
-            "{:?}",
-            host.problems()
-        );
-        assert_eq!(
-            host.latest("small").map(|loaded| loaded.sandbox().caps()),
-            Some(big),
-            "an unchanged folder kept the caps it loaded under"
-        );
-        host.compile_pending(&mut Counting::default());
-        assert_eq!(
-            host.effect("small").map(|loaded| loaded.sandbox().caps()),
-            Some(big),
-            "the version that runs is not the one loaded under the new caps"
-        );
-        let before = host.loads;
-        assert!(!host.set_caps(big), "the same caps are no change");
-        assert_eq!(host.loads, before, "the same caps loaded a folder again");
-        let _ = std::fs::remove_dir_all(place);
+    /// A geometry that draws the window where it is, and its `.vert`.
+    pub(crate) const FLAT: &str = "api = 2\ngrid = [1, 1]\nmesh = \"flat.vert\"\n";
+    pub(crate) const FLAT_VERT: &str = "vec2 sol_mesh(vec2 uv) { return sol_at(sol_from, uv); }\n";
+
+    /// A folder `name` in `place` holding [`FLAT`].
+    pub(crate) fn flat(place: &Path, name: &str) -> PathBuf {
+        folder(place, name, FLAT, &[("flat.vert", FLAT_VERT)])
     }
 
-    /// **New caps keep an unchanged folder's id**: what loads again only
-    /// because `effects.sandbox` changed is the same version under new caps,
-    /// so a geometry swapped in at once and one whose frag compiles first
-    /// both keep the id a present carries, and the id they take while
-    /// compiling ([`Host::upcoming`]) is that one too; an edit is still a
-    /// new generation (`a_new_version_is_a_new_generation`).
+    /// **A geometry runs once its mesh compiled and rests**: its `.vert` is
+    /// a program like a frag, its version waits for it, and once it compiled
+    /// the checks at rest run it, on every axis and in every direction, over
+    /// the window and a part of it, and at progress 1.
     #[test]
-    fn new_caps_keep_an_unchanged_folders_id() {
-        let place = scratch("new-caps-id");
-        folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
-        folder(&place, "frag", ONE_PASS, &[("effect.frag", FRAG)]);
-        let mut host = host_with(&place);
-        host.want("rules", ["flat".to_owned(), "frag".to_owned()]);
-        host.compile_pending(&mut Counting::default());
-        let (flat, frag) = (
-            host.id("flat").expect("flat runs"),
-            host.id("frag").expect("frag runs"),
-        );
-        let caps = crate::effect::settings::Caps {
-            memory: 32 << 20,
-            load: std::time::Duration::from_millis(5000),
-        };
-        assert!(host.set_caps(caps));
-        assert!(
-            host.has_pending("frag") && !host.has_pending("flat"),
-            "the premise: both loaded again, and only the frag waits"
-        );
-        assert_eq!(host.id("flat"), Some(flat), "a geometry lost its id");
-        assert_eq!(
-            host.upcoming("frag"),
-            Some(frag),
-            "a frag compiling again under new caps was given a new id"
-        );
-        host.compile_pending(&mut Counting::default());
-        assert_eq!(host.id("frag"), Some(frag), "a frag lost its id");
-        for (name, id) in [("flat", flat), ("frag", frag)] {
-            assert_eq!(
-                host.by_id(id).map(|loaded| loaded.sandbox().caps()),
-                Some(caps),
-                "{name}'s id does not name the version under the new caps"
-            );
-        }
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// **A mesh stopped at load names its budget and its key**: under
-    /// `effects.sandbox.load_ms = 250` a `mesh` that never returns is one
-    /// problem, saying 250 ms and the key.
-    #[test]
-    fn a_mesh_stopped_at_load_names_its_budget_and_key() {
-        let place = scratch("stopped-at-load");
-        folder(
-            &place,
-            "endless",
-            "return { api = 1, grid = { 1, 1 }, mesh = function(t, cols, rows, out) while true do end end }",
-            &[],
-        );
-        let mut host = host_with(&place);
-        host.set_caps(crate::effect::settings::Caps {
-            load: std::time::Duration::from_millis(250),
-            ..crate::effect::settings::Caps::default()
-        });
-        host.want("present", ["endless".to_owned()]);
-        let problems: Vec<_> = host
-            .problems()
-            .iter()
-            .filter(|each| each.effect == "endless")
-            .collect();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].message.contains("250 ms")
-                && problems[0].message.contains("effects.sandbox.load_ms"),
-            "{problems:?}"
-        );
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// **A version with nothing to compile is current at once**: a
-    /// geometry-only effect `sol.present` names resolves its id on the pass
-    /// it is named, with no compile between.
-    #[test]
-    fn a_version_with_nothing_to_compile_is_current_at_once() {
-        let place = scratch("current-at-once");
-        folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
+    fn a_geometry_runs_once_its_mesh_compiled_and_rests() {
+        let place = scratch("mesh-compiles");
+        flat(&place, "flat");
         let mut host = host_with(&place);
         host.add_wanted("present", ["flat".to_owned()]);
-        assert!(
-            host.id("flat").is_some() && !host.has_pending("flat"),
-            "a geometry-only effect waited for a compile"
+        assert!(host.has_pending("flat"), "a geometry waits for its mesh");
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        assert!(host.id("flat").is_some() && !host.has_pending("flat"));
+        assert_eq!(
+            compiler.ran,
+            4 * 3 * 3,
+            "four axes, three directions, three runs each"
         );
+        let mesh = host
+            .effect("flat")
+            .and_then(|loaded| loaded.mesh.clone())
+            .expect("a mesh");
+        assert!(host.program(mesh.key).is_some(), "the mesh program is held");
         assert!(host.ready());
         let _ = std::fs::remove_dir_all(place);
     }
 
-    /// **A geometry file that moves the window at rest is refused at load**,
-    /// a problem at its `mesh`'s line, and no version at all.
+    /// **A geometry that moves the window at rest is a problem at its
+    /// `.vert`**, once its program compiled, and no version at all.
     #[test]
-    fn a_geometry_file_that_moves_the_window_at_rest_is_a_problem_at_its_mesh() {
+    fn a_geometry_that_moves_the_window_at_rest_is_a_problem_at_its_vert() {
         let fixtures = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/effects"
         ));
         let mut host: super::Host<u32> = super::Host::new(Library::with(None, fixtures.to_owned()));
         host.want("present", ["mover".to_owned()]);
+        host.compile_pending(&mut Counting::default());
         assert!(
-            host.latest("mover").is_none(),
-            "a version that moves at rest was loaded"
+            host.effect("mover").is_none(),
+            "a version that moves at rest runs"
         );
         let problem = host
             .problems()
             .iter()
             .find(|each| each.effect == "mover")
             .expect("a problem");
-        assert_eq!(problem.line, Some(7), "{problem:?}");
         assert!(problem.message.contains("progress 0"), "{problem:?}");
-        assert!(problem.file.ends_with("mover/effect.lua"), "{problem:?}");
+        assert!(problem.file.ends_with("mover/mover.vert"), "{problem:?}");
     }
 
-    /// **A refusal at load says why, at its `mesh`'s line**: a mesh too
-    /// slow for a frame says how long a call took and what a frame gives;
-    /// one the load budget stopped says it was the checks' budget.
+    /// **An old `effect.lua` is skipped and named**: a folder of the user's
+    /// still in Lua gives way to the shipped one of its name, and is named
+    /// as needing an `effect.toml`; with no shipped one, it is the error.
     #[test]
-    fn a_mesh_too_slow_for_a_frame_is_a_problem_at_its_mesh() {
-        let place = scratch("slow-problem");
-        let dir = folder(&place, "flat", crate::effect::geometry::tests::FLAT, &[]);
-        let loaded = super::Loaded::<u32>::load("flat", &dir).expect("loads");
-        let slow = super::at_rest_problem(
-            &loaded,
-            super::Refusal::Slow {
-                took: std::time::Duration::from_micros(3400),
-            },
+    fn an_old_effect_lua_is_skipped_and_named() {
+        let (user, shipped) = (scratch("user-old-lua"), scratch("shipped-old-lua"));
+        let theirs = folder(&shipped, "blur", ONE_PASS, &[("effect.frag", FRAG)]);
+        for name in ["blur", "mine"] {
+            std::fs::create_dir_all(user.join(name)).expect("a folder");
+            std::fs::write(user.join(name).join("effect.lua"), "return { api = 1 }")
+                .expect("an old effect.lua");
+        }
+        let library = Library::with(Some(user.clone()), shipped.clone());
+        assert_eq!(library.resolve("blur"), Some(theirs));
+        let mut host: super::Host<u32> = super::Host::new(library);
+        host.want("rules", ["blur".to_owned(), "mine".to_owned()]);
+        let about = |name: &str| {
+            host.problems()
+                .iter()
+                .find(|each| each.effect == name)
+                .map(|each| {
+                    (
+                        each.severity,
+                        each.file.ends_with(format!("{name}/effect.lua")),
+                    )
+                })
+        };
+        assert_eq!(
+            about("blur"),
+            Some((solium_effects::spec::Severity::Warning, true)),
+            "{:?}",
+            host.problems()
         );
         assert_eq!(
-            slow.message,
-            "its mesh takes 3.4 ms a call; a frame gives it 2 ms"
+            about("mine"),
+            Some((solium_effects::spec::Severity::Error, true)),
+            "{:?}",
+            host.problems()
         );
-        assert_eq!(slow.line, Some(1), "{slow:?}");
-        let stopped = super::at_rest_problem(&loaded, super::Refusal::Budget);
-        assert!(
-            stopped.message.contains("100 ms its checks at load have"),
-            "{stopped:?}"
-        );
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// A host wanting `spin` (`geometry::tests::SPIN`) in `place`, its
-    /// running version stopped by its budget: what `revive` is for.
-    fn stopped_in(place: &Path) -> (super::Host<u32>, std::rc::Rc<super::Loaded<u32>>) {
-        let mut host = host_with(place);
-        host.want("rules", ["spin".to_owned()]);
-        host.compile_pending(&mut Counting::default());
-        let stopped = host.effect("spin").expect("current");
-        stopped
-            .sandbox()
-            .lua()
-            .globals()
-            .set("spin", true)
-            .expect("set");
-        assert_eq!(
-            crate::effect::geometry::mesh(
-                stopped.sandbox(),
-                &crate::effect::geometry::tests::ask(),
-                1,
-                1
-            ),
-            Err(super::Refusal::Budget)
-        );
-        (host, stopped)
-    }
-
-    /// **A stopped state whose folder changed waits for the reload** (Ruling
-    /// 4): the changed folder's Lua is not run, nothing is swapped in under
-    /// the old version's id, and the reload reads it as a new version.
-    #[test]
-    fn a_stopped_state_whose_folder_changed_waits_for_the_reload() {
-        let place = scratch("revive-changed");
-        let dir = folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
-        let (mut host, _stopped) = stopped_in(&place);
-        let id = host.id("spin");
-        std::fs::write(dir.join("effect.lua"), crate::effect::geometry::tests::FLAT)
-            .expect("a save");
-        let read = std::cell::Cell::new(0);
-        host.revive_with(|name, dir| {
-            read.set(read.get() + 1);
-            super::Loaded::load(name, dir)
-        });
-        assert_eq!(read.get(), 0, "a changed folder's Lua was run");
-        assert!(
-            host.effect("spin").expect("loaded").sandbox().poisoned(),
-            "a changed folder was swapped in under the old version"
-        );
-        assert_eq!(host.id("spin"), id);
-        host.reload();
-        assert!(!host.effect("spin").expect("loaded").sandbox().poisoned());
-        assert_ne!(host.id("spin"), id, "the reload's is a new version");
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// **A folder saved during a rebuild is not swapped in**: the hash is
-    /// read again after the load, so what the load read is the folder the
-    /// version was, or nothing changes (here the load reads another folder,
-    /// as a save between the two reads would make it).
-    #[test]
-    fn a_folder_saved_during_a_rebuild_is_not_swapped_in() {
-        let place = scratch("revive-saved");
-        folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
-        let other = folder(&place, "other", crate::effect::geometry::tests::FLAT, &[]);
-        let (mut host, _stopped) = stopped_in(&place);
-        host.revive_with(|name, _| super::Loaded::load(name, &other));
-        assert!(
-            host.effect("spin").expect("loaded").sandbox().poisoned(),
-            "a load of other files was swapped in"
-        );
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// **A rebuilt state keeps what its version needs** (Ruling 4): its
-    /// programs stay its own, and `needs` says which.
-    #[test]
-    fn a_rebuilt_state_keeps_what_its_version_needs() {
-        let place = scratch("revive-needs");
-        let lua = crate::effect::geometry::tests::SPIN
-            .replace("grid = { 1, 1 },", "grid = { 1, 1 }, frag = 'effect.frag',");
-        folder(
-            &place,
-            "spin",
-            &lua,
-            &[(
-                "effect.frag",
-                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
-            )],
-        );
-        let (mut host, stopped) = stopped_in(&place);
-        assert!(!stopped.needs.is_empty(), "its frag is a program it needs");
-        host.revive();
-        let fresh = host.effect("spin").expect("loaded");
-        assert!(!fresh.sandbox().poisoned());
-        assert_eq!(fresh.needs, stopped.needs);
-        let _ = std::fs::remove_dir_all(place);
-    }
-
-    /// **A rebuild that fails is a problem, and waits for a reload**: it is
-    /// named on the overlay once, the next frame's `revive` reads nothing,
-    /// and a reload of the unchanged folder builds it again and takes the
-    /// problem away.
-    #[test]
-    fn a_rebuild_that_fails_is_a_problem_and_waits_for_a_reload() {
-        let place = scratch("revive-fails");
-        folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
-        let (mut host, _stopped) = stopped_in(&place);
-        let failed = "it did not load again";
-        host.revive_with(|name, dir| {
-            Err(super::Problem::error(
-                name,
-                &dir.join("effect.lua"),
-                None,
-                failed.to_owned(),
-            ))
-        });
         assert!(
             host.problems()
                 .iter()
-                .any(|each| each.effect == "spin" && each.message == failed),
-            "{:?}",
-            host.problems()
-        );
-        assert!(host.effect("spin").expect("loaded").sandbox().poisoned());
-        let before = host.loads;
-        host.revive();
-        assert_eq!(
-            host.loads, before,
-            "a failed rebuild was tried again before a reload"
-        );
-        host.reload();
-        assert!(
-            !host.effect("spin").expect("loaded").sandbox().poisoned(),
-            "a reload of the unchanged folder left it stopped"
+                .all(|each| each.message.contains("effect.toml"))
         );
         assert!(
-            host.problems().iter().all(|each| each.message != failed),
-            "{:?}",
-            host.problems()
+            host.latest("blur").is_some(),
+            "the shipped blur still draws"
         );
-        let _ = std::fs::remove_dir_all(place);
+        let _ = (
+            std::fs::remove_dir_all(&user),
+            std::fs::remove_dir_all(&shipped),
+        );
     }
 
-    /// **`sol.present`'s names accumulate until a reload**: a second genie
+    /// **`present`'s names accumulate until a reload**: a second genie
     /// naming another effect does not drop the first's mid-flight.
     #[test]
     fn present_wants_accumulate_until_a_reload() {
@@ -3008,13 +2940,16 @@ pub(crate) mod tests {
     /// nothing.
     #[test]
     fn a_reload_keeps_what_a_live_present_names() {
-        let flat = crate::effect::geometry::tests::FLAT;
         let place = scratch("present-live");
-        folder(&place, "a", flat, &[]);
-        folder(&place, "b", flat, &[]);
+        flat(&place, "a");
+        flat(&place, "b");
         let mut host = host_with(&place);
         host.add_wanted("present", ["a".to_owned(), "b".to_owned()]);
-        let id = host.id("a").expect("a geometry file is current at once");
+        let mut compiler = Counting::default();
+        host.compile_pending(&mut compiler);
+        let id = host
+            .id("a")
+            .expect("a geometry is current once its mesh compiled");
         assert_eq!(host.name_of(id), Some("a"));
         host.reload_keeping(["a".to_owned()]);
         assert_eq!(
@@ -3023,8 +2958,9 @@ pub(crate) mod tests {
             "an unchanged folder a present names lost its id"
         );
         assert!(host.effect("b").is_none(), "a name nothing draws was kept");
-        std::fs::write(place.join("a/effect.lua"), format!("{flat}\n-- edited\n")).expect("edited");
+        std::fs::write(place.join("a/effect.toml"), format!("{FLAT}# edited\n")).expect("edited");
         host.reload_keeping(["a".to_owned()]);
+        host.compile_pending(&mut compiler);
         assert!(
             host.id("a").is_some_and(|now| now != id) && host.by_id(id).is_none(),
             "a changed folder kept the version a present began with"
@@ -3095,19 +3031,19 @@ pub(crate) mod tests {
         folder(
             &place,
             "outer",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'user' } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\nuse = \"user\"\n",
             &[],
         );
         folder(
             &place,
             "user",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\nuse = \"plain\"\n",
             &[],
         );
         folder(
             &place,
             "rich",
-            "return { api = 1, inputs = { 'self' }, frag = 'rich.frag', fallback = { 'plain' } }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"rich.frag\"\nfallback = [\"plain\"]\n",
             &[(
                 "rich.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv).bgra; }\n",
@@ -3274,8 +3210,7 @@ pub(crate) mod tests {
         folder(
             &place,
             "fine",
-            "return { api = 1, inputs = { 'self' }, params = { field = { 1, int = true } }, fallback = { { field = 0 } },
-            stages = function(p) if p.field == 1 then return { { 'pass', 'a.frag', format = 'rgba16f' } } end return { { 'pass', 'a.frag' } } end }",
+            "api = 2\ninputs = [\"self\"]\nfallback = [{ field = 0 }]\n[params]\nfield = { default = 1, int = true }\n[[stages]]\npass = \"a.frag\"\nformat = \"rgba16f\"\nwhen = \"field == 1\"\n[[stages]]\npass = \"a.frag\"\nwhen = \"field ~= 1\"\n",
             &[("a.frag", frag)],
         );
         let mut host = host_with(&place);
@@ -3305,8 +3240,7 @@ pub(crate) mod tests {
     }
 
     /// **A fallback naming another effect binds it at load**, and its `use`
-    /// closure with it; and **`stages` runs once per rung at bind**, never
-    /// again (its counter does not move over a hundred lookups).
+    /// closure with it.
     #[test]
     fn a_fallback_naming_another_effect_binds_it_at_load() {
         let place = scratch("fallback-effect");
@@ -3314,13 +3248,13 @@ pub(crate) mod tests {
         folder(
             &place,
             "rich",
-            "calls = 0 return { api = 1, inputs = { 'self' }, fallback = { 'plain' }, stages = function(p) calls = calls + 1 return { { 'use', 'plain' } } end }",
+            "api = 2\ninputs = [\"self\"]\nfallback = [\"plain\"]\n[[stages]]\nuse = \"plain\"\n",
             &[],
         );
         folder(
             &place,
             "plain",
-            "return { api = 1, inputs = { 'self' }, frag = 'a.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"a.frag\"\n",
             &[("a.frag", frag)],
         );
         let mut host = host_with(&place);
@@ -3331,17 +3265,6 @@ pub(crate) mod tests {
             host.effect("plain").is_some() || host.has_pending("plain"),
             "loaded with its user"
         );
-        let rich = host.latest("rich").expect("loaded");
-        for _ in 0..100 {
-            let _ = host.latest("rich");
-        }
-        let calls: i64 = rich
-            .sandbox()
-            .lua()
-            .globals()
-            .get("calls")
-            .expect("the counter");
-        assert_eq!(calls, 1, "stages ran per lookup, not once at bind");
         let _ = std::fs::remove_dir_all(place);
     }
 
@@ -3352,7 +3275,7 @@ pub(crate) mod tests {
     #[test]
     fn a_stage_effect_swaps_in_only_once_every_step_compiled() {
         let place = scratch("every-step");
-        let stages = "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', scale = 0.5 }, { 'pass', 'b.frag', scale = 2 } } }";
+        let stages = "api = 2\ninputs = [\"self\"]\n[[stages]]\npass = \"a.frag\"\nscale = 0.5\n[[stages]]\npass = \"b.frag\"\nscale = 2\n";
         let failing = "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n";
         let linted = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv) * p_nothing;\n}\n";
         let lone = "vec4 sol_effect(vec2 uv) {\n  return sol_tex(uv).bgra;\n}\n";
@@ -3412,7 +3335,7 @@ pub(crate) mod tests {
         let dir = folder(
             &place,
             "a",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', scale = 0.5 } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\npass = \"a.frag\"\nscale = 0.5\n",
             &[("a.frag", FRAG)],
         );
         let mut host = host_with(&place);
@@ -3451,7 +3374,7 @@ pub(crate) mod tests {
         folder(
             &place,
             "user",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'use', 'plain' } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\nuse = \"plain\"\n",
             &[],
         );
         folder(&place, "plain", ONE_PASS, &[("effect.frag", broken)]);
@@ -3603,7 +3526,7 @@ pub(crate) mod tests {
         let mine = folder(
             &user,
             "blur",
-            "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"backdrop\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -3651,7 +3574,7 @@ pub(crate) mod tests {
         folder(
             &place,
             "marked",
-            "return { api = 1, inputs = { 'backdrop' }, stages = { { 'pass', 'effect.frag', per_part = true } } }",
+            "api = 2\ninputs = [\"backdrop\"]\n[[stages]]\npass = \"effect.frag\"\nper_part = true\n",
             &[("effect.frag", FRAG)],
         );
         let mut host = host_with(&place);

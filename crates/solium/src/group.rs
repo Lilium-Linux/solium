@@ -13,13 +13,13 @@
 //! transform on it composes with whatever its members are already doing:
 //!
 //! ```lua
-//! sol.group("desk-2", { windows = { 3, 7 }, surfaces = { "wallpaper-2" } })
-//! sol.present_group("desk-2", { x = -2560 }, { duration = 300 })
+//! group("desk-2", { windows = { 3, 7 }, surfaces = { "wallpaper-2" } })
+//! present-group("desk-2", { x = -2560 }, { duration = 300 })
 //! ```
 //!
 //! One call, one animation, one target. The wallpaper travels because it is in
 //! the selection, **not because the compositor knows what a wallpaper is** — and
-//! it still does not. `sol.surface` is one primitive doing five jobs and that
+//! it still does not. `surface` is one primitive doing five jobs and that
 //! stays true.
 //!
 //! Composition is the point rather than a detail. A window individually tilted
@@ -88,6 +88,144 @@ pub(crate) struct Shift {
     /// that made this item worth doing first: the translation and the opacity,
     /// which is what a desk is made of.
     pub(crate) matrix: Mat4,
+    /// The selection posed in three dimensions about one origin: its own,
+    /// the numbers its motion moves. Turned into [`Self::world`] whenever it
+    /// changes, and meaningless in a shift composed of several.
+    pub(crate) pose: Pose,
+    /// Every pose that carries a member, composed into one matrix in the
+    /// compositor's logical space, its own group's first and then each
+    /// parent's: what [`Self::apply`] draws a member through, about the one
+    /// origin they share rather than each member's own centre.
+    pub(crate) world: Mat4,
+    /// Whether a member turned to face away from the viewer is hidden.
+    pub(crate) backface: bool,
+    /// How many times its own size the poses draw a member: their scales
+    /// multiplied. A scene is captured at that many times its pixels, so a
+    /// wall posed at twice its scene's size is as sharp as one made at it
+    /// (`render::scene_capture_scale`).
+    pub(crate) grow: f64,
+}
+
+/// A pose in three dimensions: what the protocol's `pose` says, kept as the
+/// numbers a motion moves, so a turn from 0 to 90 degrees turns through
+/// every angle between rather than blending two matrices through a squashed
+/// middle. x runs right, y down and z toward the viewer; the screen is the
+/// plane z = 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Pose {
+    /// How far it is moved, after it is turned and scaled.
+    pub(crate) translate: [f64; 3],
+    /// Degrees about x, then y, then z.
+    pub(crate) rotate: [f64; 3],
+    pub(crate) scale: f64,
+    /// The point it is turned and scaled about.
+    pub(crate) origin: [f64; 3],
+    /// How far in front of the screen it is seen from, straight through the
+    /// origin's x and y; 0 is no perspective.
+    pub(crate) perspective: f64,
+}
+
+impl Pose {
+    /// Where everything is already.
+    pub(crate) const NONE: Self = Self {
+        translate: [0.0; 3],
+        rotate: [0.0; 3],
+        scale: 1.0,
+        origin: [0.0; 3],
+        perspective: 0.0,
+    };
+
+    /// The pose as one matrix in logical space: scaled and turned about the
+    /// origin, moved, then seen in perspective.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a matrix is f32, and every number here is screen-sized"
+    )]
+    pub(crate) fn matrix(&self) -> Mat4 {
+        let [ox, oy, oz] = self.origin.map(|value| value as f32);
+        let [x, y, z] = self.translate.map(|value| value as f32);
+        // A whole turn more or less is the same pose, and the matrix of a
+        // turn reduced to under 360 degrees is exact at its quarters: a cube
+        // turned a hundred times is flat at rest as it was at the first.
+        let [rx, ry, rz] = self
+            .rotate
+            .map(|degrees| degrees.rem_euclid(360.0).to_radians() as f32);
+        let scale = self.scale as f32;
+        let mut world = Mat4::translate(-ox, -oy, -oz)
+            .then(Mat4::scale(scale, scale, scale))
+            .then(Mat4::rotate_x(rx))
+            .then(Mat4::rotate_y(ry))
+            .then(Mat4::rotate_z(rz))
+            .then(Mat4::translate(ox + x, oy + y, oz + z));
+        if self.perspective > 0.0 {
+            world = world
+                .then(Mat4::translate(-ox, -oy, 0.0))
+                .then(Mat4::perspective(self.perspective as f32))
+                .then(Mat4::translate(ox, oy, 0.0));
+        }
+        world
+    }
+
+    fn blend(self, other: Self, progress: f64) -> Self {
+        let lerp = |from: f64, to: f64| solium_animation::lerp(from, to, progress);
+        let three = |from: [f64; 3], to: [f64; 3]| {
+            [
+                lerp(from[0], to[0]),
+                lerp(from[1], to[1]),
+                lerp(from[2], to[2]),
+            ]
+        };
+        Self {
+            translate: three(self.translate, other.translate),
+            rotate: three(self.rotate, other.rotate),
+            scale: lerp(self.scale, other.scale),
+            origin: three(self.origin, other.origin),
+            perspective: lerp(self.perspective, other.perspective),
+        }
+    }
+}
+
+/// Whether `world` leaves every point of the screen's plane where it is,
+/// to within a hundredth of a pixel across the screen: the identity on x, y
+/// and w, whatever it does along z. A desk at rest on the front of a cube is
+/// seen through a perspective and turned by two rotations that cancel, to
+/// a float's precision, and its windows stay on the cheap path.
+fn flat(world: &Mat4) -> bool {
+    let identity = Mat4::IDENTITY;
+    let near = |index: usize, within: f32| (world.0[index] - identity.0[index]).abs() < within;
+    [0, 1, 2, 3, 4, 5, 6, 7]
+        .iter()
+        .all(|&index| near(index, 1e-6))
+        && [12, 13, 14].iter().all(|&index| near(index, 1e-2))
+        && near(15, 1e-6)
+}
+
+/// Whether `frame`, drawn through its matrix, is seen from behind: the
+/// viewer is on the back of the plane it lies in. Edge on is behind too,
+/// which is where a turning face hides. One answer for the whole of it,
+/// however much reaches behind the viewer: a wall beside the viewer that
+/// runs past them faces them, and is drawn up to where the renderer cuts it
+/// (`warp::mesh_grid`).
+/// `tests::a_face_reaching_past_the_viewer_still_faces_them`.
+fn faces_away(frame: &Frame) -> bool {
+    frame.matrix.facing() <= 1e-6
+}
+
+/// How near the viewer `world` puts the point `(x, y)` of the screen: the
+/// depth a member is ordered by, nearer higher.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a matrix is f32, and every number here is screen-sized"
+)]
+fn depth(world: &Mat4, x: f64, y: f64) -> f32 {
+    let m = &world.0;
+    let (x, y) = (x as f32, y as f32);
+    let z = m[2] * x + m[6] * y + m[14];
+    let w = m[3] * x + m[7] * y + m[15];
+    let depth = if w.abs() < 1e-6 { z } else { z / w };
+    // The renderer's depth sort keeps a member it cannot order where the
+    // stack put it, and must never be handed a NaN to begin with.
+    if depth.is_finite() { depth } else { 0.0 }
 }
 
 impl Shift {
@@ -97,7 +235,28 @@ impl Shift {
         dy: 0.0,
         opacity: 1.0,
         matrix: Mat4::IDENTITY,
+        pose: Pose::NONE,
+        world: Mat4::IDENTITY,
+        backface: false,
+        grow: 1.0,
     };
+
+    /// This, posed: its pose and the matrix that is.
+    pub(crate) fn posed(self, pose: Pose) -> Self {
+        Self {
+            pose,
+            world: pose.matrix(),
+            grow: pose.scale,
+            ..self
+        }
+    }
+
+    /// Whether this draws a member anywhere but flat where it is: a matrix
+    /// of its own, or a pose. A scene it carries is then drawn through a
+    /// capture, as a window is, and not as a rectangle.
+    pub(crate) fn bends(&self) -> bool {
+        !(self.matrix.is_identity() && flat(&self.world))
+    }
 
     /// Whether this changes anything at all.
     ///
@@ -109,6 +268,7 @@ impl Shift {
             && self.dy == 0.0
             && (self.opacity - 1.0).abs() < f32::EPSILON
             && self.matrix.is_identity()
+            && flat(&self.world)
     }
 
     /// Both, for a node that is in two selections at once.
@@ -123,6 +283,10 @@ impl Shift {
             dy: self.dy + then.dy,
             opacity: self.opacity * then.opacity,
             matrix: self.matrix.then(then.matrix),
+            pose: Pose::NONE,
+            world: self.world.then(then.world),
+            backface: self.backface || then.backface,
+            grow: self.grow * then.grow,
         }
     }
 
@@ -130,15 +294,42 @@ impl Shift {
     ///
     /// Returns its argument untouched when there is nothing to do — see the
     /// module header for why that is a rule and not an optimisation.
+    ///
+    /// The world pose is applied about the one origin it names, so every
+    /// member turns as part of one thing: expressed about the member's own
+    /// pivot, which is what its matrix is applied about. A member posed is
+    /// ordered by how near it comes, and one seen from behind is drawn at no
+    /// opacity, so it is neither drawn nor hit.
     pub(crate) fn apply(self, frame: Frame) -> Frame {
         if self.is_identity() {
             return frame;
         }
-        Frame {
+        let mut drawn = Frame {
             opacity: frame.opacity * self.opacity,
             matrix: frame.matrix.then(self.matrix),
             ..frame.shifted(self.dx, self.dy)
+        };
+        if !(flat(&self.world) && drawn.matrix.is_identity()) {
+            let pivot = (
+                drawn.rect.loc.x + drawn.rect.size.w * f64::from(drawn.pivot.0),
+                drawn.rect.loc.y + drawn.rect.size.h * f64::from(drawn.pivot.1),
+            );
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a matrix is f32, and every number here is screen-sized"
+            )]
+            let (px, py) = (pivot.0 as f32, pivot.1 as f32);
+            drawn.matrix = drawn
+                .matrix
+                .then(Mat4::translate(px, py, 0.0))
+                .then(self.world)
+                .then(Mat4::translate(-px, -py, 0.0));
+            drawn.z += depth(&self.world, pivot.0, pivot.1);
         }
+        if self.backface && faces_away(&drawn) {
+            drawn.opacity = 0.0;
+        }
+        drawn
     }
 
     /// How far this displaces something, which is all a rebase needs.
@@ -162,16 +353,32 @@ impl Blend for Shift {
                 progress,
             ) as f32,
             matrix: self.matrix.blend(other.matrix, progress),
+            backface: if progress < 1.0 {
+                self.backface || other.backface
+            } else {
+                other.backface
+            },
+            ..Self::NONE
         }
+        .posed(self.pose.blend(other.pose, progress))
     }
 }
 
 impl crate::present::Carried for Shift {
     fn measures(self) -> crate::present::Rate {
+        let pose = self.pose;
         [
             self.dx,
             self.dy,
             f64::from(self.opacity),
+            pose.translate[0],
+            pose.translate[1],
+            pose.translate[2],
+            pose.rotate[0],
+            pose.rotate[1],
+            pose.rotate[2],
+            pose.scale,
+            pose.perspective,
             0.0,
             0.0,
             0.0,
@@ -184,13 +391,23 @@ impl crate::present::Carried for Shift {
         clippy::cast_possible_truncation,
         reason = "an opacity is a small float either way"
     )]
-    fn with_measures(self, [dx, dy, opacity, ..]: crate::present::Rate) -> Self {
+    fn with_measures(
+        self,
+        [dx, dy, opacity, x, y, z, rx, ry, rz, scale, perspective, ..]: crate::present::Rate,
+    ) -> Self {
         Self {
             dx,
             dy,
             opacity: opacity.clamp(0.0, 1.0) as f32,
             ..self
         }
+        .posed(Pose {
+            translate: [x, y, z],
+            rotate: [rx, ry, rz],
+            scale: scale.max(0.0),
+            perspective: perspective.max(0.0),
+            ..self.pose
+        })
     }
 
     fn drawn(transform: &Transform<Self>, now: Duration) -> Self {
@@ -278,7 +495,7 @@ impl Selection {
 
 /// Turn the names a script wrote into the selection the compositor holds.
 ///
-/// The one seam between `sol.group`'s strings and [`Member`], and it is a free
+/// The one seam between `group`'s strings and [`Member`], and it is a free
 /// function rather than a method on `Solium` because it needs exactly one thing
 /// from the compositor — the name table — and a test proving the shipped
 /// workspace slide carries its wallpaper has to make the same conversion the
@@ -322,6 +539,9 @@ pub(crate) fn selection_of(
 struct Group {
     name: Box<str>,
     selection: Selection,
+    /// The group this one is in: its members are carried by this group and
+    /// then by the parent, and its parent, as far up as there are parents.
+    parent: Option<Box<str>>,
     /// `None` means "not moved", which is not the same as "moved by nothing":
     /// an identity shift still costs the fold below a visit, and a group that
     /// has landed and been released costs nothing at all.
@@ -340,6 +560,10 @@ impl Group {
             .map_or(Shift::NONE, |transform| transform.target())
     }
 }
+
+/// The most parents a group's members are carried by: a loop of parents
+/// climbs no further.
+const DEEPEST: usize = 16;
 
 /// Every selection a script has named.
 ///
@@ -362,6 +586,16 @@ pub(crate) type Displaced = Vec<(u64, (f64, f64))>;
 
 impl Groups {
     /// Whether anything at all is grouped. The first gate on the cheap path.
+    /// Every group's own shift at `now`, by its name, in the order they
+    /// were declared: what a scene reads as `Solium.groups`
+    /// (`models::groups`), so a scene can draw a world the window manager's
+    /// poses move, its camera where theirs is.
+    pub(crate) fn poses(&self, now: Duration) -> impl Iterator<Item = (&str, Shift)> {
+        self.groups
+            .iter()
+            .map(move |group| (&*group.name, group.shift(now)))
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
@@ -389,20 +623,31 @@ impl Groups {
     /// caller can keep them looking where they are. See [`crate::present::rebase`] for
     /// why that matters: without it, sending a window to another workspace stops
     /// sliding and starts teleporting.
-    pub(crate) fn declare(&mut self, name: &str, selection: Selection, now: Duration) -> Displaced {
+    pub(crate) fn declare(
+        &mut self,
+        name: &str,
+        selection: Selection,
+        parent: Option<&str>,
+        now: Duration,
+    ) -> Displaced {
+        let parent: Option<Box<str>> = parent.map(Into::into);
         if self
             .find(name)
-            .is_some_and(|group| group.selection == selection)
+            .is_some_and(|group| group.selection == selection && group.parent == parent)
         {
             return Displaced::new();
         }
         let watched = self.watched(name, &selection);
         let before = self.offsets(&watched, now);
         match self.groups.iter_mut().find(|group| &*group.name == name) {
-            Some(group) => group.selection = selection,
+            Some(group) => {
+                group.selection = selection;
+                group.parent = parent;
+            }
             None => self.groups.push(Group {
                 name: name.into(),
                 selection,
+                parent,
                 travel: None,
             }),
         }
@@ -522,7 +767,9 @@ impl Groups {
         self.groups
             .iter()
             .filter(|group| group.selection.holds_window(id, monitor))
-            .fold(Shift::NONE, |so_far, group| so_far.and(group.bound()))
+            .fold(Shift::NONE, |so_far, group| {
+                so_far.and(self.up(group, Group::bound))
+            })
     }
 
     fn fold(&self, now: Duration, wanted: impl Fn(&Group) -> bool) -> Shift {
@@ -532,7 +779,26 @@ impl Groups {
         self.groups
             .iter()
             .filter(|group| wanted(group))
-            .fold(Shift::NONE, |so_far, group| so_far.and(group.shift(now)))
+            .fold(Shift::NONE, |so_far, group| {
+                so_far.and(self.up(group, |group| group.shift(now)))
+            })
+    }
+
+    /// How `group` carries its members, with each of its parents' after its
+    /// own, as far up as there are parents and no further than
+    /// [`DEEPEST`]: a parent named that nothing declared ends the climb, and
+    /// so does a loop of parents.
+    fn up(&self, group: &Group, shift: impl Fn(&Group) -> Shift) -> Shift {
+        let mut carried = shift(group);
+        let mut parent = group.parent.as_deref();
+        for _ in 0..DEEPEST {
+            let Some(above) = parent.and_then(|name| self.find(name)) else {
+                break;
+            };
+            carried = carried.and(shift(above));
+            parent = above.parent.as_deref();
+        }
+        carried
     }
 
     /// Retire transforms that have landed. Returns whether any is still moving.
@@ -659,7 +925,7 @@ mod tests {
 
         // And a group that exists but has never been carried is the same.
         let mut declared = Groups::default();
-        declared.declare("desk", desk(&[1], &[]), at(0));
+        declared.declare("desk", desk(&[1], &[]), None, at(0));
         assert!(declared.on_window(1, None, at(0)).is_identity());
         assert_eq!(declared.on_window(1, None, at(0)).apply(frame), frame);
     }
@@ -675,7 +941,7 @@ mod tests {
     fn a_window_and_a_surface_travel_as_one() {
         let mut groups = Groups::default();
         let wallpaper = crate::scripted::SurfaceId::from_raw(7);
-        groups.declare("desk-2", desk(&[3, 9], &[7]), at(0));
+        groups.declare("desk-2", desk(&[3, 9], &[7]), None, at(0));
         groups.present("desk-2", by(-2560.0, 0.0), at(0), at(300), Curve::OutCubic);
 
         let mut moved = false;
@@ -712,7 +978,7 @@ mod tests {
             ..solium_animation::Spring::default()
         });
         let mut groups = Groups::default();
-        groups.declare("desk-2", desk(&[3], &[]), at(0));
+        groups.declare("desk-2", desk(&[3], &[]), None, at(0));
         groups.present("desk-2", by(-2560.0, 0.0), at(0), at(0), spring);
         let speed = |groups: &Groups, millis: u64| {
             let before = groups.on_window(3, None, at(millis)).offset().0;
@@ -748,7 +1014,7 @@ mod tests {
         let wallpaper = crate::scripted::SurfaceId::from_raw(7);
         let mut selection = desk(&[], &[7]);
         selection.on = Some("DP-1".into());
-        groups.declare("desk-2@DP-1", selection, at(0));
+        groups.declare("desk-2@DP-1", selection, None, at(0));
         groups.present("desk-2@DP-1", by(-2560.0, 0.0), at(0), at(0), Curve::Linear);
 
         assert_eq!(
@@ -768,7 +1034,7 @@ mod tests {
     #[test]
     fn a_members_own_transform_composes_rather_than_being_replaced() {
         let mut groups = Groups::default();
-        groups.declare("desk", desk(&[1], &[]), at(0));
+        groups.declare("desk", desk(&[1], &[]), None, at(0));
         groups.present("desk", by(-100.0, 25.0), at(0), at(0), Curve::Linear);
 
         let tilted = Frame {
@@ -795,8 +1061,8 @@ mod tests {
     #[test]
     fn selections_compose() {
         let mut groups = Groups::default();
-        groups.declare("desk", desk(&[1], &[]), at(0));
-        groups.declare("screen", desk(&[1], &[]), at(0));
+        groups.declare("desk", desk(&[1], &[]), None, at(0));
+        groups.declare("screen", desk(&[1], &[]), None, at(0));
         groups.present("desk", by(-100.0, 0.0), at(0), at(0), Curve::Linear);
         groups.present(
             "screen",
@@ -825,14 +1091,14 @@ mod tests {
     #[test]
     fn moving_between_selections_reports_what_has_to_be_put_back() {
         let mut groups = Groups::default();
-        groups.declare("desk-1", desk(&[1], &[]), at(0));
-        groups.declare("desk-2", desk(&[], &[]), at(0));
+        groups.declare("desk-1", desk(&[1], &[]), None, at(0));
+        groups.declare("desk-2", desk(&[], &[]), None, at(0));
         groups.present("desk-2", by(-2560.0, 0.0), at(0), at(0), Curve::Linear);
 
         // Window 1 leaves desk 1 for desk 2, which is a screen to the left.
-        let out = groups.declare("desk-1", desk(&[], &[]), at(0));
+        let out = groups.declare("desk-1", desk(&[], &[]), None, at(0));
         assert!(out.is_empty(), "leaving a desk that is not carried is free");
-        let displaced = groups.declare("desk-2", desk(&[1], &[]), at(0));
+        let displaced = groups.declare("desk-2", desk(&[1], &[]), None, at(0));
         assert_eq!(
             displaced,
             vec![(1, (2560.0, 0.0))],
@@ -845,16 +1111,16 @@ mod tests {
     #[test]
     fn joining_a_selection_that_is_going_nowhere_displaces_nothing() {
         let mut groups = Groups::default();
-        groups.declare("desk-1", desk(&[], &[]), at(0));
+        groups.declare("desk-1", desk(&[], &[]), None, at(0));
         assert!(
             groups
-                .declare("desk-1", desk(&[1, 2], &[]), at(0))
+                .declare("desk-1", desk(&[1, 2], &[]), None, at(0))
                 .is_empty()
         );
         // Re-declaring the same membership is not a change at all.
         assert!(
             groups
-                .declare("desk-1", desk(&[1, 2], &[]), at(0))
+                .declare("desk-1", desk(&[1, 2], &[]), None, at(0))
                 .is_empty()
         );
     }
@@ -863,7 +1129,7 @@ mod tests {
     #[test]
     fn forgetting_a_selection_reports_the_way_back() {
         let mut groups = Groups::default();
-        groups.declare("desk-2", desk(&[4], &[]), at(0));
+        groups.declare("desk-2", desk(&[4], &[]), None, at(0));
         groups.present("desk-2", by(0.0, -1440.0), at(0), at(0), Curve::Linear);
         assert_eq!(
             groups.forget("desk-2", at(0)),
@@ -888,6 +1154,7 @@ mod tests {
                 members: vec![Member::Monitor("DP-1".into())],
                 on: None,
             },
+            None,
             at(0),
         );
         assert!(groups.names_monitors());
@@ -926,7 +1193,7 @@ mod tests {
     #[test]
     fn a_selection_that_lands_lets_the_loop_go_idle() {
         let mut groups = Groups::default();
-        groups.declare("desk", desk(&[1], &[]), at(0));
+        groups.declare("desk", desk(&[1], &[]), None, at(0));
         groups.present("desk", by(-2560.0, 0.0), at(0), at(300), Curve::OutCubic);
 
         assert!(groups.settle(at(150)), "still travelling");
@@ -959,7 +1226,7 @@ mod tests {
     fn a_selection_cleared_on_a_spring_is_bound_for_nothing_before_it_gets_there() {
         let spring = Curve::Spring(solium_animation::Spring::default());
         let mut groups = Groups::default();
-        groups.declare("desk", desk(&[1], &[]), at(0));
+        groups.declare("desk", desk(&[1], &[]), None, at(0));
         groups.present("desk", by(2035.2, 0.0), at(0), at(0), Curve::Linear);
         assert_eq!(
             groups.bound_for_window(1, None).offset(),
@@ -1010,12 +1277,12 @@ mod tests {
     #[test]
     fn redeclaring_a_selection_does_not_restart_its_animation() {
         let mut groups = Groups::default();
-        groups.declare("desk", desk(&[1], &[]), at(0));
+        groups.declare("desk", desk(&[1], &[]), None, at(0));
         groups.present("desk", by(-1000.0, 0.0), at(0), at(200), Curve::Linear);
         let midway = groups.on_window(1, None, at(100)).offset();
         assert_eq!(midway, (-500.0, 0.0));
 
-        groups.declare("desk", desk(&[1, 2], &[]), at(100));
+        groups.declare("desk", desk(&[1, 2], &[]), None, at(100));
         assert_eq!(
             groups.on_window(1, None, at(100)).offset(),
             midway,
@@ -1032,7 +1299,7 @@ mod tests {
             dx: 100.0,
             dy: -50.0,
             opacity: 0.0,
-            matrix: crate::mat4::Mat4::IDENTITY,
+            ..Shift::NONE
         };
         let half = from.blend(to, 0.5);
         assert_eq!(half.dx, 50.0);
@@ -1047,9 +1314,256 @@ mod tests {
         let group = Group {
             name: "desk".into(),
             selection: Selection::default(),
+            parent: None,
             travel: None,
         };
         assert!(group.shift(at(0)).is_identity());
+    }
+
+    use super::Pose;
+
+    /// Where a frame's four corners are drawn: top left, top right, bottom
+    /// right, bottom left, through its matrix about its pivot.
+    fn corners(frame: &Frame) -> Vec<(f64, f64)> {
+        let rect = frame.rect;
+        let pivot = (
+            rect.loc.x + rect.size.w * f64::from(frame.pivot.0),
+            rect.loc.y + rect.size.h * f64::from(frame.pivot.1),
+        );
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .iter()
+            .map(|(u, v)| {
+                #[expect(clippy::cast_possible_truncation, reason = "test numbers are small")]
+                let (x, y) = frame
+                    .matrix
+                    .project(
+                        (rect.loc.x + rect.size.w * u - pivot.0) as f32,
+                        (rect.loc.y + rect.size.h * v - pivot.1) as f32,
+                        0.0,
+                    )
+                    .expect("in front of the viewer");
+                (f64::from(x) + pivot.0, f64::from(y) + pivot.1)
+            })
+            .collect()
+    }
+
+    fn near(got: &[(f64, f64)], want: &[(f64, f64)]) -> bool {
+        got.iter()
+            .zip(want)
+            .all(|(a, b)| (a.0 - b.0).abs() < 1e-2 && (a.1 - b.1).abs() < 1e-2)
+    }
+
+    fn posed(pose: Pose) -> Shift {
+        Shift::NONE.posed(pose)
+    }
+
+    /// **A pose turns every member about one origin**, as one thing: a
+    /// quarter turn about the screen's origin puts a window's top-right
+    /// corner where its bottom-left was, mirrored to the other side, rather
+    /// than turning the window about its own centre.
+    #[test]
+    fn a_pose_turns_its_members_about_one_origin() {
+        let window = Frame::real(rect(100, 0, 100, 50));
+        let turned = posed(Pose {
+            rotate: [0.0, 0.0, 90.0],
+            ..Pose::NONE
+        })
+        .apply(window);
+        // Turned a quarter about (0, 0), y down: (x, y) goes to (-y, x).
+        assert!(
+            near(
+                &corners(&turned),
+                &[(0.0, 100.0), (0.0, 200.0), (-50.0, 200.0), (-50.0, 100.0)]
+            ),
+            "{:?}",
+            corners(&turned)
+        );
+    }
+
+    /// **A child is carried by its own pose and then its parent's**: moved
+    /// 100 to the right by itself, then turned a quarter about the origin
+    /// by the parent, its window lands where the move put it, turned.
+    #[test]
+    fn a_child_is_carried_by_its_pose_and_then_its_parents() {
+        let mut groups = Groups::default();
+        groups.declare("room", Selection::default(), None, at(0));
+        groups.declare("desk", desk(&[1], &[]), Some("room"), at(0));
+        let now = at(0);
+        let quick = Duration::ZERO;
+        groups.present(
+            "desk",
+            posed(Pose {
+                translate: [100.0, 0.0, 0.0],
+                ..Pose::NONE
+            }),
+            now,
+            quick,
+            Curve::Linear,
+        );
+        groups.present(
+            "room",
+            posed(Pose {
+                rotate: [0.0, 0.0, 90.0],
+                ..Pose::NONE
+            }),
+            now,
+            quick,
+            Curve::Linear,
+        );
+        let drawn = groups
+            .on_window(1, None, at(1))
+            .apply(Frame::real(rect(0, 0, 100, 50)));
+        // Moved to (100..200, 0..50), then turned about (0, 0).
+        assert!(
+            near(
+                &corners(&drawn),
+                &[(0.0, 100.0), (0.0, 200.0), (-50.0, 200.0), (-50.0, 100.0)]
+            ),
+            "{:?}",
+            corners(&drawn)
+        );
+        assert!(
+            groups.on_window(2, None, at(1)).is_identity(),
+            "a window in neither is carried by neither"
+        );
+    }
+
+    /// **A member seen from behind is hidden when the shift says so**, and
+    /// drawn when it does not: turned half way round about its own middle,
+    /// and a quarter, edge on, which is how a face of a turning cube hides.
+    #[test]
+    fn a_member_seen_from_behind_is_hidden_when_the_shift_says_so() {
+        let window = Frame::real(rect(0, 0, 100, 50));
+        for degrees in [180.0, 90.0, -90.0] {
+            let pose = Pose {
+                rotate: [0.0, degrees, 0.0],
+                origin: [50.0, 25.0, 0.0],
+                perspective: 1000.0,
+                ..Pose::NONE
+            };
+            let hidden = Shift {
+                backface: true,
+                ..posed(pose)
+            }
+            .apply(window);
+            assert!(!hidden.shows(), "turned {degrees} degrees and still drawn");
+            let shown = posed(pose).apply(window);
+            assert!(
+                shown.shows(),
+                "hidden at {degrees} degrees with no backface"
+            );
+        }
+        let facing = Shift {
+            backface: true,
+            ..posed(Pose {
+                rotate: [0.0, 30.0, 0.0],
+                origin: [50.0, 25.0, 0.0],
+                perspective: 1000.0,
+                ..Pose::NONE
+            })
+        }
+        .apply(window);
+        assert!(
+            facing.shows(),
+            "turned 30 degrees, it still faces the viewer"
+        );
+    }
+
+    /// **A face reaching past the viewer still faces them**: a wall to the
+    /// viewer's left, its front toward them, running from in front of them to
+    /// behind them, is drawn with the backface on, and the same wall to their
+    /// right, its back toward them, is hidden. The eye is at (800, 450),
+    /// 1000 in front of the screen.
+    #[test]
+    fn a_face_reaching_past_the_viewer_still_faces_them() {
+        let wall = Frame::real(rect(200, 0, 3000, 900));
+        let at = |x: f64| Shift {
+            backface: true,
+            ..posed(Pose {
+                // A quarter turn about the eye's line puts the wall's front
+                // toward +x and its length into the screen, from z = 600
+                // to z = -2400; moved to x and 900 nearer, it runs from
+                // z = 1500, behind the eye, to z = -1500.
+                rotate: [0.0, 90.0, 0.0],
+                origin: [800.0, 450.0, 0.0],
+                translate: [x - 800.0, 0.0, 900.0],
+                perspective: 1000.0,
+                ..Pose::NONE
+            })
+        };
+        assert!(at(200.0).apply(wall).shows(), "the left wall faces the eye");
+        assert!(
+            !at(1400.0).apply(wall).shows(),
+            "the right wall is seen from behind"
+        );
+    }
+
+    /// **A face at rest stays on the cheap path**: seen in perspective and
+    /// turned by nothing, every point of the screen's plane stays where it
+    /// is, so the window is drawn exactly as it was, at depth 0.
+    #[test]
+    fn a_face_at_rest_in_perspective_stays_flat() {
+        let window = Frame::real(rect(10, 20, 300, 200));
+        let at_rest = Shift {
+            backface: true,
+            ..posed(Pose {
+                origin: [800.0, 450.0, -800.0],
+                perspective: 1600.0,
+                ..Pose::NONE
+            })
+        };
+        assert!(at_rest.is_identity());
+        assert_eq!(at_rest.apply(window), window);
+    }
+
+    /// **A turn passes through every angle**: half way from 0 to 90 degrees
+    /// is a pose turned 45, not two matrices averaged into a squashed one.
+    #[test]
+    fn a_turn_passes_through_every_angle() {
+        let from = posed(Pose::NONE);
+        let to = posed(Pose {
+            rotate: [0.0, 90.0, 0.0],
+            ..Pose::NONE
+        });
+        let half = from.blend(to, 0.5);
+        assert!((half.pose.rotate[1] - 45.0).abs() < 1e-9);
+        assert_eq!(
+            half.world,
+            Pose {
+                rotate: [0.0, 45.0, 0.0],
+                ..Pose::NONE
+            }
+            .matrix()
+        );
+    }
+
+    /// **The nearer of two members is drawn in front**: turned about the
+    /// screen's middle, the window that swings toward the viewer comes out
+    /// higher than the one swinging away.
+    #[test]
+    fn the_nearer_of_two_members_is_ordered_in_front() {
+        let pose = posed(Pose {
+            rotate: [0.0, 30.0, 0.0],
+            origin: [500.0, 300.0, 0.0],
+            perspective: 1500.0,
+            ..Pose::NONE
+        });
+        let left = pose.apply(Frame::real(rect(0, 0, 200, 600)));
+        let right = pose.apply(Frame::real(rect(800, 0, 200, 600)));
+        // Turned +30 about y, x out to the left comes toward the viewer.
+        assert!(left.z > right.z, "{} and {}", left.z, right.z);
+    }
+
+    /// **A loop of parents climbs no further than it can**: two groups each
+    /// the other's parent are carried by both, and asking does not hang.
+    #[test]
+    fn a_loop_of_parents_ends() {
+        let mut groups = Groups::default();
+        groups.declare("a", desk(&[1], &[]), Some("b"), at(0));
+        groups.declare("b", Selection::default(), Some("a"), at(0));
+        groups.present("a", by(1.0, 0.0), at(0), Duration::ZERO, Curve::Linear);
+        let carried = groups.on_window(1, None, at(1));
+        assert!(carried.dx >= 1.0, "carried by its own group at least");
     }
 }
 
@@ -1100,7 +1614,7 @@ mod desk {
                  require(\"wallpaper\")\n\
                  require(\"workspaces\")\n",
                 here = directory.to_string_lossy(),
-                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua"),
+                shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua"),
             ),
         )
         .expect("writing the entry point");
@@ -1197,6 +1711,7 @@ mod desk {
     /// on one desk and another on another.
     fn snapshot(ids: &[u64], focused: u64) -> Snapshot {
         Snapshot {
+            now: std::time::Duration::ZERO,
             windows: ids.iter().map(|id| window(*id, *id == focused)).collect(),
             monitors: vec![monitor()],
             work_area: monitor().area,
@@ -1234,7 +1749,7 @@ mod desk {
                         let moved = match selection {
                             Some(selection) => {
                                 let selection = selection_of(&selection, &self.surfaces);
-                                self.groups.declare(&name, selection, now)
+                                self.groups.declare(&name, selection, None, now)
                             }
                             None => self.groups.forget(&name, now),
                         };

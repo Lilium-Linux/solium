@@ -1,0 +1,8 @@
+api = 2
+inputs = ["backdrop"]
+
+[[stages]]
+use = "kawase"
+
+[[stages]]
+use = "tint"

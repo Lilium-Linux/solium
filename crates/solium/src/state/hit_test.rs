@@ -52,7 +52,7 @@ pub(super) fn shown_at(
 ///
 /// **One question for "is this window under this point", whether Rust or a
 /// script is asking.** [`Solium::window_under`] asks it of every pane in its walk,
-/// and `sol.window_at` of every window in the snapshot, which carries the
+/// and `window-at` of every window in the snapshot, which carries the
 /// slot, the frame and the screens for the purpose (`script::Drawn`). Until
 /// #134's fourth review the script's half asked only whether the drawn
 /// rectangle held the point, and so found what the Rust half had already
@@ -68,7 +68,7 @@ pub(super) fn shown_at(
 /// is every pane; the snapshot leaves out a pane that is not managed, one
 /// whose application has not arrived when `loading.reserves_a_slot` is off,
 /// and one scripts have been told has gone. Where the Rust walk stops at one
-/// of those, `sol.window_at` sees through it to the window behind. Older than
+/// of those, `window-at` sees through it to the window behind. Older than
 /// #134 and left as it stands:
 /// `sol_window_at_sees_through_the_panes_the_snapshot_leaves_out`. What is
 /// left of a window whose client has gone is seen through by both: the
@@ -374,7 +374,7 @@ pub(crate) enum Claim {
     /// overlay. What it does with the press is the script's business and the
     /// compositor has nothing to say about it.
     Surface,
-    /// A mode owns input — `sol.grab(true)`, which is overview. Every press is
+    /// A mode owns input — `grab(true)`, which is overview. Every press is
     /// the mode's, whatever is drawn under the pointer.
     Mode,
     /// The compositor's own chrome: a frame's band, or a resize border.
@@ -771,7 +771,7 @@ impl Solium {
             // a hidden workspace carried over the next monitor covers pixels
             // that monitor never drew it on (#134's third review).
             //
-            // Both through [`owns`], which is also what `sol.window_at` asks,
+            // Both through [`owns`], which is also what `window-at` asks,
             // so a script and this walk put the same question to each window --
             // `on_two_monitors_sol_window_at_answers_what_the_right_monitor_draws`.
             // And never of what is left of a window whose client has gone.

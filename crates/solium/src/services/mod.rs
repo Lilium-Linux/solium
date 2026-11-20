@@ -1,6 +1,6 @@
 //! The services hub (03 §3.1): the system data the compositor publishes to
-//! scenes and to Lua, one service at a time, each one model that QML and Lua
-//! both read, so a banner and a Lua rule can never disagree.
+//! scenes and to the window manager, one service at a time, each one model that QML and the window manager
+//! both read, so a banner and the window manager's rule can never disagree.
 //!
 //! Each service keeps its rules in a pure model (no bus, no Qt, time passed
 //! in), talks to its daemon from threads of its own, and is driven from here,
@@ -141,7 +141,7 @@ fn settle_audio(state: &mut Solium) {
 }
 
 /// Every window with a client, its process and its application id, as
-/// `sol.windows()` gives them: what a playback stream is matched to (#416).
+/// the `window` rows gives them: what a playback stream is matched to (#416).
 fn audio_windows(state: &Solium) -> Vec<audio::model::WindowKey> {
     state
         .panes
@@ -228,7 +228,7 @@ fn settle_notifications(state: &mut Solium) {
         state.scripts = Some(scripts);
         state.apply(outcome);
     }
-    // `sol.notify`'s functions: an invoked one runs; a closed one's are let go.
+    // `notify`'s functions: an invoked one runs; a closed one's are let go.
     let run = std::mem::take(&mut state.services.notifications.run_own);
     let forget = std::mem::take(&mut state.services.notifications.forget_own);
     for (token, key) in run {
@@ -312,7 +312,7 @@ fn parent_of(pid: u32) -> Option<u32> {
     after.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// A notifications action from Lua or a scene (`sol.act("notifications.…")`),
+/// A notifications action from Lua or a scene (`act("notifications.…")`),
 /// done here. Returns why it could not be done.
 pub(crate) fn act(
     state: &mut Solium,
@@ -414,7 +414,7 @@ pub(crate) fn act(
     }
 }
 
-/// `sol.notify{ ... }`: one of the shell's own, queued, to arrive at the
+/// `notify{ ... }`: one of the shell's own, queued, to arrive at the
 /// next settle through the same decision as any other. Never from here: a
 /// `notification` hook that posts one would otherwise recurse until the stack
 /// ran out.

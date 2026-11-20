@@ -1,7 +1,7 @@
 //! Media (#379): the MPRIS players on the session bus (mpv, Spotify,
 //! Firefox...), what each is playing and where it is in the track, and the
-//! active one, for scenes (`Media`) and for Lua (`sol.media`,
-//! `sol.on("media")`, `media.*` actions), so a shell shows what is playing
+//! active one, for scenes (`Media`) and for the window manager (`media`,
+//! `media`, `media.*` actions), so a shell shows what is playing
 //! and its media keys need no `playerctl`.
 //!
 //! * [`content`] makes what a player sends safe to show: its text and its
@@ -11,7 +11,7 @@
 //! * [`server`] is the bus, on threads of its own;
 //! * this module holds them together for the event loop: it starts the
 //!   server when the configuration asks and the session allows, applies what
-//!   the server read, hands art to Qt, and turns what a scene or Lua asks
+//!   the server read, hands art to Qt, and turns what a scene or the window manager asks
 //!   into calls. `crate::services::settle` drives it.
 
 pub(crate) mod content;
@@ -25,7 +25,7 @@ use crate::{json::Json, services::notifications::icon_name, session::Place};
 use model::{Action, Art, Change, Media, Player, Position, Volume};
 use server::{Fact, Server};
 
-/// What the configuration says: `sol.media{ ... }`.
+/// What the configuration says: `media{ ... }`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Config {
     /// Follow the session's players.
@@ -89,7 +89,7 @@ pub(crate) struct View {
     pub(crate) players: Vec<BTreeMap<&'static str, Json>>,
 }
 
-/// What `sol.media()` reads: the view, and the time on the compositor's
+/// What `media` reads: the view, and the time on the compositor's
 /// clock, so a playing player's position is where it is now.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Seen {
@@ -159,7 +159,7 @@ fn position_now(row: &BTreeMap<&'static str, Json>, now: Duration) -> f64 {
     model::position_at(&props, position, now) as f64 / 1e6
 }
 
-/// One event for `sol.on("media")`.
+/// One event for `media`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Event {
     /// `added`, `changed`, `removed` or `active`.
@@ -199,7 +199,7 @@ pub(crate) struct Service {
     pub(crate) model: Media,
     view: Rc<View>,
     dirty: bool,
-    /// For `sol.on("media")`, in order, drained each settle.
+    /// For `media`, in order, drained each settle.
     pub(crate) events: Vec<Event>,
 }
 
@@ -221,7 +221,7 @@ impl Service {
         self.start_or_stop();
     }
 
-    /// `sol.media{ ... }`, at load and on every reload. A changed `ignore`
+    /// `media{ ... }`, at load and on every reload. A changed `ignore`
     /// starts the following again, so a player no longer left out is found.
     pub(crate) fn configure(&mut self, config: Config) {
         let ignore_changed = config.ignore != self.config.ignore;
@@ -252,7 +252,7 @@ impl Service {
         self.view.clone()
     }
 
-    /// The view and the time, for `sol.media()` and events.
+    /// The view and the time, for `media` and events.
     pub(crate) fn seen(&self, now: Duration) -> Seen {
         Seen {
             view: self.view.clone(),

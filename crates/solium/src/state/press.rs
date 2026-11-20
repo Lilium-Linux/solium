@@ -1,4 +1,4 @@
-//! `sol.press`: one button or key, pressed and let go on a window, as a
+//! `press`: one button or key, pressed and let go on a window, as a
 //! device would deliver it. The primitive a configuration builds a "back"
 //! gesture from -- a tablet shell's edge swipe sends a window `side`, the
 //! mouse's back button, or `alt+Left`, or `Escape` -- and what "back" means
@@ -23,7 +23,7 @@
 //!
 //! **A key needs the keyboard, and takes it.** A key to a window is the
 //! window being typed into, so a window that does not have the keyboard is
-//! focused first, as `sol.focus` would, and keeps it.
+//! focused first, as `focus` would, and keeps it.
 //!
 //! **Never behind the lock**, and never while something else holds the
 //! pointer: a button held, a drag, a menu, a scene's press or grab, or --
@@ -40,7 +40,7 @@ use super::*;
 use crate::script::{FocusSource, Press};
 
 impl Solium {
-    /// Carry out a `sol.press` on the window a script holds as `id`. A
+    /// Carry out a `press` on the window a script holds as `id`. A
     /// window that has gone, is leaving or is minimized since the script
     /// asked, a menu or a tooltip, or one with no application yet, is
     /// pressed nowhere.
@@ -141,7 +141,7 @@ impl Solium {
             let Some(code) = crate::keymap::keycode_of(self, keysym) else {
                 tracing::warn!(
                     key = %xkb_name(keysym),
-                    "sol.press: no key in this keymap types that, so nothing was pressed"
+                    "press: no key in this keymap types that, so nothing was pressed"
                 );
                 return;
             };

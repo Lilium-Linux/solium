@@ -96,7 +96,7 @@ Stage Manager on the floating desktop: the window in use on the stage, every oth
 
 **Keys:** the pointer at the left edge, a click on a card
 
-**How it is done.** Atrium is part of floating mode, crates/solium/lua/atrium.lua, and placing nothing: the cards are sol.presents of the live windows in perspective, and a click is only a change of focus. The default configuration turns it on in user.lua, with its key.
+**How it is done.** Atrium is part of floating mode, crates/solium-lua/lua/atrium.lua, and placing nothing: the cards are sol.presents of the live windows in perspective, and a click is only a change of focus. The default configuration turns it on in user.lua, with its key.
 
 [`crates/solium/default-config/user.lua`](../crates/solium/default-config/user.lua)
 
@@ -166,9 +166,9 @@ A window dragged to the right edge shows where it will go, and glides there when
 
 **Keys:** drag a titlebar to the right edge, and back
 
-**How it is done.** crates/solium/lua/snap.lua, in Lua: the drag events say where the pointer is, a scene draws the preview, and sol.place glides the window into the zone. The left edge is Atrium's here, so this one snaps to the right.
+**How it is done.** crates/solium-lua/lua/snap.lua, in Lua: the drag events say where the pointer is, a scene draws the preview, and sol.place glides the window into the zone. The left edge is Atrium's here, so this one snaps to the right.
 
-[`crates/solium/lua/snap.lua`](../crates/solium/lua/snap.lua)
+[`crates/solium-lua/lua/snap.lua`](../crates/solium-lua/lua/snap.lua)
 
 ```lua
 -- Snapping a floating window by dragging it to a screen's edge (#455), as

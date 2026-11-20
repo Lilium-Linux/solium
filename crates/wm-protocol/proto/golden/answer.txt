@@ -1,0 +1,7 @@
+# The answer docs/window-managers.md walks through, byte by byte.
+answer {
+  serial: 300
+  handled: true
+  commands { unplace: 5 }
+  commands { quit {} }
+}

@@ -2,7 +2,7 @@
 //! switcher, a panel's window list.
 //!
 //! Two protocols, both views of one list, `Solium::window_infos`, the same
-//! windows a layout and `sol.windows()` see:
+//! windows a layout and the `window` rows see:
 //!
 //! * `ext-foreign-toplevel-list-v1`: each window's identity, title and
 //!   `app_id`, and when it goes. Smithay's.
@@ -12,7 +12,7 @@
 //!   here, since Smithay has none.
 //!
 //! **What a client asks is an action, and the configuration answers it.** A
-//! request reaches Lua as an action of the `windows` vocabulary from the
+//! request reaches the window manager as an action of the `windows` vocabulary from the
 //! surface named [`SURFACE`] -- `windows.focus`, `windows.close` and the
 //! rest, exactly what Solium's own taskbar sends -- so `actions.lua` routes
 //! it, an override of the configuration's answers it, and a dock that is a
@@ -56,7 +56,7 @@ use crate::json::Json;
 use crate::state::Solium;
 
 /// The surface name a client's request reaches Lua's `surface` listeners
-/// with: `sol.on("surface", function(surface, action, data) end)` hears
+/// with: `surface-action end)` hears
 /// `surface == "foreign-toplevel"`.
 pub(crate) const SURFACE: &str = "foreign-toplevel";
 
@@ -64,7 +64,7 @@ pub(crate) const SURFACE: &str = "foreign-toplevel";
 /// fullscreen (2) and a window's parent (3).
 const WLR_VERSION: u32 = 3;
 
-/// `config.toplevels`, handed over by `sol.toplevels`.
+/// `config.toplevels`, handed over by `toplevels`.
 /// `script::tests::sol_toplevels_reads_each_protocol_as_a_flag`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -200,7 +200,7 @@ pub(crate) struct Toplevels {
     asked: Vec<(String, Json)>,
     /// Where each window's dock icon is, as a client said with
     /// `set_rectangle`: by window, the surface's rectangle in the
-    /// compositor's space. `sol.windows()` gives it as `icon`.
+    /// compositor's space. the `window` rows gives it as `icon`.
     icons: BTreeMap<u64, Rectangle<i32, Logical>>,
 }
 

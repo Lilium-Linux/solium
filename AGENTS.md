@@ -11,26 +11,33 @@ file is out of date.
    built the way it is.
 2. [docs/architecture.md](docs/architecture.md), "The one idea" and "Design
    rules". They decide whether a change belongs in Rust, in Lua or in QML.
+   For anything between the compositor and the window manager,
+   [docs/window-managers.md](docs/window-managers.md).
 3. [CONTRIBUTING.md](CONTRIBUTING.md): branches, the gate, commits, and the
    rules a change is judged against.
 4. [dev/README.md](dev/README.md): the instruments. Building, running nested,
    driving and recording a run without a keyboard, the checks, the TTY.
 5. For settings, [docs/ricing.md](docs/ricing.md) and
-   [crates/solium/lua/config.lua](crates/solium/lua/config.lua), which holds
+   [crates/solium-lua/lua/config.lua](crates/solium-lua/lua/config.lua), which holds
    every setting with its documentation.
 
 ## The map
 
 | Path | What is there |
 |---|---|
-| `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `script.rs` is the Lua API; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
-| `crates/solium/lua/` | The shipped configuration. `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, and `meta/sol.lua` documents the Lua API |
+| `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `wm/` is the connection to the window manager, and `script/` its commands and settings as the compositor's own types; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
+| `crates/solium/src/river/`, `crates/solium/protocols/` | River's window management protocol as a second way in for a window manager: the interface files, the server code generated from them, and the bridge that speaks Solium's protocol for a window manager written for river |
 | `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
-| `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
+| `crates/solium/effects/` | The shipped effects, each a folder of an `effect.toml` and GLSL (`.frag`, and a geometry's `.vert`): `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
-| `crates/animation/`, `crates/layout/`, `crates/effects/` | Crates with no compositor in them: curves and springs, the window arrangements, and the effect format |
+| `crates/animation/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the effect format, and where a program of Solium's finds its shipped files and the user's |
+| `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); the arithmetic of a tree of boxes (`src/space.rs`), which the compositor solves an `arrange` with and a window manager in Rust may call; a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
+| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, their layouts (the dwindle tree, the scrolling strip, the overview grid) are `layouts/`, with their cases in `specs/`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
+| `sdk/csharp/` | The package a window manager in C# is built on: the protocol's types, generated from the `.proto` by protobuf's own generator, the connection, the desktop kept current, and a whole window manager on it (`Tiny/`). Built with `dotnet`, not by the gate |
+| `examples/bad-apple/` | A window manager in C# on that package, which plays a film by moving and resizing real terminals. Built with `dotnet`, not by the gate |
+| `examples/space/` | A window manager in C# on that package with three desktops in three dimensions (a cube of desks, a carousel, a furnished room in Qt Quick 3D walked through with the windows on its walls), all groups posed by the compositor. Built with `dotnet`, not by the gate |
 | `crates/x11-probe/` | An X11 client that asks the window manager for fullscreen and maximised, from outside |
 | `dev/` | Setup, the gate, the build image, and the nested and TTY harnesses |
 | `docs/` | The documentation site |
@@ -52,7 +59,7 @@ cannot do it itself.
 | check a change, as every pull request must | `dev/gate.sh`, or `SOLIUM_GATE_IMAGE=localhost/solium-build:fc44 dev/gate.sh` in the image |
 | build | `cargo build` |
 | run the tests whose names contain a phrase | `cargo test -p solium <phrase>` (the crate is a binary: there is no `--lib`) |
-| test another crate | `cargo test -p solium-animation`, `-p solium-layout`, `-p solium-effects`, `-p solium-auth` |
+| test another crate | `cargo test -p solium-animation`, `-p solium-lua` (with the shipped layouts' specs), `-p solium-effects`, `-p solium-auth` |
 | check that the Lua configuration loads | `./target/debug/solium --check` |
 | format | `cargo fmt --all` |
 | build the documentation site | `dev/docs.sh` |
@@ -98,20 +105,36 @@ the line. One test can fail under load
 Most review findings are one of these.
 
 - **A feature is configuration.** Rust and C++ provide protocols, data (the
-  Lua API, QML models and properties, events) and generic primitives. What a
-  user sees, such as a bar, an indicator, a frame or an effect, is shipped
-  Lua, QML or GLSL that a user can copy and change. A search for the feature's
-  name in `crates/solium/src` should find nothing.
+  window manager protocol, QML models and properties, events) and generic
+  primitives. What a user sees, such as a bar, an indicator, a frame or an
+  effect, is shipped Lua, QML, TOML or GLSL that a user can copy and change. A
+  search for the feature's name in `crates/solium/src` should find nothing.
+- **The window manager is another process.** The compositor runs none of its
+  code and links none: what the two say to each other is the protocol in
+  `crates/wm-protocol/wit/`, and the compositor names nothing of the Lua
+  window manager (a test refuses it). A new event, command or type is added there,
+  at the end of its record, variant or enum (its place is its number on the
+  wire, which a window manager built before still reads), with its comment,
+  which is its documentation. The compositor never waits
+  for a window manager for more than a frame, and never trusts what one
+  sends: a command it cannot apply is left out and said.
 - **Window frames are QML, always.** Never drawn in Rust, not even as a fast
   path for the default style.
 - **Effects are files.** Blur, glass and genie are folders in
-  `crates/solium/effects/`, written against the public API. The engine gets
-  generic primitives, never a built-in effect.
+  `crates/solium/effects/`, written against the public API: an
+  `effect.toml` and shaders, no code the compositor runs on the CPU. The
+  engine gets generic primitives, never a built-in effect.
 - **Every number is a setting.** A threshold, a timeout or a cap gets a key in
   `config.lua`, with a default, its documentation, and a test that changing it
   changes the behaviour.
 - **A new mode needs no new Rust.** If it does, the transform layer is missing
   something: fix the layer, do not special-case the mode.
+- **Arrangements are configuration.** Tiling, scrolling, the overview grid and
+  any other layout are Lua in `crates/solium-lua/lua/layouts/`, never Rust, in
+  the compositor or in the window manager's runtime: not as a helper, not as a
+  fast path (a test refuses it). What the compositor gives a layout is generic
+  building blocks it runs every frame, such as a tree of boxes it solves and
+  whose seams it drags (`arrange`), which name no arrangement.
 - **Windows answer at once.** Opening, resizing and closing a window respond on
   the next frame, and the application catches up. Waiting for the application
   is an option a layout may set, never the default.

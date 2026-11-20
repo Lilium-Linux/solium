@@ -22,7 +22,7 @@ use crate::scripted::Layer;
 pub(crate) enum Owner {
     /// A client's, over `wlr-layer-shell`: Waybar, a launcher, `swaybg`.
     Client,
-    /// A script's, through `sol.surface`: the wallpaper, Solium's own shell.
+    /// A script's, through `surface`: the wallpaper, Solium's own shell.
     Script,
 }
 

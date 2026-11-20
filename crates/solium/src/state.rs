@@ -116,6 +116,7 @@ mod press;
 mod resize_bridge;
 mod round;
 mod snapshot;
+mod trees;
 mod window_state;
 mod workspaces;
 mod x11;
@@ -271,7 +272,7 @@ pub(crate) struct Solium {
     pub(crate) idle: crate::idle::Idle,
     /// The services hub: notifications today (03 §3.1).
     pub(crate) services: crate::services::Services,
-    /// The children `sol.run{}` started and is reading (#472).
+    /// The children `run{}` started and is reading (#472).
     pub(crate) runs: crate::runs::Runs,
     /// When each of the configuration's timers is next due (#472).
     pub(crate) timers: crate::timers::Timers,
@@ -302,7 +303,7 @@ pub(crate) struct Solium {
 
     /// Where the keyboard goes when the window that has it closes, word by
     /// word until one finds a window: `config.focus.after_close` for the
-    /// mode in charge, handed over with `sol.focus_mode` (#128). With no
+    /// mode in charge, handed over with `focus_mode` (#128). With no
     /// configuration, [`crate::successor::Successor::UNCONFIGURED`]. See
     /// [`Self::settle_focus`].
     pub(crate) after_close: Vec<crate::successor::Successor>,
@@ -318,14 +319,14 @@ pub(crate) struct Solium {
     /// `tests::real_client::reflow_on_close::keyboard_at_open::a_refused_activation_marks_the_window_urgent_until_it_is_focused`.
     pub(crate) urgent: std::collections::HashSet<u64>,
 
-    /// The workspaces Lua last declared with `sol.workspaces`, less what the
+    /// The workspaces Lua last declared with `workspaces`, less what the
     /// compositor does not have; until then `None`, with no `Workspaces`
     /// rows, and every window's `workspace` in `Windows` reads `""`.
     /// `tests::real_client::reflow_on_close::hosted::a_window_row_carries_where_it_lives_and_its_focus`,
     /// `tests::real_client::reflow_on_close::hosted::workspace_rows_count_their_windows_and_say_which_is_shown`.
     pub(crate) workspaces: Option<crate::models::workspaces::Declared>,
 
-    /// Installed, visible applications: `Apps`' rows and `sol.apps()`
+    /// Installed, visible applications: `Apps`' rows and `apps`
     /// (03 §3.2.13). Filled by `crate::apps::scan` when
     /// [`Self::apps_scan_pending`] asks for one; empty until the first scan.
     /// Shared, so a snapshot holds it without a copy, and replaced whole by
@@ -437,7 +438,7 @@ pub(crate) struct Solium {
     /// anything on screen -- see `lock.rs` for why that asymmetry is the
     /// safe one.
     pub(crate) lock: Option<crate::lock::Lock>,
-    /// The lock's state as the scripts were last told it (`sol.on("lock")`),
+    /// The lock's state as the scripts were last told it (`lock-changed`),
     /// so each is told once: `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.
     pub(crate) lock_told: &'static str,
     /// What Solium's own lock draws on each monitor while it holds the lock.
@@ -513,10 +514,16 @@ pub(crate) struct Solium {
     /// device met since start. See `input::devices` (#157).
     pub(crate) input: crate::input::devices::Registry,
 
-    /// The Lua runtime. Modes live in here, not in the compositor.
+    /// The window manager. Modes live in there, not in the compositor.
     pub(crate) scripts: Option<Scripts>,
+    /// What keeps the window manager's socket in the event loop, from the
+    /// backend that has one: [`Self::watch_wm`].
+    pub(crate) wm_watch: Option<crate::wm::Watch>,
+    /// When the window manager last stopped and was started again, for
+    /// `wm.restarts`: [`Self::restart_wm`].
+    pub(crate) wm_restarts: crate::wm::Restarts,
 
-    /// The active mode's name, as a script last reported it with `sol.status`
+    /// The active mode's name, as a script last reported it with `status`
     /// (`input::tests::a_shifted_digit_fires_the_binding_that_names_the_digit`
     /// reads it back). The compositor does not know what modes exist; it keeps
     /// the name and logs it when it changes, draws nothing with it, and hands
@@ -571,15 +578,19 @@ pub(crate) struct Solium {
     pub(crate) touch_time: u32,
     /// Observations queued until touch routing has released the seat lock.
     pub(crate) touch_events: Vec<crate::script::TouchEvent>,
-    /// What became of the `sol.act`s the dispatch being applied ran, told to
+    /// What became of the `act`s the dispatch being applied ran, told to
     /// Lua once all of it is applied (Ruling 15).
     /// `tests::real_client::reflow_on_close::hosted::sol_act_answers_why_it_could_not`.
     pub(crate) settled_attempts: Vec<crate::script::Settled>,
-    /// The actions `sol.act` was asked for that the compositor does not know,
+    /// The windows whose applications took a size of their own since the
+    /// window manager was last told, each with the size, frame included
+    /// (`Self::tell_sized`).
+    pub(crate) took_sizes: Vec<(u64, (i32, i32))>,
+    /// The actions `act` was asked for that the compositor does not know,
     /// each logged the first time only.
     /// `tests::real_client::reflow_on_close::hosted::an_unknown_action_is_warned_of_the_first_time_only`.
     pub(crate) unknown_actions: std::collections::HashSet<String>,
-    /// The monitors and windows `sol.workspaces` named that the compositor
+    /// The monitors and windows `workspaces` named that the compositor
     /// does not have, and the workspaces it declared twice, each logged the
     /// first time only.
     /// `crate::models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
@@ -653,14 +664,14 @@ pub(crate) struct Solium {
     pub(crate) xwm: Option<crate::xwayland::Xwm>,
     /// The X display number XWayland took, for `DISPLAY` in children.
     pub(crate) x11_display: Option<u32>,
-    /// `config.x11`, handed over by `sol.x11`: the `WM_CLASS` names
+    /// The `x11` section: the `WM_CLASS` names
     /// `map_window_request` refuses a tile, decoration or bar entry to
     /// outright (#221). See `xwayland::Settings`.
     pub(crate) x11: crate::xwayland::Settings,
-    /// `config.frames`, handed over by `sol.frames`: who draws a Wayland
+    /// `config.frames`, handed over by `frames`: who draws a Wayland
     /// window's frame, Solium or the application (#462). See `framing`.
     pub(crate) frames: crate::framing::Settings,
-    /// `config.layer_shell`, handed over by `sol.layer_shell`: which of a
+    /// `config.layer_shell`, handed over by `layer_shell`: which of a
     /// client's layer surfaces below the windows take the pointer and touch
     /// (#461). See `layer::Settings`.
     pub(crate) layer_shell: crate::layer::Settings,
@@ -697,7 +708,7 @@ pub(crate) struct Solium {
     /// Where a locked pointer's client would like the cursor left when the
     /// lock ends. Advice, taken at unlock. See `cursor_position_hint`.
     pub(crate) constraint_hint: Option<Point<f64, Logical>>,
-    /// The root surface `sol.release_pointer` took the pointer back from:
+    /// The root surface `release-pointer` took the pointer back from:
     /// none of its constraints is granted again until it is pressed on
     /// (#427). See `state::pointer_hold`.
     pub(crate) pointer_released: Option<WlSurface>,
@@ -878,18 +889,18 @@ pub(crate) struct Solium {
     /// compiled at the top of `render::prepare` (Ruling 7).
     /// `effect::host::tests::an_empty_host_touches_no_gl`.
     pub(crate) effects: crate::effect::host::Host,
-    /// The engine's own keys, `effects.sandbox`, `limits` and `present`, as
-    /// the last `sol.effects` gave them (Ruling 28): what binding a
-    /// `sol.present` geometry reads; and `xray` and `memo` (Rulings F29,
+    /// The engine's own keys, `effects.limits` and `present`, as
+    /// the last `effects` gave them (Ruling 28): what binding a
+    /// `present` geometry reads; and `xray` and `memo` (Rulings F29,
     /// F30), what the xray and the memos read.
-    /// `tests::effects_sandbox_reaches_the_host_and_the_styles_reader`,
+    /// `tests::effects_limits_reach_the_settings`,
     /// `tests::real_client::the_xray_target_is_the_monitor_at_its_scale_times_xray_scale`.
     pub(crate) effect_settings: crate::effect::settings::Settings,
     /// The problems' generation the scripts were last told about, so `settle`
     /// fires `problems` once per change:
     /// `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
     pub(crate) problems_told: u64,
-    /// The rules `sol.effects` gave, taken whole once every one bound
+    /// The rules `effects` gave, taken whole once every one bound
     /// (`tests::a_broken_rule_keeps_the_rules_that_ran`).
     pub(crate) rules: crate::effect::rules::Rules,
     /// Every rule's chain, bound at config load, by its key.
@@ -923,6 +934,10 @@ pub(crate) struct Solium {
     /// `effects.xray.keep_ms` once nothing reads them.
     /// `effect::xray::tests::a_cut_nobody_wants_is_kept_for_keep_ms`.
     pub(crate) xrays: crate::effect::xray::Xrays,
+    /// Every scene a group poses in three dimensions, captured to be drawn
+    /// through its group's matrix as a window is, held between passes and
+    /// given back once nothing poses it (`render::Gpu::warps`).
+    pub(crate) scene_captures: crate::keyed::Scenes,
     /// Every memo: a T2 chain's backdrop-only prefix, run once per monitor,
     /// cut and prefix result and read by every place whose chain begins the
     /// same way (Ruling F30). Held outside the pool's free-list budget,
@@ -985,19 +1000,19 @@ pub(crate) struct Solium {
     retelling_cramped: bool,
 
     /// Whether a `fullscreen` or `maximize` event is being told now, so that
-    /// a change one of its listeners makes -- a `sol.toggle_fullscreen` in a
+    /// a change one of its listeners makes -- a `toggle-fullscreen` in a
     /// `fullscreen` listener -- is made at once and not told again, which
     /// would be told again for ever. See `Solium::transition`.
     /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
     telling_change: bool,
 
-    /// Whether a `sol.monitors{}` was applied since the surfaces were last
+    /// Whether a `monitors{}` was applied since the surfaces were last
     /// placed, so they are placed once the dispatch that applied it is done.
     /// `tests::real_client::a_runtime_primary_change_drops_the_old_primarys_scene`.
     monitors_rearranged: bool,
 
     /// How deep the dispatches running now are: an `apply` inside another, as
-    /// the layout pass a `sol.monitors{}` runs is, or inside a reload or a
+    /// the layout pass a `monitors{}` runs is, or inside a reload or a
     /// hotplug, which places the surfaces itself once every handler it runs
     /// has run.
     /// `tests::real_client::a_binding_that_moves_the_primary_and_its_surface_together_keeps_the_scene`,
@@ -1018,6 +1033,10 @@ pub(crate) struct Solium {
     /// seam it shares with its neighbour, or the width of its column. Only a
     /// floating window is resized directly.
     pub(crate) pending_resize: Option<ResizeRequest>,
+
+    /// The trees of boxes the window manager has arranged, kept solved.
+    /// See [`trees`].
+    trees: trees::Trees,
 
     /// The window whose pane's slot is currently telling the truth about its
     /// size, because an edge drag is still going on. See [`crate::resizing`].
@@ -1139,12 +1158,12 @@ pub(crate) struct Solium {
     pub(crate) pending_drop: Option<(Window, f64, f64)>,
 
     /// Every move drag under way, the pointer's and each finger's: what
-    /// `sol.drag_hold` and `sol.drag_grip` change (#452). See
+    /// `drag-hold` and `drag-grip` change (#452). See
     /// [`crate::input::grab::Moving`].
     pub(crate) moves: Vec<crate::input::grab::Moving>,
 
     /// Every edge or modifier resize under way, the pointer's and each
-    /// finger's: what `sol.resize_hold` changes (#454). See
+    /// finger's: what `resize-hold` changes (#454). See
     /// [`crate::input::resize::Resizing`].
     pub(crate) resizes: Vec<crate::input::resize::Resizing>,
 
@@ -1225,7 +1244,6 @@ struct Gesture {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Memory {
     pub(crate) windows: usize,
-    pub(crate) lua_kb: usize,
     /// Every held memo's bytes (`effect::memo::Memos::held_bytes`).
     pub(crate) memos_kb: u64,
 }
@@ -1266,8 +1284,8 @@ pub(crate) struct ResizeRequest {
     /// read off [`Self::wanted`], which is in the client's space and already
     /// floored at a window's minimum size. See
     /// [`crate::input::resize::dragged_edge`] for the whole of the reasoning,
-    /// including which space this is in and why that has to be the space
-    /// `solium_layout::tree::Tiling::node_box` measures in.
+    /// including which space this is in and why that has to be the space a
+    /// layout measures its seams in.
     pub(crate) edge_at: (f64, f64),
     /// Which edges the pointer has hold of.
     ///
@@ -1359,7 +1377,7 @@ fn size_window(window: &Window, client: Rectangle<i32, Logical>) -> Option<Seria
 
 /// What rules match a window against, gathered only for the keys some rule
 /// reads (`effect::rules::Rules::uses`): the costly ones are empty
-/// otherwise. `sol.windows()` carries every one of them.
+/// otherwise. the `window` rows carry every one of them.
 /// `tests::real_client::sol_windows_carries_every_window_match_key`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct WindowFacts {
@@ -1440,6 +1458,7 @@ impl Solium {
             touch_time: 0,
             touch_events: Vec::new(),
             settled_attempts: Vec::new(),
+            took_sizes: Vec::new(),
             unknown_actions: std::collections::HashSet::new(),
             unknown_in_workspaces: std::collections::HashSet::new(),
             telling_attempts: false,
@@ -1553,7 +1572,13 @@ impl Solium {
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
             background_effect: crate::background_effect::BackgroundEffect::new(&display_handle),
-            ext_workspaces: crate::ext_workspace::ExtWorkspaces::new(&display_handle),
+            ext_workspaces: {
+                // River's window management globals, beside the other
+                // window-management protocol: a window manager written for
+                // river binds them (`crate::river`).
+                crate::river::dispatch::create_globals(&display_handle);
+                crate::ext_workspace::ExtWorkspaces::new(&display_handle)
+            },
             toplevels: crate::toplevels::Toplevels::new(&display_handle),
             output_management: crate::output_management::OutputManagement::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
@@ -1568,6 +1593,8 @@ impl Solium {
             profile: Profile::from_env(),
             input: crate::input::devices::Registry::default(),
             scripts: None,
+            wm_watch: None,
+            wm_restarts: crate::wm::Restarts::default(),
             status: String::new(),
             script_grab: false,
             keys_forwarded: std::collections::HashSet::new(),
@@ -1592,6 +1619,7 @@ impl Solium {
             pool: crate::pool::Pool::new(0),
             store: crate::effect::store::Store::default(),
             xrays: crate::effect::xray::Xrays::default(),
+            scene_captures: crate::keyed::Scenes::default(),
             memos: crate::effect::memo::Memos::default(),
             warm: {
                 let mut warm = crate::warm::Warm::default();
@@ -1608,6 +1636,7 @@ impl Solium {
             next_drag: 0,
             drags_told: Vec::new(),
             pending_resize: None,
+            trees: trees::Trees::default(),
             retelling_cramped: false,
             telling_change: false,
             monitors_rearranged: false,
@@ -1923,12 +1952,12 @@ impl Solium {
     /// #133 made `Pane::placed` the tile a client is held inside as well, and
     /// a stale one of those is a window cut down to where it used to be — so
     /// every way out of a tile clears it now, and `modes.use` is taught to say
-    /// so with `sol.unplace`.
+    /// so with `unplace`.
     ///
     /// **Every way out but a close, and that one is deliberate (#128).** A
     /// layout's `closing` handler takes the window out of its tree and nothing
     /// clears the field, because the tile is what cuts the window for the
-    /// whole of its fade; and a `sol.unplace` that arrives during the fade
+    /// whole of its fade; and a `unplace` that arrives during the fade
     /// waits until the window is back. `Pane::placed` has the reasons and
     /// `Pane::let_go` the waiting, and
     /// `a_closed_window_is_cut_to_the_tile_it_left_for_the_whole_fade` fails
@@ -2000,7 +2029,7 @@ impl Solium {
     ///
     /// **A minimized window put away is drawn at no opacity** (#30), once
     /// the present that took it away has landed: so every reader here -- the
-    /// renderer's cull, `on_stage` and the focus questions, `sol.windows()`'s
+    /// renderer's cull, `on_stage` and the focus questions, the `window` rows'
     /// `drawn` -- agrees it is not on screen. See [`Self::minimized_away`].
     pub(crate) fn drawn_at(
         &self,
@@ -2149,7 +2178,7 @@ impl Solium {
     }
 
     /// What a pane's frame is told its application is, as `appId`: its
-    /// client's, as `sol.windows()` gives it (an X11 window's class), the one
+    /// client's, as the `window` rows give it (an X11 window's class), the one
     /// it had for a window that went and is fading, so its bar fades with the
     /// icon it showed, and none for a window whose application has not
     /// arrived. `decoration::tests::a_layer_is_told_the_app_id_and_told_again_when_it_changes`,
@@ -2195,7 +2224,7 @@ impl Solium {
     /// (`effect::rules::Rules::uses`), left empty otherwise. `focused` is what
     /// the frame shows ([`Self::looks_focused`]), `fullscreen` the state the
     /// compositor last told the client, and `style` [`style_fact`]'s, with the
-    /// monitor judged as `sol.windows()` judges it.
+    /// monitor judged as the `window` rows judge it.
     /// `tests::real_client::a_rule_on_focused_follows_the_keyboard`,
     /// `tests::real_client::a_rule_on_fullscreen_applies_from_the_configure_that_sets_it`,
     /// `tests::real_client::a_rule_for_another_app_leaves_a_window_with_an_empty_plan`.
@@ -2386,6 +2415,16 @@ impl Solium {
         self.dnd_icon.clone()
     }
 
+    /// The bridge of the window manager running now, when it is one written
+    /// for river.
+    pub(crate) fn river_bridge(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::RefCell<crate::river::Bridge>>> {
+        self.scripts
+            .as_ref()
+            .and_then(|scripts| scripts.link.river())
+    }
+
     /// Retire transforms that have landed, and say whether anything still
     /// needs the next frame.
     ///
@@ -2433,12 +2472,14 @@ impl Solium {
                 pane.set_shrinking(None);
             }
         }
-        // And one a fullscreen or maximise change is holding at its new
-        // rectangle is let go once its client answers, or has had long enough
-        // to. Until then the frames keep coming, or a client that never
-        // answers would be held until something else drew one.
+        // And one a placement, or a fullscreen or maximise change, is
+        // holding at its new rectangle is let go once its client answers, or
+        // has had long enough to. Until then the frames keep coming, or a
+        // client that never answers would be held until something else drew
+        // one.
         // `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
         animating |= self.settle_answering(now);
+        self.tell_sized();
         // And a glide that has landed with its client's picture still held
         // against the edges it pinned, until `resize.patience` lets it go
         // (#233): that frame has to be drawn too.
@@ -2473,11 +2514,6 @@ impl Solium {
         if self.rebind {
             self.rebind_effects();
         }
-        // An effect whose Lua its budget stopped this frame is loaded again
-        // from its unchanged folder, after the frame and never in `prepare`
-        // (Ruling 4); nothing is read unless one was stopped:
-        // `tests::settle_rebuilds_an_effect_its_budget_stopped`.
-        self.effects.revive();
         // The overlay hears about a changed problem once, after the frame
         // that found it:
         // `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.
@@ -2498,7 +2534,7 @@ impl Solium {
                     self.toggle_maximize(&window);
                 }
             }
-            // The one minimize there is, `sol.minimize`'s and the
+            // The one minimize there is, `minimize`'s and the
             // application's own button's, so the configuration's `minimize`
             // listener plays it whichever asked.
             Action::Minimize => self.minimize(pane),
@@ -2557,16 +2593,13 @@ impl Solium {
     }
 
     /// What `memory_report` counts that the compositor holds itself: the
-    /// windows, the Lua heap and the held memos (Ruling F30: outside the
-    /// pool's free-list budget, so counted here, as `memos_kb`).
+    /// windows and the held memos (Ruling F30: outside the pool's free-list
+    /// budget, so counted here, as `memos_kb`). The window manager's Lua is
+    /// a process of its own, with a resident size of its own.
     /// `tests::real_client::a_held_memo_is_in_the_memory_report`.
     pub(crate) fn memory(&self) -> Memory {
         Memory {
             windows: self.panes.len(),
-            lua_kb: self
-                .scripts
-                .as_ref()
-                .map_or(0, |scripts| scripts.used_memory() / 1024),
             memos_kb: self.memos.held_bytes() / 1024,
         }
     }
@@ -2575,8 +2608,8 @@ impl Solium {
     ///
     /// Enabled with `SOLIUM_MEMDIAG=1`. A leak hunt needs to know *which*
     /// number is growing: resident memory alone cannot tell a forgotten
-    /// decoration from a Lua heap that never shrinks from an allocator that
-    /// simply keeps what it has.
+    /// decoration from an allocator that simply keeps what it has. A Lua
+    /// heap that never shrinks is the window manager's, in its own process.
     ///
     /// **`decorations` is no longer among them, and not because it was
     /// redundant.** It counted `Decorations::frames`, and its whole value was
@@ -2619,7 +2652,6 @@ impl Solium {
             pointer = format!("{pointer_at:?}"),
             focused_inside = format!("{focused_inside:?}"),
             windows = memory.windows,
-            lua_kb = memory.lua_kb,
             memos_kb = memory.memos_kb,
             rss_kb,
             "MEMDIAG"

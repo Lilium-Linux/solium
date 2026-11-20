@@ -1,5 +1,5 @@
 //! A hosted QML scene: one file the compositor draws. Every surface a script
-//! declares with `sol.surface` is one — the wallpaper, the tweaks panel and a
+//! declares with `surface` is one — the wallpaper, the tweaks panel and a
 //! hosted shell among them — and so is the scene a launched window shows
 //! until its application draws.
 //!
@@ -166,7 +166,7 @@ pub(crate) struct ShellSurface {
     /// [`Self::failing`] says on the software path. The GPU path keeps its
     /// own, in [`Gpu`].
     failing: bool,
-    /// The monitor the scene is hosted on, for a `sol.surface` instance; `None`
+    /// The monitor the scene is hosted on, for a `surface` instance; `None`
     /// for the loading window's scene.
     /// `scripted::tests::a_surface_instance_is_hosted_on_its_monitor`.
     monitor: Option<String>,

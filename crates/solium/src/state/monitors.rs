@@ -67,7 +67,7 @@ impl Solium {
     /// The monitor the user is working on.
     ///
     /// **The one the pointer is on.** One rule, and it needs no state: a new
-    /// window opens where you are looking, `sol.monitor()` means the screen in
+    /// window opens where you are looking, the `monitors` change means the screen in
     /// front of you, and there is nothing to get out of step.
     ///
     /// The alternative — the focused window's monitor — sounds more careful and
@@ -520,7 +520,7 @@ impl Solium {
     /// The monitors changed size without one coming or going, as the nested
     /// window's do when it is resized: everything a hotplug does, the
     /// scripts' `monitors` event among it, since a configuration that placed
-    /// a surface on a rectangle it read from `sol.monitors()` would otherwise
+    /// a surface on a rectangle it read from `monitors` would otherwise
     /// keep the old one, off the screen (#376). Places them again, and gives
     /// every surface an instance on each monitor it now covers.
     /// `tests::a_resized_monitor_tells_the_scripts_its_new_size`,
@@ -537,7 +537,7 @@ impl Solium {
         self.settle_power();
         self.rescue_offscreen();
         // Held as one dispatch, as a reload holds its handlers, so a
-        // `sol.monitors{}` in a `monitors` handler places no surface before
+        // `monitors{}` in a `monitors` handler places no surface before
         // the `layout` handlers have run too: they are placed once, below.
         // `a_hotplug_whose_handler_rearranges_the_monitors_places_the_surfaces_once`.
         self.dispatching += 1;
@@ -552,7 +552,7 @@ impl Solium {
         // And the native lock's, if it is held: a monitor that arrived shows
         // its scene, or the fallback, from its first frame.
         self.sync_lock_scenes();
-        // And what the held handlers' `sol.act`s came to, which no dispatch
+        // And what the held handlers' `act`s came to, which no dispatch
         // inside the hold could tell
         // (`a_sol_act_in_a_hotplugs_handler_hears_done_in_the_hotplugs_dispatch`).
         self.tell_settled_attempts();

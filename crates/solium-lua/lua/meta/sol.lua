@@ -1,0 +1,2223 @@
+---@meta sol
+
+-- The `sol` table, described for lua-language-server.
+--
+-- This file is never run. The compositor builds `sol` itself before it loads
+-- the configuration (`build_api` in `crates/solium/src/script.rs`); this is a
+-- description of what that table holds, so an editor can complete it and check
+-- the arguments you pass. Point lua-language-server's `workspace.library` at
+-- the folder this file is in; docs/ricing.md says how.
+--
+-- It is also the source of the Lua API page on the documentation site, and a
+-- test (`sol_lua_documents_exactly_the_api_the_compositor_registers`) fails
+-- when the compositor registers a name this file does not describe, or this
+-- file describes a name the compositor does not have.
+--
+-- Most calls queue a command and return nothing. The commands a handler queues
+-- are applied together when it returns, in the order it queued them, and every
+-- animated one uses the timing `sol.animate` last set in that handler.
+
+-- Shapes ---------------------------------------------------------------------
+
+---A rectangle in the one global coordinate space every monitor is a window
+---onto, in logical pixels.
+---@class sol.Rect
+---@field x number
+---@field y number
+---@field w number
+---@field h number
+
+---A raw finger event. Down runs before delivery; lock-screen input is never exposed.
+---@class sol.TouchEvent
+---@field kind "down"|"motion"|"up"|"cancel"
+---@field slot integer Finger identifier until up or cancel.
+---@field x number Last global logical x coordinate, including for up/cancel.
+---@field y number Last global logical y coordinate, including for up/cancel.
+---@field output string Connector containing the original down, empty outside outputs.
+---@field target "client"|"frame"|"border"|"scene"|"script"|"blocked" Original down hit region.
+---@field window? integer Window under the original down; absent over hosted scenes/layers.
+---@field control boolean Whether the frame's QML claims the down.
+---@field edges? "top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right"
+---@field time integer Latest backend timestamp in milliseconds, wrapping at 32 bits.
+---@field t number The event's own time in seconds, monotonic, from the kernel's microsecond stamp; differences of `t` are exact where `time`'s are coarse.
+---@field vx number The finger's velocity along x, in logical pixels a second: a least-squares fit over the last `input.touchscreen.velocity_window_ms` (80 by default). Near zero for a finger that rested before it lifted.
+---@field vy number The same along y.
+
+---@class sol.TouchOptions
+---@field action "capture"|"move"|"resize"
+---@field window? integer Required for move/resize.
+---@field edges? "top"|"bottom"|"left"|"right"|"top_left"|"top_right"|"bottom_left"|"bottom_right" Required for resize.
+
+
+---A size in logical pixels.
+---@class sol.Size
+---@field w number
+---@field h number
+
+---A point in the global coordinate space.
+---@class sol.Point
+---@field x number
+---@field y number
+
+---One row of `sol.windows()`: a window a layout may arrange, as it was at the
+---moment the handler was called. `x`, `y`, `w` and `h` are where the window
+---lives, frame included, and a titlebar its frame has grown (`growTop`) with it.
+---@class sol.Window: sol.Rect
+---@field id integer The window's id, which every other call takes.
+---@field title string The window's title; the program's name until its application arrives.
+---@field focused boolean Whether it has the keyboard. While an item of a hosted scene holds the keyboard (`Solium.keyboard.wants`), the window it was taken from still reads `true`, is drawn focused, and gets the keyboard back when the scene lets go.
+---@field monitor string The name of the monitor it is on.
+---@field modal boolean Whether it says it is a modal dialog.
+---@field parent? integer|false The window it belongs to; `false` when the client named a parent that is not on screen, absent when it named none.
+---@field leaving boolean Whether it is closing: between `closing` and `close` or `refused`.
+---@field minimized boolean Whether it is minimized (`sol.minimize`, or its application's own button): still mapped and alive, but drawn only while a present on it plays out or `sol.show_minimized` shows it, under no pointer or finger, and never holding the keyboard. Between `minimize` and `unminimize`.
+---@field above boolean Whether it is kept above every window that is not (`sol.keep_above`). Kept across a reload; gone with the window.
+---@field icon? { x: number, y: number, w: number, h: number } Where a dock that is its own program shows this window, in the compositor's space, as it said through `wlr-foreign-toplevel-management`'s `set_rectangle` (#50): what a minimize can fly to. Absent until one says.
+---@field app_id string The application's own name: a Wayland `app_id`, an X11 `WM_CLASS` class. Empty until the application arrives.
+---@field min? sol.Size The smallest the application says it can be, frame included; absent when it set no limit.
+---@field max? sol.Size The largest the application says it can be, frame included; absent when it set no limit.
+---@field cramped boolean Whether the layout last placed it with `cramped = true`.
+---@field shown boolean Whether its application has shown its first frame yet.
+---@field fullscreen boolean Whether the compositor last told it to be fullscreen.
+---@field maximized boolean Whether the compositor last told it to be maximised: `sol.toggle_maximize`, `super+shift+m`, the frame's button, or its client's own request, xdg or X11. A layout taking over lets such a window out of it first (`modes.lua`), so it goes into its tile; a client's own maximise never lifts a window out of a tile, and a tile given to a window its client maximised takes it out of the maximise.
+---@field style string The pane style it is framed in, or `"none"` when it is drawn bare: fullscreen, or under the style `"none"`.
+---@field client_side boolean Whether its application draws its own titlebar and its frame is the style's client-side one (`frames` in config.lua, #462): what a rule's `client_side` matches.
+---@field insets {top: integer, right: integer, bottom: integer, left: integer} What its frame takes of `x`, `y`, `w` and `h` on each side right now, a titlebar the frame has grown (`growTop`) included: the client is that rectangle less these. All 0 for a window drawn bare.
+---@field x11_type? string Its X11 `_NET_WM_WINDOW_TYPE`, lower case (`"normal"`, `"dialog"`, `"utility"`, `"toolbar"`, `"menu"`, `"dropdown-menu"`, `"popup-menu"`, `"tooltip"`, `"notification"`, `"splash"`); `"normal"` for an X11 window with no type of its own, same as EWMH's own default, and absent for a Wayland window, which has no such property to ask.
+---@field accepts_input boolean Whether the window may ever be given the keyboard: an X11 client's own `WM_HINTS.input`, or `true` for a Wayland window, which has nothing equivalent to decline with. Not what decides whether a window reaches this list at all (#221) -- an ICCCM 'Globally Active' application can set this `false` and still be an ordinary, shown window -- so a row here can read `false`; it exists for a window rule to act on.
+---@field class? string Its X11 `WM_CLASS` class, or absent for a Wayland window, which has no such property. `config.x11.hidden` matches against this and `instance` to decide whether the window was shown at all (#221).
+---@field instance? string Its X11 `WM_CLASS` instance, or absent for a Wayland window. See `class`.
+---@field content_type "none"|"photo"|"video"|"game" What the window says it is showing, through `wp_content_type_v1`, as it last committed it; `"none"` for a window that never said, which includes every X11 window. The compositor decides nothing with it: it is for a script deciding tearing, a refresh rate or keeping the screen awake for the one window that is a game or a film.
+---@field pid? integer The process the window belongs to: a Wayland window's connection, as the kernel reports it; an X11 window's own X connection, as Xwayland reports it, or the `_NET_WM_PID` it set -- never Xwayland's. Absent when it cannot be told, and for a window whose application has not arrived.
+
+---One row of `sol.apps()`: an installed, visible application.
+---@class sol.App
+---@field id string The desktop file id, such as `"org.mozilla.firefox"`.
+---@field name string Its localised name.
+---@field generic_name string Its localised generic name (`"Web Browser"`); empty when it named none.
+---@field icon string A theme icon name, or an absolute path when `Icon=` gave one.
+---@field categories string[] Its `Categories=`, split on `;`.
+
+---One row of `sol.monitors()`. `x`, `y`, `w` and `h` are the work area: the
+---monitor less what layer-shell bars and hosted surfaces reserve.
+---@class sol.Monitor: sol.Rect
+---@field name string The connector name, such as `"DP-1"`.
+---@field scale number Device pixels per logical pixel.
+---@field focused boolean Whether the pointer is on it.
+---@field primary boolean Whether it is the primary monitor.
+---@field transform string Its rotation, as Smithay names it in lower case: `"normal"`, `"_90"`, `"_180"`, `"_270"`, `"flipped"`, `"flipped90"`, `"flipped180"` or `"flipped270"`. Not the spelling `sol.monitors{ ... }` takes.
+---@field power "on"|"off" Whether its display is on. A monitor that is off keeps its place, its work area and its windows.
+---@field whole sol.Rect The whole monitor, which is what a wallpaper or a fullscreen window covers.
+
+---How one monitor should be driven and where it goes, for `sol.monitors{ ... }`.
+---Every key but `name` is optional. `config.lua`'s `monitors` section explains
+---each one at length.
+---@class sol.MonitorPlacement
+---@field name string The connector name. `solium --probe` lists the ones the machine has.
+---@field x? integer The top-left corner, in the global space.
+---@field y? integer The top-left corner, in the global space.
+---@field right_of? string Beside the monitor with this name.
+---@field left_of? string Beside the monitor with this name.
+---@field above? string Beside the monitor with this name.
+---@field below? string Beside the monitor with this name.
+---@field align? "start"|"centre"|"end" Which way the other axis lines up when placed beside a monitor of another size. `"centre"` is the default.
+---@field mode? string|{ w: integer, h: integer, refresh?: integer } `"2560x1440@165"`, `"2560x1440"`, or one of `"best"` (the default), `"preferred"` and `"widest"`.
+---@field vrr? boolean Variable refresh rate, where the monitor and the driver offer it.
+---@field transform? string|integer Anticlockwise: `"normal"`, `"90"`, `"180"`, `"270"`, `"flipped"`, `"flipped-90"`, `"flipped-180"` or `"flipped-270"`. A number is read as degrees.
+---@field enabled? boolean `false` does not drive the monitor at all.
+---@field primary? boolean The monitor things belonging to one screen go on.
+---@field scale? number|"auto" Device pixels per logical pixel, from 0.5 to 8. Left out, it is worked out from the panel's size.
+
+---The keyboard as `sol.keyboard()` answers.
+---@class sol.KeyboardState
+---@field layouts string[] The layout names, in order.
+---@field active integer Which of them is live, counting from 1.
+---@field layout_name string The live layout's name, such as `"Russian"`; `""` before the keymap is known. Not `layout`, which `sol.keyboard{ ... }` takes as the xkb names to compile, so a table read here can be handed back.
+---@field layout_short string The live layout's short name, such as `"RU"`: the `shortDescription` xkb's rules give it, upper-cased, or its first two letters.
+---@field caps boolean Whether Caps Lock is on.
+---@field num boolean Whether Num Lock is on.
+---@field repeat_rate integer Repeats per second.
+---@field repeat_delay integer Milliseconds a key is held before it repeats.
+---@field shortcuts_inhibited boolean Whether the focused window currently holds shortcuts.
+---@field shortcuts_owner? integer Owning window ID, absent when shortcuts are available.
+
+---The focused text field, as `sol.text_input()` answers: the window it is
+---in, whether that window is framed, and its caret in the global space. The
+---four numbers are there only once the application has said where its caret
+---is, through `text-input-v3`; an application that never does has a field and
+---no caret.
+---@class sol.TextField
+---@field window integer The window's id, as `sol.windows()` gives it.
+---@field framed boolean Whether the window is drawn in a frame of the compositor's, or will be once its frame is built, so its pane style's layers are drawn with it. False for a window drawn bare: fullscreen, or every window under the pane style `"none"`.
+---@field x? number The caret's rectangle, where it is drawn: its window's place and scale on screen are in it, presentation transforms included.
+---@field y? number
+---@field w? number
+---@field h? number
+
+---One row of `sol.problems()`: something broken in an effect, a rule or the
+---configuration, and where.
+---@class sol.Problem
+---@field effect string The effect's name, `"config"` for the configuration, `"rules"` for a rule of `sol.effects`, `"settings"` for the engine's own keys beside them, or `"present:<name>"` for a `sol.present` deform's params, at its effect's file and line when the effect is what failed.
+---@field file string The file the problem is in.
+---@field line? integer Its line in that file, where one is known.
+---@field column? integer Its column, where the compiler gave one.
+---@field message string What is wrong.
+---@field severity "error"|"warning" An error keeps the effect or the configuration from running as written; a warning does not.
+
+---What `sol.keyboard{ ... }` may change. Every key is optional and one left
+---out is left as it is. The first five are xkb names; setting any of them
+---compiles a new keymap, and one left blank falls back to the matching
+---`XKB_DEFAULT_*` environment variable.
+---@class sol.KeyboardOptions
+---@field rules? string
+---@field model? string
+---@field layout? string A comma-separated list, such as `"us,ua"`.
+---@field variant? string One per layout, in the same order.
+---@field options? string xkb options, comma separated, such as `"grp:alt_shift_toggle"`.
+---@field repeat_rate? integer Repeats per second.
+---@field repeat_delay? integer Milliseconds before repeating starts.
+---@field active? integer Which layout is live, counting from 1.
+---@field caps? boolean Caps Lock on or off. Done by pressing the keymap's own Caps Lock key inside the compositor, so the window with the keyboard is told and the layout stays; a keymap with no such key cannot have it, and the log says so.
+---@field num? boolean Num Lock on or off, the same way.
+
+---A QML scene for `sol.surface` to draw.
+---@class sol.SurfaceOptions
+---@field scene string A file name looked up in `~/.config/solium/qml` and then in the shipped QML, or a path (absolute, or starting with `~/`).
+---@field layer? sol.Layer Which layer it is drawn in. `"background"` is the default.
+---@field on? "primary"|"every-monitor"|string|sol.Rect `"every-monitor"` (the default) draws one instance per monitor, filling it; `"primary"` one on the primary monitor; a monitor's name one there; a rect one at that rect.
+---@field properties? table Values for the scene's properties, handed over as JSON: strings, numbers, booleans and tables of those, nested at most 64 deep and 65 536 values in all, a table counted once for each place it is in. A function, userdata or non-finite number is left out; a table nested deeper or holding more, or one that contains itself, is an error.
+---@field interactive? boolean Whether the pointer reaches it at all, so a `Grab` in a scene it does not reach holds nothing, and one it held when it is declared so is dismissed; nor does such a scene hold the keyboard. Where it does, the scene's items decide which points are its (`Solium.input`), and the rest go to what is under it. An interactive scene sends actions with `Solium.send(action, data)`, and `sol.on("surface", ...)` hears them.
+---@field reserve? { top?: integer, right?: integer, bottom?: integer, left?: integer } Logical pixels taken out of the work area on those edges of every monitor the surface is on, whatever its size or placement; never negative. A scene's own `Solium.surface.reserve.<edge>` wins for an edge it sets. A change re-flows the windows once.
+---@field outside_click? "swallow"|"pass"|table<string, "swallow"|"pass"> What a press outside an open `Grab` of the scene does once it has dismissed it: swallowed with its release (the default), or passed on to what is under it. A table names grabs, with `default` for the rest. Any other value fails the load.
+---@field keyboard? { bindings?: "except_claimed"|"all"|"none" } While an item of the scene holds the keyboard (`Solium.keyboard.wants`): `"except_claimed"` (the default) keeps every binding but the keys the holding item claims (`Solium.keyboard.claims`), `"all"` keeps every binding, and `"none"` gives the scene every key but the Ctrl+Alt escapes. Any other value fails the load.
+
+---@alias sol.Layer
+---| "background" # Under everything, including client background surfaces.
+---| "bottom" # Above the background, below windows.
+---| "top" # Above windows, below client top surfaces, and below a fullscreen window that covers the top layer.
+---| "overlay" # Above client top surfaces, below client overlay ones and the pointer.
+
+---A curve by name, or four numbers: the control points of a cubic bezier, as
+---CSS writes `cubic-bezier(x1, y1, x2, y2)`. An unknown name is logged and the
+---default kept.
+---@alias sol.Easing
+---| "linear"
+---| "outCubic"
+---| "outBack"
+---| "inOutQuad"
+---| "inOutCubic"
+---| "spring"
+---| sol.SpringEasing
+---| number[]
+
+---Physical spring parameters. Omitted fields use the engine's defaults.
+---Mass must be at least machine epsilon; stiffness is positive, damping is
+---nonnegative, epsilon is between zero and one, and all values must be finite.
+---@class sol.SpringEasing
+---@field spring { stiffness?: number, damping?: number, mass?: number, initial_velocity?: number, epsilon?: number } Initial velocity is signed remaining-distance fractions per second. Springs use their physical settling time, ignoring duration.
+
+---How long an animation takes and how it moves.
+---@class sol.Motion
+---@field duration? integer Milliseconds.
+---@field easing? sol.Easing
+
+---What moved the keyboard, as the `"focus"` event tells it and
+---`sol.focus_source()` answers. A `sol.focus` is told with what its handler
+---was answering; inside `sol.focus_direction` or `sol.move_direction` it is
+---`"direction"` or `"move"`, whatever called those.
+---@alias sol.FocusSource
+---| "binding" # A key binding's handler: a workspace key, the overview's keys.
+---| "direction" # A `sol.focus_direction`'s listeners: `super+arrows`.
+---| "move" # A `sol.move_direction`'s listeners: `super+shift+arrows`.
+---| "click" # A press on a window, or a `"click"` listener while a script holds input.
+---| "scroll" # A `"scroll"` listener: the wheel with Super held.
+---| "drop" # A `"drop"` listener: a dragged window let go.
+---| "touch" # A touch on a window.
+---| "hover" # The pointer onto a window, with focus following the mouse.
+---| "surface" # A hosted scene's action: a bar's window chip, the dock, a search.
+---| "open" # A window opening, or an `"open"` listener.
+---| "activate" # An application bringing its window forward, or an `"activate"` listener.
+---| "settle" # The window the keyboard was on went, and another took over: as a close lands, the one `config.focus.after_close` chose.
+---| "script" # `sol.focus` from anything else.
+
+---A warp: where on a window the pointer goes, and how its picture flies
+---there. The pointer itself is there at once.
+---@class sol.Warp
+---@field to? "center"|{ x: number, y: number } Where on the window, as a share of its width and height. `"center"` by default. Not for a point, which is already a place.
+---@field motion? sol.Motion How the picture flies. Left out, it is there at once; a duration left out is 220 ms, an easing `"outCubic"`.
+---@field interrupt? "pointer"|"picture" Where the mouse carries on from if it moves before the picture lands: `"pointer"`, where the warp put it (the default), or `"picture"`, where the picture is drawn.
+
+---Where and how `sol.present` draws a window. A key left out says nothing: with
+---no rect the window is drawn at its own, with no opacity it is opaque, with no
+---client_opacity its content is, and with no rotation it is flat.
+---@class sol.PresentOptions
+---@field x? number The rect it is drawn at: all four of `x`, `y`, `w` and `h`, or none.
+---@field y? number
+---@field w? number
+---@field h? number
+---@field opacity? number From 0 to 1. The whole pane: its client and its style's layers.
+---@field client_opacity? number From 0 to 1, anything else an error. The client's content alone, inside its pane: the style's layers keep `opacity`, so a layer `behind` the client (an app's icon) shows through as it fades while the pane goes on moving. Hit testing follows `opacity` alone.
+---@field rotate_x? number Degrees about the horizontal axis.
+---@field rotate_y? number Degrees about the vertical axis.
+---@field rotate_z? number Degrees in the plane of the screen.
+---@field perspective? number The viewer's distance in pixels. Without it a rotation is orthographic.
+---@field pivot_x? number What the rotation turns about, as a share of the width. 0.5 is the default; outside 0..1 is kept.
+---@field pivot_y? number What the rotation turns about, as a share of the height. 0.5 is the default; outside 0..1 is kept.
+---@field z? number Draw order and nothing else: higher is in front, equal keeps the stacking order, 0 is the default. Input still follows the rect.
+---@field deform? sol.Deform A deformation of the window's mesh.
+---@field motion? sol.PresentMotion A timing of their own for the centre, the size, the opacity and the client's opacity; the batch's for what it leaves out.
+
+---A timing per property of a present, each `{ duration, easing }` as
+---`sol.animate` takes it. A property left out moves on the batch's timing, and
+---the present is done when the last of them is. Anything else under `motion`
+---is an error.
+---@class sol.PresentMotion
+---@field x? sol.Motion The drawn rect's centre, across.
+---@field y? sol.Motion The drawn rect's centre, down.
+---@field size? sol.Motion Its width and height.
+---@field opacity? sol.Motion Its opacity.
+---@field client_opacity? sol.Motion Its client's opacity inside it.
+
+---A deformation, named by effect. Its other keys are that effect's params,
+---bound and checked by the effect (an unknown one, or one of the wrong kind,
+---is named by `sol.problems()` and the window drawn undeformed); numbers,
+---booleans and four numbers, at most `effects.limits.params` numbers once
+---packed (a word param cannot blend between two presents and is refused).
+---@class sol.Deform
+---@field effect string An effect folder's name, `"genie"` shipped; your copy in `~/.config/solium/effects/` is used instead. It must have a `mesh`. One nobody has is named by `sol.problems()`, and the window is drawn by `failed`.
+---@field to { window: integer }|{ surface: string }|sol.Rect What the window is pulled into or drawn out of. A window or a surface is followed as it moves; a rect stays where it is. A surface on several monitors is the one on the window's own monitor.
+---@field axis? "auto"|"down"|"up"|"left"|"right" Which edge leads, the mesh's `t.axis`. `"auto"`, also when it is left out: the side the target lies on, picked when the window starts to move and kept for the flight.
+---@field progress? number How far into `to`, the mesh's `t.progress`: 1, all the way, when it is left out, which is what one animates towards; 0 is the window where it is. `t.direction` is -1 for a present.
+---@field seed? number A number in [0, 1) for the mesh's `t.seed`; 0 when it is left out.
+---@field failed? "flat"|"hide" This present's own: what it draws when its mesh is refused or its folder is missing, the window undeformed or nothing of it; `effects.present.failed`'s when it is left out.
+---@field on_reload? "flat"|"keep" This present's own: when a reload finds its folder changed while it plays, drawn flat for the rest of the move, or on the version it began with; a reload that leaves the folder as it was changes nothing. `effects.present.on_reload`'s when it is left out.
+---@field spread? number The genie's param: how much of the window is in motion at once. 0 is rigid.
+
+---Where `sol.place` puts a window.
+---@class sol.PlaceOptions: sol.Rect
+---@field tile? boolean `true` (the default) makes the rect a tile the window is held inside; `false` places it without tiling it. A window placed smaller than its tile, and one cramped in it, are a tree's: `sol.arrange`.
+
+---One box of a tree `sol.arrange` hands over, in a list whose first entry is
+---the root. A box is a split (`split`), a box whose children are each where
+---their own `at` puts them (`free = true`), a window (`window`), or room that
+---holds nothing (none of the three).
+---@class sol.Box
+---@field parent? integer The place of the box it is in, in the same list, counted from 1; nil for the root.
+---@field id? integer Your own name for it, which the `"seam"` event says back.
+---@field split? { axis: "x"|"y", gap?: number, resizable?: boolean } Its children side by side along `axis` ("x" shares the width, "y" the height), `gap` pixels apart (0 by default); with `resizable` (the default), each gap is a seam a window's dragged edge moves.
+---@field free? boolean Its children each where their own `at` puts them.
+---@field window? integer A window, by id, filling the box.
+---@field share? number Its share of a split's room, against its siblings' (1 by default). Each keeps at least a twentieth.
+---@field at? sol.Rect Where it is inside a `free` box.
+---@field min? { w: number, h: number } The least room it takes, frame included, besides what a window's application asks for.
+---@field client_min? boolean For a window: its application's own least size counts, so a split gives it that room while its siblings have room to spare, and a window given less is `cramped`. Default `false`.
+---@field client_max? boolean For a window: its application's own largest size counts, so a window that will not grow to its box is drawn at that size in the box's middle. Default `false`.
+
+---Where `sol.solve` says a window of a tree comes out.
+---@class sol.Solved: sol.Rect
+---@field id integer The window.
+---@field cramped boolean Whether its box is smaller than its application's least size.
+---@field tile sol.Rect Its box: the rect itself, or larger when the window will not grow to it.
+
+---What a selection holds, for `sol.group`. Every key is optional.
+---@class sol.Selection
+---@field windows? integer[] Windows, by id.
+---@field surfaces? string[] Surfaces, by the name `sol.surface` gave them.
+---@field monitors? string[] Everything drawn on these monitors.
+---@field monitor? string Which instance of each surface above: the one on this monitor.
+---@field parent? string The group this one is in: its members are carried by this group's shift and then by the parent's, as far up as there are parents.
+
+---What `sol.present_group` does to a selection. `x` and `y` are a
+---displacement, not a destination, and the rest compose with each member's own
+---transform.
+---@class sol.Shift
+---@field x? number
+---@field y? number
+---@field opacity? number
+---@field rotate_x? number
+---@field rotate_y? number
+---@field rotate_z? number
+---@field perspective? number
+---@field pose? sol.Pose The selection posed in three dimensions about one origin, as one thing rather than each member about its own centre.
+---@field backface? boolean Hide a member seen from behind: it is neither drawn nor takes the pointer.
+
+---A pose in three dimensions, in logical pixels: x runs right, y down and z
+---toward the viewer, and the screen is the plane z = 0. A member is scaled and
+---turned about `origin`, then moved; then, with a `perspective`, seen from that
+---far in front of the screen straight through the origin's x and y. Each
+---number is what a motion moves, so a turn from 0 to 90 degrees turns through
+---every angle between. Every key is optional and 0 when left out, but `scale`,
+---which is 1.
+---@class sol.Pose
+---@field x? number Moved this far, after it is turned and scaled.
+---@field y? number
+---@field z? number
+---@field rotate_x? number Degrees about x, turned first.
+---@field rotate_y? number Degrees about y, turned second.
+---@field rotate_z? number Degrees about z, turned last.
+---@field scale? number
+---@field origin? { x?: number, y?: number, z?: number } The point it turns and scales about.
+---@field perspective? number How far in front of the screen it is seen from; 0 is none.
+
+---What a window does before its application arrives. Every key is optional
+---and one left out keeps the compositor's default.
+---@class sol.LoadingOptions
+---@field scene? string The QML scene: a name in `qml/loading`, the user's first, or a path.
+---@field patience? integer Milliseconds to wait for an application that never arrives.
+---@field reserves_a_slot? boolean Whether the window takes its place in the layout at once.
+---@field decorated? boolean Whether its frame is drawn while it waits.
+---@field fade? integer Milliseconds the scene takes to fade off the application.
+
+---`config.lua`'s `files`: how much a `sol.read` reads, and how the stores are kept (#473).
+---@class sol.FilesOptions
+---@field max_read? integer The most bytes a read takes, 0 or more; a longer file's function gets `nil, "longer than files.max_read"`. Default 4194304 (4 MiB).
+---@field store_interval? number Milliseconds between the comparisons of each store with what was last saved, above 0. Default 1000.
+---@field store_max? integer The most bytes of a store's file that are read, 0 or more; a larger file is broken. Default 1048576 (1 MiB).
+
+---`config.lua`'s `wm`: how long the compositor waits for the window manager.
+---@class sol.WmOptions
+---@field ask_ms? number Milliseconds an event's answer is waited for before the compositor goes on by itself, above 0. Default 4.
+---@field hard_ms? number The hard deadline in milliseconds, above 0: a window manager that says nothing for `strikes` of them running, while an event waits, is ended and started again. Also how long its last word is waited for, before a reload and as the compositor ends. Default 1000.
+---@field strikes? integer How many hard deadlines running, 1 or more. Default 3.
+---@field restarts? integer How many times a window manager that stopped is started again within `restart_window_s`, 0 or more; one stop more and the shipped configuration runs in its place. Default 3.
+---@field restart_window_s? number Seconds, above 0. Default 60.
+---@field load_ms? number Milliseconds a configuration may take to load again on a reload, above 0. Default 10000.
+
+---What a `sol.watch` function is told (#473).
+---@class sol.WatchEvent
+---@field kind "changed"|"created"|"removed" `"changed"`: written and closed, or another file renamed onto it. `"created"`: it appeared. `"removed"`: deleted, or renamed away.
+---@field path string The path the watch was given, as it was written.
+
+---What the table form of `sol.run` takes (#472). Any other key is an error.
+---@class sol.RunOptions
+---@field cwd? string The directory it runs in. Default: Solium's.
+---@field env? table<string, string|false> Variables set on top of the environment every program Solium starts gets, or removed from it with `false`.
+---@field timeout? number Milliseconds before it is killed, with every process it started. Default `run.timeout` in `config.lua`, 30000.
+---@field max_output? integer Bytes kept of each of stdout and stderr; past it the stream is closed and `truncated` is true. Default `run.max_output` in `config.lua`, 1048576 (1 MiB).
+---@field lines? fun(line: string, stream: "stdout"|"stderr") Called with each line as it arrives.
+---@field done? fun(result: sol.RunResult) Called once, when it has ended.
+
+---`config.lua`'s `run`: what a `sol.run{}` takes when it does not say (#472).
+---@class sol.RunDefaults
+---@field timeout? number Milliseconds before a command is killed, above 0. Default 30000.
+---@field max_output? integer Bytes kept of each stream, 0 or more. Default 1048576 (1 MiB).
+
+---How a program `sol.run` started ended (#472).
+---@class sol.RunResult
+---@field code? integer Its exit code; nil when a signal ended it, or it never started.
+---@field signal? integer The signal that ended it: 9 when it was killed at its timeout.
+---@field timed_out boolean It was killed at its timeout.
+---@field truncated boolean Stdout or stderr wrote past `max_output`.
+---@field stdout string What it wrote to stdout, up to `max_output` bytes.
+---@field stderr string What it wrote to stderr, up to `max_output` bytes.
+---@field error? string Why it could not be started, when it could not: a missing program or `cwd`.
+
+---The idle lock and the idle blank. A key left out, or one that is not a
+---number of 0 or more, keeps the default.
+---@class sol.IdleOptions
+---@field lock_after? number Seconds with nobody at the machine before the session is locked, as `sol.lock_now` locks it. Held off by the same inhibitors as the blank. 0 never does. Default 300.
+---@field screens_off_after? number Seconds with nobody at the machine before every screen is turned off. 0 never does.
+---@field off_frame_interval? number How often, in milliseconds, a window on a screen that is off is still told it may draw. 0 stops it.
+---@field dbus_inhibit? boolean Own `org.freedesktop.ScreenSaver`, so a browser's D-Bus inhibitor keeps the screens on like a Wayland one. Default true.
+
+---Automatic reload (#223). A key left out, or one that is not the right
+---kind, keeps the default.
+---@class sol.AutoReloadOptions
+---@field automatic? boolean Reload on its own when a file this configuration loaded changes. Default true; false watches nothing at all.
+---@field quiet_ms? number How long a burst of writes waits to go quiet before the one reload it earns, in milliseconds. Default 300.
+
+---One device's libinput settings: a device-type default in `sol.input`, or
+---one `devices` entry. A key left out keeps libinput's own default (or
+---whatever a previous reload already set) rather than turning it off.
+---`output` binds absolute positions to a monitor connector. When omitted it
+---uses libinput's udev binding, including after reload; if no connected monitor
+---matches, the first screen is used. Relative devices ignore this setting.
+---@class sol.InputDeviceOptions
+---@field output? string Monitor connector for a touchscreen or tablet tool, such as "eDP-1".
+---@field velocity_window_ms? integer For a touchscreen: how far back, in milliseconds from 1 to 1000, a finger's `vx`/`vy` are fitted. 80 when unset.
+---@field tap? boolean Tapping the pad clicks.
+---@field tap_button_map? "left_right_middle"|"left_middle_right" 1/2/3-finger tap maps to which button.
+---@field drag? boolean A tap-then-move drags, without holding the pad down.
+---@field drag_lock? boolean A drag survives a brief lift of the finger.
+---@field natural_scroll? boolean Scroll direction follows the content, not the surface.
+---@field scroll_method? "two_finger"|"edge"|"button"|"no_scroll"
+---@field accel_profile? "flat"|"adaptive"
+---@field accel_speed? number -1 to 1; 0 is the device's own default speed.
+---@field disable_while_typing? boolean Ignore the pad while the keyboard beside it is in use.
+---@field left_handed? boolean Swap the left and right buttons.
+---@field middle_emulation? boolean Pressing left and right together is a middle click.
+
+---One `sol.input{ devices = { ... } }` entry: a match, plus any of
+---`sol.InputDeviceOptions`. At least one of `name`, `vendor` or `product` is
+---required; an entry naming none of them matches nothing.
+---@class sol.InputDeviceMatch: sol.InputDeviceOptions
+---@field name? string A case-insensitive substring of the device's name.
+---@field vendor? integer
+---@field product? integer
+
+---`config.lua`'s `input` section: a default per device type, and overrides
+---matched by name or by vendor/product, applied to every device already
+---connected and to each one added later -- and reapplied, from whatever this
+---now says, on every reload.
+---@class sol.InputOptions
+---@field shortcuts_inhibit? sol.ShortcutsInhibitOptions
+---@field touchpad? sol.InputDeviceOptions
+---@field mouse? sol.InputDeviceOptions
+---@field keyboard? sol.InputDeviceOptions
+---@field touchscreen? sol.InputDeviceOptions
+---@field tablet_tool? sol.InputDeviceOptions
+---@field tablet_pad? sol.InputDeviceOptions
+---@field switch? sol.InputDeviceOptions
+---@field devices? sol.InputDeviceMatch[]
+
+---Shortcut policy for focused Wayland inhibitors and XWayland keyboard grabs.
+---@class sol.ShortcutsInhibitOptions
+---@field allow? boolean|"fullscreen" true allows requests, false refuses them, "fullscreen" allows only fullscreen windows. Default true.
+---@field escape? string Reclaims shortcuts and the pointer even without a binding. Default "super+Escape". Uses the Latin key position under non-Latin layouts.
+---@field apps? { deny: string[] } Denied app_id or X11 WM_CLASS names: exact, "*", or a trailing-star prefix. Default empty.
+
+---logind's `Lock` and sleep requests (#153). A key left out keeps the
+---default.
+---@class sol.LockOptions
+---@field command? string A locker of your own, run instead of Solium's own lock screen on `Lock`, before sleep, after `idle.lock_after` and by `sol.lock_now`: `"swaylock -f"`, say. Split on whitespace, with no quoting. Setting it turns `native` off unless `native` is set too. Unset (the default) runs nothing.
+---@field before_sleep? boolean Hold sleep until the lock -- Solium's own or the locker's -- is on every monitor, or logind's own `InhibitDelayMaxUSec` runs out. Default true.
+---@field logind_unlock? boolean Whether logind's `Unlock` (`loginctl unlock-session`) ends Solium's own lock: the way out from another console when the password cannot be checked. false leaves only the password. Default true.
+---@field lockout? sol.LockoutOptions Solium's own lock: after `attempts` wrong passwords in a row the field is shut for `seconds`, doubling with each lockout up to `max_seconds`. Default `{ attempts = 3, seconds = 30, max_seconds = 300 }`.
+---@field secret_layout? "first"|"current" Solium's own lock: the layout a password is typed in. `"first"` (the default) switches to the first layout that types Latin letters while locked, and back after; `"current"` keeps whatever is live.
+---@field helper_timeout_ms? integer Solium's own lock: how long `solium-auth` has to answer, at least 100. Default 30000.
+---@field retry? sol.RetryOptions Solium's own lock: when the helper could not answer this time (it crashed or timed out), the password is tried again after `seconds`, doubling up to `max_seconds`, at most `attempts` times, then wiped. A cause no retry mends (no helper, no PAM service) wipes it at once; PAM asking for more than the password counts as a wrong attempt. Default `{ seconds = 2, max_seconds = 60, attempts = 5 }`.
+---@field keypad? "digits"|"letters"|"keyboard" Solium's own lock: the keys `SecretKeypad` lays out. Default `"digits"`.
+---@field pin? sol.PinOptions Solium's own lock: a PIN set with `solium pin set` unlocks it in place of the password, while these allow it; the password always does. Default `{ enabled = true, min_length = 4, max_length = 8, attempts = 5, password_after_hours = 48 }`.
+---@field native? boolean Whether Solium's own lock screen is the session's. Its scenes are built as the session starts and kept, quiet, between locks, so the first locked frame is the scene's. Default true unless `command` is set.
+---@field scene? string Solium's own lock: the lock screen's QML, a path (`"~/my-lock.qml"`) or a name looked for as `qml/lock/<name>.qml` in your QML directory and then in Solium's. One that is missing, will not load or fails while it runs is replaced by the shipped one, then by a compiled-in fallback. Default `"Lock"`, the shipped one.
+---@field prompt_on? string Solium's own lock: the monitor `Lock.promptOn` names, where the scene shows the password field: `"pointer"` (the default), `"primary"`, or a monitor's name, the primary one while it is not plugged in.
+---@field enter_ms? integer Solium's own lock: how long its scenes take to come down over the desktop as the session locks, reading `Lock.state` as `"locking"`; input is the lock's from the first instant, and the desktop is drawn under the scenes only until this is up. The lock taken before sleep has none. 0 to 600; longer is taken as 600. Default 350.
+---@field exit_ms? integer Solium's own lock: how long its scenes stay over the desktop after the unlock, counted from the first frame drawn after it, reading `Lock.state` as `"unlocking"` from the unlock; input is the desktop's from the unlock on. 0 to 900; longer is taken as 900. Default 450.
+---@field keypad_margin? integer Solium's own lock: how near a `SecretKeypad`, in logical pixels, the pointer's motion is kept from the lock scene, as it is over the pad itself. 0 or more. Default 32.
+
+---@class sol.BackoffOptions
+---@field seconds? integer The first wait, at least 1.
+---@field max_seconds? integer The longest, at least `seconds`.
+
+---@class sol.LockoutOptions: sol.BackoffOptions
+---@field attempts? integer Wrong passwords in a row before the field is shut, at least 1.
+
+---Solium's own lock's PIN (#281), set and cleared from a terminal with
+---`solium pin set` and `solium pin clear`, which ask for the password first.
+---While one is set and these allow it, `Lock.mode` reads `"pin"`; whatever is
+---typed that is not `min_length` to `max_length` digits is checked as the
+---password. A key left out keeps the default.
+---@class sol.PinOptions
+---@field enabled? boolean Whether a PIN that is set is taken at all. Default true.
+---@field min_length? integer The fewest digits a PIN has, from 4 to 64. Default 4.
+---@field max_length? integer The most digits a PIN has, from `min_length` to 64. Default 8.
+---@field attempts? integer Wrong PINs in a row, kept across locks and restarts, after which only the password unlocks until it has. 1 to 10; more is taken as 10. Default 5.
+---@field password_after_hours? integer How long after the password last unlocked the lock a PIN is still taken, in hours; the first unlock after the computer starts always needs the password. Counted on a clock that setting the time does not move, as well as the wall clock. 1 to 72; more is taken as 72. Default 48.
+
+---@class sol.RetryOptions: sol.BackoffOptions
+---@field attempts? integer How many times a password is tried again before it is wiped, at least 0.
+
+---X11 windows refused a tile, decoration or bar entry outright (#221). A key
+---left out, or the whole table left out, keeps the default rather than
+---emptying it.
+---Which window protocols a shell that is its own program is offered (#50).
+---@class sol.ToplevelsOptions
+---@field list? boolean `ext-foreign-toplevel-list-v1`: the windows' titles and applications. Default `true`.
+---@field manage? boolean `wlr-foreign-toplevel-management-v1`: the same with monitors and states, and requests that reach Lua as `windows.*` actions of the surface `"foreign-toplevel"`. Default `true`.
+---@field capture? "client"|"pane"|false What a capture of one window through `ext-image-copy-capture-v1` is a picture of (#47): the client as it drew itself, its popups over it (`"client"`, the default), or the pane as it is on screen, frame and effects included (`"pane"`). `false` offers no window as a capture source. Needs `list`, which names the window.
+
+---Who draws a Wayland window's frame (#462).
+---@alias sol.FramePolicy
+---| "prefer" # Solium's frame for an application that leaves it to Solium or asks for it; none for one that asks to draw its own or never says. The default.
+---| "force" # Solium's frame on every window; an application asking to draw its own is told Solium draws it.
+---| "allow" # The application's own frame unless it asks for Solium's.
+
+---One application's policy, or several's: `app_id` exact, `*`, or a prefix ending in `*`.
+---@class sol.FrameRule
+---@field match { app_id: string }
+---@field policy sol.FramePolicy
+
+---@class sol.FramesOptions
+---@field policy? sol.FramePolicy Every window's policy but those a rule names. Default `"prefer"`.
+---@field rules? sol.FrameRule[] The last rule matching a window's `app_id` wins over `policy`.
+
+---Shells that are their own programs, through wlr-layer-shell (#461).
+---@class sol.LayerShellOptions
+---@field input_below? boolean|string[] Which client layer surfaces on the bottom and background layers take the pointer and touch: `true` every one (the default), `false` none, so a press passes through to what is under them, or a list of namespaces, each exact, `*`, or a prefix ending in `*`. Surfaces above the windows always take input.
+
+---@class sol.X11Options
+---@field hidden? string[] WM_CLASS names to hide, matched case-insensitively against either field a client sets (`class` or `instance` on `sol.Window`). Replaces the whole default list rather than adding to it; default `{ "xwaylandvideobridge" }`.
+
+---The input profile's focus policy (#219). A key left out is the machine's
+---own answer for it, the form factor's (#159) -- never what the call before
+---this one said, so a mode that names nothing does not inherit the mode before
+---it (#128).
+---@class sol.FocusModeOptions
+---@field click? boolean Whether a press focuses the window it lands on.
+---@field follow? boolean Whether moving the pointer over a window focuses it.
+---@field after_close? sol.AfterClose|sol.AfterClose[] Where the keyboard goes when the window that has it closes, tried in order until one finds a window on screen; `{}` leaves it on nothing. Left out: `{ "pointer", "topmost" }`. An unknown word is logged and skipped.
+---@field clear_on_empty_click? boolean Whether a press on empty desktop or the wallpaper clears keyboard focus. A press on an external layer-shell bar or panel is outside this flag; if it declines keyboard focus, the previous window stays focused.
+
+---One word of `sol.FocusModeOptions.after_close` (#128).
+---@alias sol.AfterClose
+---| "pointer" # The window under the pointer, where the windows are going.
+---| "neighbour" # The window that takes the closed one's place on its monitor -- one going into where it stood -- or the one nearest to it; of several, the one focused last.
+---| "recent" # The window focused most recently that is still open on its monitor.
+---| "topmost" # The topmost window on screen, on any monitor.
+
+---The pointer's theme. A key left out, or no table, means the configuration
+---did not say, and `XCURSOR_THEME` and `XCURSOR_SIZE` have their turn.
+---@class sol.CursorOptions
+---@field theme? string The name of an XCursor theme.
+---@field size? integer Logical pixels, from 8 to 256.
+---@field scene? string A QML scene to draw the pointer with, for every shape and ahead of the theme: a path, `~` expanded, or a name looked for in `~/.config/solium/qml` and then the shipped QML. `SOLIUM_QML_CURSOR` overrides it for one run.
+
+---How QML is rendered. Read once, before Qt starts.
+---@class sol.QmlOptions
+---@field renderer? "auto"|"gpu"|"software" `"auto"` tries the GPU in a child process first.
+---@field probe_timeout? integer Milliseconds the GPU trial may take.
+---@field buffers? { step?: integer, shrink?: integer } On the GPU, how big the buffer a QML scene is drawn into is: each side rounded up to a whole number of `step` pixels (0 to 1024; 0 is a buffer exactly the scene's size, a new one at every size; default 128), so a window being resized draws its frame into the buffer it has until it outgrows it; once a size has held, a buffer `shrink` steps or more larger than its scene on a side (2 to 64; default 2) is replaced by a snug one.
+
+---Telling systemd and D-Bus that Solium is the session. A key left out, or
+---one of the wrong kind, keeps the default.
+---@class sol.SessionOptions
+---@field systemd? boolean Export the environment to systemd and D-Bus activation and start `solium-session.target`; undone on exit. `true` by default.
+---@field autostart? boolean Start `solium-autostart.target`, XDG autostart, beside it. `true` by default.
+---@field stop_timeout? integer Milliseconds SIGTERM, SIGINT or SIGHUP waits for a clean stop before Solium ends at once. 5000 by default.
+
+---One entry of `sol.decorations()`.
+---@class sol.DecorationEntry
+---@field name string What `sol.pane` takes.
+---@field kind "bundle"|"file" A folder under `qml/panes`, or a single QML file under `qml/decorations`.
+
+---What `sol.on` can listen for.
+---@alias sol.Event
+---| "open" # A window's life began: `(id)`.
+---| "focus" # The keyboard moved to a window: `(id, source, changed)`, `source` what moved it, a `sol.FocusSource`, and `changed` whether it came from another window or none -- `false` for the window that had it focused again. `lua/follow.lua` takes the pointer along by them.
+---| "activate" # A window asked to be brought forward, after the compositor answered: `(id, why)`. `why` is `"launch"` when an application already running answered a launch with a window it had, and `"request"` for anything else.
+---| "closing" # A close was asked for and the window is fading: `(id)`.
+---| "close_landed" # A close the compositor asked for has played its animation: the window has faded out of sight where it stood, and its application has just been asked to go -- or, an X11 one that let the last request go unanswered, been ended: `(id)`. Told after `closing` and before the `close` or `refused` that follows; not told for a window that went, or answered with a dialog, before its close landed, nor for one whose application never came, which is told `close` there and then.
+---| "refused" # Its application declined, and the window is back: `(id)`.
+---| "rename" # A window's title, or its application's name, changed: `(id)`. `sol.windows()` has them.
+---| "size" # A window's application drew it at a size of its own, not the one it was placed at, and the window has taken it: `(id, w, h)`, frame included. Told once the application has answered a `sol.place`, or has had `resize.patience` to; until then the window is drawn in the rectangle it was placed at.
+---| "minimize" # A window was minimized, by `sol.minimize` or its application: `(id)`. Told once, before anything else reacts, with the window already `minimized`: a present started here plays out before the window is put away, and a layout takes the window out. The keyboard leaves it afterwards, as it leaves a window whose close landed (`focus.after_close`).
+---| "unminimize" # A minimized window is shown again, by `sol.unminimize`, its application, or a focus -- `sol.focus`, a click in the overview, an application asking to be brought forward, but never behind the lock: `(id)`. Told before the `focus` that showed it, with the window no longer `minimized`; a configuration presents it back from wherever it put it, and a layout takes it back.
+---| "close" # The window is gone: `(id)`.
+---| "notification" # A notification arrived or was replaced, over the bus or from `sol.notify`: `(n)`, a `sol.Arrival`. A decision hook: the first listener that returns a table decides, `{ banner = boolean, keep = boolean }`, each left out taking the shipped rule (a banner unless do-not-disturb is on, where only a critical one gets one; kept unless the sender said it is transient). With none answering, the shipped rule decides.
+---| "notifications" # Something happened to a notification: `(event)`, a `sol.NotificationEvent`.
+---| "audio" # Something changed in audio: `(event)`, a `sol.AudioEvent`, with who changed it.
+---| "tray" # Something changed in the tray: `(event)`, a `sol.TrayEvent`.
+---| "media" # Something changed in media: `(event)`, a `sol.MediaEvent`.
+---| "fullscreen" # A window went fullscreen, or left it: `(id, entering)`. Told once the change is made: its client has been sent its new size and it lives at its new rectangle. Once every listener has run, the compositor moves its picture there from where it is drawn, as a layout's glide does, with the timing a listener set with `sol.animate`, and at once if none set one. Until the client answers at its new size the window is held there and its last picture fitted into it as `resize.fill` says (`sol.resize`), for a quarter of a second past the landing at most; the transform is released when the glide lands. With no timing the change puts no transform on the window and holds nothing. A window a mode is presenting is left where the mode draws it. A change a listener makes is made at once and not told.
+---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
+---| "drag" # A window is being moved by the pointer, a finger, or its own client's move request: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion can move the window, so a listener can hold it (`sol.drag_hold`); `"move"` once a frame at most, wherever the pointer got to; `"end"` before the `"drop"`, and also when a drag ends with no drop (the window went fullscreen, a finger was cancelled).
+---| "drop" # A dragged window was let go: `(id, x, y)`.
+---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`. Not told for a side of a window in a tree (`sol.arrange`) with a seam along it: the compositor moves that seam itself.
+---| "seam" # A seam of a tree was left somewhere, by a drag once it is let go, or by `sol.grow`: `(key, id, shares)`, the tree's key, the split's id and each of its children's share, as fractions of one. Arranging the tree again with these shares moves nothing.
+---| "resizing" # A window is being resized by a border, the drag modifier, or a finger: `(id, phase, x, y)`, `phase` being `"begin"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion is offered to the `"resize"` listeners, so a listener can hold the window (`sol.resize_hold`); `"end"` after the release and after the last motion is offered. Its motion is the `"resize"` event's.
+---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
+---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
+---| "touch" # A raw finger event: `(event)`, a `sol.TouchEvent`. Down precedes delivery so Lua can claim it with `sol.touch`; without a claim it observes normal delivery. Never delivered while locked, nor replayed on unlock.
+---| "surface" # A hosted scene sent an action: `(surface, action, data)`, `data` a table, a value or `nil`. Every action is heard, in the order sent, in a dispatch after the one that sent it; a scene that sets an `action` string property is heard the same way, with `data` `nil`.
+---| "frame" # A window frame's layer sent an action with `Solium.send(name, data)`: `(id, name, data)`, the window's id, the name and its data. Heard in the order sent, in a dispatch after the one that sent it. `"close"`, `"maximize"` and `"minimize"` are the compositor's own and are not heard here.
+---| "direction" # `sol.focus_direction` or `sol.move_direction` was called: `(verb, dir)`, `verb` being `"focus"` or `"move"`. The layout in charge answers.
+---| "layout" # Arrange the windows you already hold again: `()`.
+---| "monitors" # The monitors came, went or changed size, or were announced at startup or after a reload: `()`.
+---| "restore" # These scripts replaced a running session's, after a reload and never at startup: `()`.
+---| "problems" # The problems changed: something broke, or a reload mended it: `()`. `sol.problems()` answers what they are now. Told once a change, after the frame that found it.
+---| "text_input" # The focused text field changed: `(field, why)`, `field` being what `sol.text_input()` answers at that moment and `why` what changed -- `"field"`, one was enabled, or focused again by its window getting the keyboard back; `"caret"`, its client moved its caret; `"framed"`, its window started or stopped being drawn in a frame, as one going fullscreen does. Told at most once a pass of the event loop, before the frame is drawn, as the most that changed: a caret moved twice since the last frame is told once, where it is now, and a field enabled and then given its caret, as kitty gives it with its first key, is told once as `"field"`. A window moving with its field in it is not told. A field disabled, or its window losing the keyboard, is not told: `sol.text_input()` answers `nil` from then on, and `field` is never `nil` here.
+---| "keyboard" # The live layout, Caps Lock or Num Lock changed, by a key or by `sol.keyboard{ ... }`: `(state, changed)`, `state` being what `sol.keyboard()` answers now and `changed` `"layout"`, `"caps"` or `"num"`. Never for ordinary typing, a new keymap or a configuration starting, nor while the session is locked: what is pressed at the lock screen is the lock screen's, and a lock screen that wants a Caps Lock warning draws its own. A change a `keyboard` listener makes is not told back to it.
+---| "lock" # The session's lock changed: `(state)`, `"locking"` while Solium's own lock comes down over the desktop (`lock.enter_ms`), `"locked"`, `"unlocking"` while it goes (`lock.exit_ms`), and `"unlocked"` once it has gone; a lock with nothing to play, a lock client's or one taken before sleep, is `"locked"` and `"unlocked"` alone. Each told once. Nothing else of the lock: not who holds it, nothing typed at it. For a configuration that moves with the lock, as the shipped bar puts its clock away while the lock's flies out of it.
+
+-- sol ------------------------------------------------------------------------
+
+---The compositor's scripting interface. Built by the compositor before the
+---configuration runs; there is nothing to require.
+---@class sol
+sol = {}
+
+---State that survives `super+shift+r`.
+---
+---Answers the table the last configuration kept under `name`, or `defaults` on
+---the first load. Mutate it in place and the next reload gets what you left in
+---it. It may hold numbers, strings, booleans and tables of those, eight
+---tables deep -- the trees of `layouts/dwindle.lua` and the strips of
+---`layouts/scroller.lua` are such tables; anything else is named in the log
+---and left out. A table comes back as a table, with no metatable: a layout's
+---`adopt` makes it one again. Asked for twice under one name, it is the same
+---table both times.
+---@param name string
+---@param defaults table
+---@return table
+function sol.keep(name, defaults) end
+
+---Every window a layout may arrange, topmost first.
+---
+---A snapshot taken for this handler, not a live view. A window that closes
+---while you hold its id is ordinary: `place` and `present` on an id that no
+---longer exists do nothing.
+---@return sol.Window[]
+function sol.windows() end
+
+---Every installed, visible application (NoDisplay and Hidden entries are
+---left out at the source), by name.
+---
+---A snapshot taken for this handler, not a live view, and -- unlike
+---`sol.windows()` and `sol.monitors()` -- empty at the top level of a
+---configuration file: it reads before the first real one arrives, and
+---before the index has even scanned once on a first start. A scene reads
+---`Solium.Apps` instead, which is live from the moment it is drawn.
+---@return sol.App[]
+function sol.apps() end
+
+---Draw a QML scene: a wallpaper, a bar, a dock, a heads-up display.
+---
+---Declaring a name again with the same `scene` changes the live scene: changed
+---`properties` are written into it, and on a monitor it was already on a new
+---`on`, `layer` or `interactive` keeps it, so what the scene holds survives (an
+---open popup, a running animation). A monitor it newly covers gets a scene
+---built from the current `properties`, and one it leaves drops its scene. Only
+---another `scene` file builds it again. A key left out of `properties` keeps
+---the value the scene last had. A dotted key (`["panel.open"] = true`) reaches
+---a grouped property. `false` or `nil` takes the surface away. Each monitor it
+---is on gets a scene of its own, built when the surface is declared or the
+---monitor arrives and dropped when the monitor goes; `Solium.monitor` inside it
+---is that monitor. A scene file that is not there is logged, and built once it
+---is there, at the next reload, change of monitors or changed declaration; a
+---scene that will not load is logged once per monitor and not tried again
+---until another `scene` is declared or the configuration is reloaded.
+---@param name string
+---@param options sol.SurfaceOptions|false|nil
+---@return nil
+function sol.surface(name, options) end
+
+---Read the keyboard, or change it.
+---
+---With no argument, answers the layouts, which one is live, its short name,
+---whether Caps Lock and Num Lock are on, and how keys repeat. With a table,
+---changes what it names and leaves the rest alone, so a binding that switches
+---layout does not reset the repeat rate. `sol.on("keyboard", ...)` hears the
+---layout and the locks change.
+---@overload fun(): sol.KeyboardState
+---@param options? sol.KeyboardOptions
+---@return sol.KeyboardState|nil
+function sol.keyboard(options) end
+
+---The focused text field and where its caret is, or `nil` when the window
+---with the keyboard has no text field enabled.
+---
+---Kept by the `text-input-v3` protocol: an application with a text field
+---focused says so, and says where its caret is. Applications that do not
+---speak it, and X11 ones, never have one. `sol.on("text_input", ...)` hears a
+---field being enabled or focused, its caret moving, and its window being
+---framed or left bare.
+---@return sol.TextField|nil
+function sol.text_input() end
+
+---What is broken in an effect, a rule or the configuration now, with its file
+---and line. The shipped `lua/problems.lua` shows them on the primary monitor
+---while there are any. A failed reload is one, under `"config"`, until a
+---reload succeeds.
+---@return sol.Problem[]
+function sol.problems() end
+
+---One rule of `sol.effects{ rules = … }`: which effect goes in which slot of
+---which part, for which windows or surfaces. A later rule for the same part
+---and slot wins over an earlier one, and yours over a pane style's.
+---@class sol.Rule
+---@field match "*"|table `"*"`, or the keys a part's kind matches on, each a word that is exact, `"*"`, or a prefix ending in `*`: `app_id`, `title`, `monitor`, `style` (`"none"` for a bare window), `focused`, `fullscreen` and `maximized` as booleans, and `values`, a table the window's own values from `sol.frame(id, { ... })` must have, each key equal to the boolean, number or word given (`false` also matching a key never handed), for a window's parts; `surface` for a scripted surface's (a plane such as `shell/dock` waits for planes); `layer_shell` for a layer surface's. No Lua patterns.
+---@field part string `pane`, `client`, `popup`, `layer:<name>`, `region:titlebar`, `surface:<name>` or `layer_shell:<namespace>`. Other regions, and the titlebar's own pixels as a chain's input, wait for `Solium.region`, and `output` for X4.2.
+---@field slot "behind"|"front"|"replace" Below the part, above it, or in its place. The part itself is always drawn: a `replace` whose effect fails draws the part.
+---@field effect string|table|false An effect's name; a link, `{ "blur", passes = 3 }`, its params beside the name, with `reach` and `bleed` overriding the effect's own; a chain of links in order, `{ { "blur" }, { "tint" } }`; or `false`, which empties the slot.
+---@field source? "self"|"xray"|"live"|"auto" What the chain's first input reads in place of its own: `"self"`, the part's own pixels, or `"xray"`, the backdrop from xray, which is what a chain reading the backdrop reads anyway. On the rule or in its first link. The live backdrop (`"live"`, `"auto"`) waits for X4.1 and is refused when the rules are applied.
+---@field mask? "shape"|"alpha" How the result is cut: the part's shape (the default), or the alpha of the part's own pixels, which needs `source = "self"`.
+---@field memo? boolean `false`: never share this rule's backdrop-only part per monitor, whatever `effects.memo.split` says; each part runs its whole chain. Default `true`.
+---@field cut? "below"|"background" Which layers a T2 chain reads: every configured layer below the part's own (`"below"`, the default) or the wallpaper alone (`"background"`), even when `effects.xray.layers` has `"bottom"`.
+---@field fade? { duration: number, easing?: string }|false How the slot comes and goes as the rule starts and stops matching: its result drawn at an opacity that eases from 0 to 1 over `duration` milliseconds (0 to 60000) on `easing` (a curve's name, `"outCubic"` when not given) when the rule starts to fill the slot, and back to 0 when it stops, nothing run again for it; turned round part of the way it goes back from where it got to. Left out, or `false`: filled and emptied at once.
+
+---What T2 effects read as the backdrop, `sol.effects`' `xray`: a sharp
+---picture of the layers below a part, per monitor, rebuilt only when what is
+---in it changes. A part on `bottom` reads the wallpaper alone, one on
+---`background` reads nothing, and every other one the layers named here.
+---@class sol.XrayOptions
+---@field layers? ("background"|"bottom")[] The layers T2 effects read as the backdrop: `"background"`, alone or with `"bottom"`; a list without `"background"`, an empty one included, is refused (a rule's `effect = false` turns an effect off). Default `{ "background" }`.
+---@field scale? number The picture's resolution as a share of the monitor's, 0.25 to 1. Default 1.
+---@field keep_ms? integer How long a picture nothing reads is kept, 0 to 60000 ms. Default 2000.
+---@field straddle? "each"|"own" A part across two monitors reads each monitor's picture, or only its own monitor's. Default `"each"`.
+---@field warped? "drawn"|"rest" A warped window's behind effect reads the backdrop where each of its pixels is drawn, or where the window rests, bent with it. A window that glides or is dragged always reads it where it is drawn. Default `"drawn"`.
+
+---How the part of a chain that reads only the backdrop is shared, `sol.effects`'
+---`memo`: run once per monitor and read by every part whose chain begins the
+---same way.
+---@class sol.MemoOptions
+---@field split? "resize"|"longest"|"off" How far the part of a chain that reads only the backdrop is shared per monitor: to its last step that changes size, as far as it reads only the backdrop, or not at all. Default `"resize"`.
+---@field keep_passes? integer Passes a shared result nobody reads is kept, 0 to 3600. Default 0.
+---@field budget_mib? integer The most memory shared results may hold, 0 (no cap) to 4096 MiB; past it a part runs its whole chain, and a held result past a lowered cap is given back. Default 0.
+
+---What `sol.effects` takes: the rules, and the engine's own numbers and
+---policies beside them, each with its default. A key it does not know,
+---`limits`, `present`, `xray` or `memo` given anything but a
+---table, a number outside its bounds (`1/0` and `0/0` included) or a word
+---outside its words refuses the whole set, its rules too, named by
+---`sol.problems()` under `"settings"`, and what ran stays; `solium --check`
+---fails on it.
+---@class sol.EffectsOptions
+---@field rules? sol.Rule[] The rules; left out, none.
+---@field load? string[] Effect folders to load with the configuration, before anything plays them: what your `sol.present` deforms will name, which nothing else names up front, so the first one finds its folder compiled rather than drawing the window flat. Each a folder's name; a bad one refuses the set.
+---@field limits? { params?: integer } How many numbers a geometry or a pixels effect's params may be once packed (8 by default, 1 to 64); one with more is named by `sol.problems()`, never cut.
+---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing). A deform may say either for itself.
+---@field xray? sol.XrayOptions What T2 effects read as the backdrop.
+---@field memo? sol.MemoOptions How a chain's backdrop-only part is shared per monitor.
+---@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. 0, the default, runs them on every pass the part moved on, so what shows through is where the part is on every frame. 10 to 1000 is a cap for a weak GPU: between runs the last result is drawn where the part is, stretched to its size, so what shows through lags the part by up to `1 / motion_hz` of its motion and is right again within that once it stops. A backdrop redrawn or new params run it at once.
+
+---Which effects go where, all at once: a set with a broken rule is refused
+---whole, its errors listed by `sol.problems()`, and the rules that ran stay.
+---Every effect a rule names is loaded and every link bound with its params
+---when this is called, at load and at every reload; `rules` left out is no
+---rules. The engine's own keys beside them are applied first, so the effects
+---the rules name load under them.
+---@param options? sol.EffectsOptions
+---@return nil
+function sol.effects(options) end
+
+---The first desktop frame's gate, `sol.startup`'s `first_frame`.
+---@class sol.FirstFrameOptions
+---@field hold? boolean Hold the first desktop frame (drawing only the clear colour) until what it shows is ready: every effect compiled and every backdrop picture a T2 effect reads built once. Default `true`.
+---@field max_ms? integer The longest it is held, 0 to 10000 ms; 0 never holds. What is still not ready then is drawn as it is, and named in the log. Default 2000.
+---@field on_reload? boolean Hold again after each successful reload until ready. Default `false`.
+
+---What `sol.startup` takes. A key it does not know, or a value outside its
+---type or bounds (`1/0` included), is refused whole, named by
+---`sol.problems()` under `"startup"`, and what ran stays.
+---@class sol.StartupOptions
+---@field first_frame? sol.FirstFrameOptions
+
+---How the compositor starts: the first frame's gate. Applied at once; a
+---reload re-reads it, and one with `on_reload` holds its frame again.
+---With no table, the defaults.
+---@param options? sol.StartupOptions
+---@return nil
+function sol.startup(options) end
+
+---Read the monitors, or arrange them.
+---
+---With no argument, answers every monitor. With a list, drives and places the
+---monitors it names; a row with no name is logged and skipped.
+---@overload fun(): sol.Monitor[]
+---@param rows? sol.MonitorPlacement[]
+---@return sol.Monitor[]|nil
+function sol.monitors(rows) end
+
+---What one workspace is, in a `sol.workspaces` declaration.
+---@class sol.DeclaredWorkspace
+---@field id string Unique within its group.
+---@field name? string What a shell shows; the id when left out.
+---@field col? integer Its column in the arrangement, from 1.
+---@field row? integer Its row in the arrangement, from 1.
+---@field hidden? boolean A workspace a shell should not list, such as a scratchpad.
+
+---A group of workspaces that switch together: one per monitor, or one for
+---every monitor.
+---@class sol.WorkspaceGroup
+---@field id string
+---@field monitors string[] The monitors it is on, by connector name.
+---@field showing string[] The ids it shows now.
+---@field workspaces sol.DeclaredWorkspace[]
+
+---@class sol.WorkspaceDeclaration
+---@field arrangement? { kind?: string, columns?: integer, rows?: integer } The shape the workspaces make, for a shell to draw.
+---@field groups sol.WorkspaceGroup[]
+---@field windows? table<integer, string[]> Which workspaces each window is on, by window id.
+
+---Say what the workspaces are. The compositor does not know what a workspace
+---is: `workspaces.lua` is the whole feature, and this is how a hosted shell's
+---`Workspaces` model learns it. Declare again whenever it changes; the same
+---declaration twice costs nothing. Monitors and windows the compositor does
+---not have are left out, with any group left with no monitor, and so is a
+---workspace whose `<group>/<id>` an earlier one in a group that stays already
+---has; each is logged once.
+---@param declared sol.WorkspaceDeclaration
+---@return nil
+function sol.workspaces(declared) end
+
+---Turn a monitor's display off or on, or every monitor's with `"all"`.
+---
+---The monitor keeps its place, its work area and its windows. Any key, click,
+---scroll, touch or pointer motion turns every screen back on. A mode that is
+---neither `"on"` nor `"off"` is an error; a name no monitor has is a line in
+---the log.
+---@param which string A monitor's name, or `"all"`.
+---@param mode "on"|"off"
+---@return nil
+function sol.monitor_power(which, mode) end
+
+---@class sol.NotificationTimeouts
+---@field low? number How long a low-urgency banner lasts when its sender leaves it to the server, in milliseconds; 0 for never. 5000 by default.
+---@field normal? number The same for a normal one. 7000 by default.
+---@field critical? number The same for a critical one. 0, never, by default: a critical banner waits to be dealt with.
+
+---@class sol.NotificationsOptions
+---@field serve? boolean Own `org.freedesktop.Notifications` on the session bus, so applications' notifications come to Solium. False by default. A nested run owns it only on the bus `SOLIUM_SESSION_BUS` names. Another program that has the name keeps it: Solium waits its turn, and `owner` names who has it.
+---@field timeouts? sol.NotificationTimeouts
+---@field history? { max?: integer } How many notifications are kept once their banner ends, oldest dropped first; 0 keeps none, and a banner that ends then closes the notification. 200 by default.
+
+---@class sol.Notification
+---@field id integer The id the sender was given.
+---@field revision integer 1, and one more each time the sender replaced it.
+---@field appName string The application, by its desktop entry's name when the sender named one, else as the sender named itself.
+---@field appIcon string A theme icon name, or empty.
+---@field desktopId string The sender's `desktop-entry` hint, or empty.
+---@field window integer The window of the sender's process, or of its parent up to four generations, or 0.
+---@field monitor string The monitor that window is on, or empty.
+---@field summary string
+---@field body string The body as plain text.
+---@field bodyRich string The body as markup safe for a `Text.StyledText`: bold, italic, underline and `http`, `https` and `mailto` links only.
+---@field image string `image://solium/notification/<id>/<revision>`, or empty.
+---@field icon string `image://solium/icon/<name>`, or empty.
+---@field urgency "low"|"normal"|"critical"
+---@field category string
+---@field actions { key: string, label: string }[] The sender's buttons, `default` left out (it is a click on the body).
+---@field hasDefault boolean Whether a click on the body does anything.
+---@field resident boolean It stays after an action is invoked.
+---@field transient boolean It is never kept once its banner ends.
+---@field received number When it came, in milliseconds since the epoch.
+---@field held boolean A pointer or a finger is on its banner, and its time is stopped.
+---@field state "banner"|"stored"
+
+---@class sol.Arrival
+---@field id integer
+---@field appName string
+---@field desktopId string
+---@field summary string
+---@field body string
+---@field urgency "low"|"normal"|"critical"
+---@field category string
+---@field actions { key: string, label: string }[] Every action, `default` included.
+---@field transient boolean
+---@field resident boolean
+---@field window integer
+---@field monitor string
+---@field dnd boolean Whether do-not-disturb is on.
+
+---@class sol.NotificationEvent
+---@field what "added"|"replaced"|"closed"|"invoked"|"dnd"|"owner"
+---@field origin "external"|"scene"|"script"|"service" Who did it: the sender over the bus, a scene's own call, Lua, or the service itself (a timeout, a full history).
+---@field id? integer The notification, when there is one.
+---@field reason? "expired"|"dismissed"|"closed"|"undefined" For `closed`.
+---@field key? string For `invoked`: the action, `default` for a click on the body.
+---@field value? boolean For `dnd`: whether it is on now.
+---@field serving? boolean For `owner`: whether Solium has the name now.
+---@field notification? sol.Notification The notification as it is now, for `added`, `replaced` and `invoked`.
+
+---@class sol.NotificationsState
+---@field available boolean Whether the server is running at all.
+---@field serving boolean Whether Solium has the name.
+---@field dnd boolean
+---@field owner? { name: string, pid?: integer, program: string } Who has the name, when Solium does not.
+---@field banners sol.Notification[] On screen now, newest first.
+---@field history sol.Notification[] Kept, newest first.
+
+---Notifications (#346): with a table, whether Solium serves them and how long
+---banners last and how much is kept; with none, what they are now. Their
+---actions go through `sol.act`: `notifications.invoke { id, key }`,
+---`notifications.dismiss { id }` or `{ all = true }`, `notifications.dnd {
+---value = true|false|"toggle" }`, `notifications.hold { id }` and
+---`notifications.release { id }`.
+---@overload fun(): sol.NotificationsState
+---@param options sol.NotificationsOptions
+---@return nil
+function sol.notifications(options) end
+
+---@class sol.AudioEndpoint
+---@field id integer Solium's id, the same for a device for the whole session, across replugs.
+---@field name string PipeWire's `node.name`.
+---@field label string Its short name, else its description.
+---@field kind "speakers"|"headphones"|"headset"|"hdmi"|"bluetooth"|"usb"|"virtual"|"other"
+---@field icon string `image://solium/icon/<name>`.
+---@field volume number Perceptual, as `wpctl` shows it: 1.0 is 100%. While a write of Solium's is pending, the newest request.
+---@field muted boolean
+---@field pending boolean A write of Solium's has not been echoed by PipeWire yet.
+---@field step number `audio.step`.
+---@field max number `audio.max`.
+---@field isDefault boolean
+---@field portLabel string The active port: "Speakers", "Headphones".
+---@field portKind string Its type, as the card says: `speaker`, `headphones`, `hdmi`...
+---@field state "running"|"idle"|"suspended"|"error"
+---@field direction "output"|"input"
+
+---An application's playback stream (#416).
+---@class sol.AudioStream
+---@field id integer Solium's id for it, for as long as it plays; a stream that stops and starts again is a new one.
+---@field label string The application's name, else what it plays.
+---@field app string `application.name`.
+---@field appId string A sandboxed application's id (`pipewire.access.portal.app_id`), else `application.id`; often empty.
+---@field binary string `application.process.binary`.
+---@field pid integer Its process, as the kernel told PipeWire; -1 when it is not known.
+---@field mediaName string What it plays, as the application names it.
+---@field icon string `image://solium/icon/<name>`, or empty when the application names none.
+---@field volume number Perceptual, as `wpctl` shows it, its own: 1.0 leaves the application as loud as it is.
+---@field muted boolean
+---@field pending boolean
+---@field step number `audio.step`.
+---@field max number `audio.max`.
+---@field state "running"|"idle"|"suspended"|"error"
+---@field windows integer[] The windows it is, by id: those of the nearest of its process and the processes that started it that has windows, else those whose application id names its application. Empty for none.
+
+---A window's streams as one (#416): the first stream's fields, with the loudest of their volumes, `muted` only when every one is, and these.
+---@class sol.AudioWindow: sol.AudioStream
+---@field count integer How many streams it has.
+---@field streams integer[] Their ids.
+
+---@class sol.AudioState
+---@field available boolean Whether PipeWire is reachable.
+---@field ready boolean Whether the first full picture has arrived.
+---@field output? sol.AudioEndpoint The default output.
+---@field input? sol.AudioEndpoint The default input.
+---@field outputs sol.AudioEndpoint[]
+---@field inputs sol.AudioEndpoint[]
+---@field streams sol.AudioStream[] Every application's playback stream.
+---@field windows table<integer, sol.AudioWindow> Each window that has a stream, by the window's id.
+
+---@class sol.AudioEvent
+---@field what "volume"|"mute"|"default"|"added"|"removed"
+---@field target integer The endpoint's id.
+---@field direction "output"|"input"
+---@field output boolean Whether it is the default output.
+---@field value number Its volume now.
+---@field muted boolean
+---@field origin "binding"|"scene"|"script"|"external" Who changed it: a key binding's handler, a scene's control, Lua, or not Solium at all (the device's own buttons, another mixer).
+---@field bus string Its kind, as `sol.AudioEndpoint.kind`: an OSD can tell a headset's own button (`external` on `bluetooth`) from a mixer.
+---@field stream boolean Whether it is an application's playback stream rather than a sink or a source.
+
+---@class sol.AudioOptions
+---@field max? number The loudest anything may set, 1.0 being 100%; up to 1.5. 1.0 by default.
+---@field step? number How far a step moves it. 0.05 by default.
+
+---Audio (#347): with a table, its limits; with none, what it is now. Either
+---starts it. Changes go through `sol.act`: `audio.volume { target = "output"
+---| "input" | id, value = v }` or `{ target, by = d }`, `audio.mute { target,
+---value = true | false | "toggle" }`, `audio.default { endpoint = id }`. A
+---stream's id is a target like an endpoint's; `window = id` in place of
+---`target` sets every stream of that window together (#416): a `value` each
+---to it, `by` each from where it is, and a toggle mutes them all unless every
+---one is muted; a window with none is answered `unknown-endpoint`.
+---@overload fun(): sol.AudioState
+---@param options sol.AudioOptions
+---@return nil
+function sol.audio(options) end
+
+---@class sol.TrayMenuEntry
+---@field id integer The entry's id, for `tray.menu_click` and `tray.submenu`.
+---@field label string Its label, the mnemonic marks (`_`) taken out. The application's own text: show it as plain text.
+---@field enabled boolean
+---@field visible boolean An entry the application hides; a menu leaves it out.
+---@field type "standard"|"separator"
+---@field toggleType ""|"checkmark"|"radio"
+---@field toggleState integer 1 on, 0 off, -1 neither.
+---@field iconName string A theme icon name, or empty.
+---@field icon string `image://solium/icon/<name>`, or empty.
+---@field submenu boolean It opens a submenu, `children`, rather than doing something itself.
+---@field children sol.TrayMenuEntry[]
+
+---@class sol.TrayItem
+---@field id integer Solium's id for it, never given out twice in a run.
+---@field service string The watcher's name for it: its bus name and its object path.
+---@field itemId string The item's own `Id`, often its application's name: `steam`, `discord`.
+---@field category string `ApplicationStatus`, `Communications`, `SystemServices` or `Hardware`.
+---@field title string Its `Title`, as the application names it.
+---@field status "passive"|"active"|"attention" `passive` asks to be hidden; `attention` asks to be looked at.
+---@field icon string The picture to draw now: `image://solium/tray/<id>/<kind>/<revision>` for pixels the item sent (or an icon file of its own), `image://solium/icon/<name>` for a theme icon, or empty. The attention picture while `status` is `attention`, when it has one.
+---@field iconName string Its theme icon name, or empty.
+---@field attentionIcon string The attention picture, or empty.
+---@field overlayIcon string A picture to draw over the icon's corner, or empty.
+---@field tooltipTitle string
+---@field tooltipBody string As plain text, markup taken out.
+---@field itemIsMenu boolean A primary click opens its menu: `tray.activate` does so itself.
+---@field hasMenu boolean It hands its menu over, for a shell to draw.
+---@field menuOpen boolean Its menu is open: a shell shows `menu`. One is open at a time.
+---@field menu sol.TrayMenuEntry[] Its menu's entries while it is open, once read; empty otherwise.
+
+---@class sol.TrayEvent
+---@field what "added"|"changed"|"removed"|"menu"|"owner"
+---@field origin "external"|"scene"|"script" Who did it: the application over the bus, a scene's own call, or Lua.
+---@field id? integer The item, when there is one.
+---@field item? sol.TrayItem The item as it is now, for all but `removed`.
+---@field open? boolean For `menu`: whether its menu is open now.
+---@field serving? boolean For `owner`: whether Solium has the name now.
+
+---@class sol.TrayState
+---@field available boolean Whether the watcher is running at all.
+---@field serving boolean Whether Solium has the name.
+---@field owner? { name: string, pid?: integer, program: string } Who has the name, when Solium does not.
+---@field items sol.TrayItem[] In the order they first answered.
+
+---@class sol.TrayOptions
+---@field serve? boolean Own `org.kde.StatusNotifierWatcher` on the session bus, so applications' tray icons (Steam, Discord, Telegram...) come to Solium. False by default. A nested run owns it only on the bus `SOLIUM_SESSION_BUS` names. Another program that has the name keeps it: Solium waits its turn, and `owner` names who has it.
+
+---The tray (#363): with a table, whether Solium is the tray; with none, what
+---it holds now. Its actions go through `sol.act`, each with the item's `id`:
+---`tray.activate { id, x, y }` (a primary click; an item that is a menu opens
+---its menu), `tray.secondary_activate { id, x, y }`, `tray.scroll { id,
+---delta, orientation = "vertical"|"horizontal" }`, `tray.context_menu { id,
+---x, y }` (the item draws its own menu), `tray.open_menu { id, x, y }` (its
+---menu, for a shell to draw), `tray.close_menu { id }` (or every menu, with
+---no `id`), `tray.menu_click { id, entry }` and `tray.submenu { id, entry }`.
+---`x` and `y` are where on the screen, for an item that places a window of
+---its own there. None is done behind the lock (`"locked"`).
+---@overload fun(): sol.TrayState
+---@param options sol.TrayOptions
+---@return nil
+function sol.tray(options) end
+
+---@class sol.MediaPlayer
+---@field id integer Solium's id for it, never given out twice in a run.
+---@field service string Its bus name: `org.mpris.MediaPlayer2.mpv`.
+---@field identity string Its own name for itself: `mpv`, `Spotify`. The player's own text, as are `title`, `artist` and `album`: show it as plain text.
+---@field desktopEntry string Its `.desktop` file's name, without the suffix, or empty.
+---@field icon string `image://solium/icon/<desktopEntry>`, or empty.
+---@field status "playing"|"paused"|"stopped"
+---@field playing boolean
+---@field active boolean It is the active player: the one the media keys reach.
+---@field title string
+---@field artist string Its artists, joined with ", ".
+---@field album string
+---@field art string The album art Solium read from a local file or a `data:` URI: `image://solium/media/<id>/<revision>`, or empty.
+---@field artUrl string Album art the player names on the network (`https://...`), as it named it, or empty. Solium fetches nothing; a scene that shows it fetches it itself.
+---@field trackId string The track's object path, or empty.
+---@field length number The track's length, in seconds; 0 when it is not known.
+---@field position number Seconds into the track, where it is now: in `sol.media()` and an event, worked out from where it was, the rate and the time since.
+---@field positionAt number When `position` was read, in milliseconds on the compositor's clock, in a scene's row. In Lua, `position` is already where it is now.
+---@field rate number 1.0 is normal speed.
+---@field volume? number Its own volume, 0.0 to 1.0, when it offers one.
+---@field shuffle? boolean When it offers it.
+---@field loopStatus ""|"none"|"track"|"playlist" Empty when it does not offer it.
+---@field canPlay boolean What it says it can do, and false for all when it says it cannot be controlled.
+---@field canPause boolean
+---@field canGoNext boolean
+---@field canGoPrevious boolean
+---@field canSeek boolean
+---@field canControl boolean
+
+---@class sol.MediaEvent
+---@field what "added"|"changed"|"removed"|"active" `changed` covers a seek; `active` is another player, or none, becoming the one the keys reach.
+---@field id integer The player; for `active`, the one active now, or 0 for none.
+---@field player? sol.MediaPlayer The player as it is now, for all but `removed` (and `active` with none).
+
+---@class sol.MediaState
+---@field available boolean Whether players are followed at all.
+---@field players sol.MediaPlayer[] In the order they appeared.
+---@field active? sol.MediaPlayer The one playing, else the last that played, else the newest.
+
+---@class sol.MediaOptions
+---@field watch? boolean Follow the MPRIS players on the session bus. False by default. A nested run follows them only on the bus `SOLIUM_SESSION_BUS` names.
+---@field ignore? string[] Players left out, by the part of their bus name after `org.mpris.MediaPlayer2.`, an instance's suffix (`.instance42`) included. `{ "playerctld" }` by default.
+---@field position_interval_ms? integer How often a playing player's `position` moves on in a scene, 0 to 60000; 0 moves it only when the player says where it is. 1000 by default.
+
+---Media (#379): with a table, whether Solium follows the session's media
+---players; with none, what it follows now. Its actions go through `sol.act`,
+---each on the player `id` names, or the active one with no `id`:
+---`media.play_pause`, `media.play`, `media.pause`, `media.next`,
+---`media.previous`, `media.seek { offset }` (seconds, forward or back),
+---`media.set_position { position }` (seconds into the track) and
+---`media.volume { value }` or `{ by }` (the player's own volume, 0.0 to 1.0).
+---One the player says it cannot do is refused (`"unsupported"`), as is one
+---with no player (`"no-player"`) or with none followed (`"unavailable"`).
+---They are done at the lock too: no window is reached.
+---@overload fun(): sol.MediaState
+---@param options sol.MediaOptions
+---@return nil
+function sol.media(options) end
+
+---@class sol.NotifyAction
+---@field key string `default` for a click on the body.
+---@field label string
+---@field fn? fun() Run when the action is invoked.
+
+---@class sol.NotifyOptions
+---@field summary string
+---@field body? string Markup as a sender's would be: bold, italic, underline and links.
+---@field icon? string A theme icon name.
+---@field urgency? "low"|"normal"|"critical"
+---@field timeout? number Milliseconds, 0 for never; the timeouts' default for its urgency when left out.
+---@field actions? sol.NotifyAction[]
+
+---One of the shell's own notifications, with no bus behind it: decided by the
+---`notification` hooks and shown like any other.
+---@param options sol.NotifyOptions
+---@return nil
+function sol.notify(options) end
+
+---Set the idle blank: `config.idle`, which the shipped `init.lua` hands over.
+---@param options? sol.IdleOptions
+---@return nil
+function sol.idle(options) end
+
+---Automatic reload (#223): `config.reload`, which the shipped `init.lua`
+---hands over. Applied at once -- toggling it from a binding of your own
+---works mid-session, not only from `config.lua`.
+---@param options? sol.AutoReloadOptions
+---@return nil
+function sol.auto_reload(options) end
+
+---Set device settings and shortcut policy: `config.input`, which the shipped `init.lua`
+---hands over. Applied to every device already connected and to each one
+---added later, and reapplied on reload.
+---@param options? sol.InputOptions
+---@return nil
+function sol.input(options) end
+
+---logind's `Lock` and sleep requests: `config.lock`, which the shipped
+---`init.lua` hands over.
+---@param options? sol.LockOptions
+---@return nil
+function sol.lock(options) end
+
+---Lock the session now, the way `config.lock` says: Solium's own lock screen,
+---or `lock.command`'s locker when `native` is off. logind's `Lock`, sleep and
+---`idle.lock_after` lock the same way. Over a session already locked it
+---changes nothing. It only ever locks: no `sol` function unlocks. The shipped
+---`super+ctrl+l` calls it.
+---@return nil
+function sol.lock_now() end
+
+---Pull Solium's own lock screen `progress` of the way down over the desktop,
+---from 0 (not at all) to 1 (covering it), as an iPhone's lock follows the
+---finger pulled down from the top; numbers outside are held to that. Call it
+---as your own gesture moves (`sol.on("touch")`), then `sol.lock_now()` to lock
+---from there, the lock's entry going on from `progress` for what is left of
+---`lock.enter_ms`, or `sol.lock_peek(false)` to let it go back up through the
+---exit (`lock.exit_ms` at most). The lock scene reads `Lock.state` as
+---`"peeking"` and `Lock.progress` as how far. A picture and nothing more:
+---nothing is locked, the keyboard, pointer and fingers stay the session's,
+---and nothing typed reaches the lock. Over a session already locked, or with
+---`lock.native` off, it does nothing.
+---@param progress number|false|nil
+---@return nil
+function sol.lock_peek(progress) end
+
+---X11 windows refused a tile, decoration or bar entry outright: `config.x11`,
+---which the shipped `init.lua` hands over. See #221.
+---@param options? sol.X11Options
+---@return nil
+function sol.x11(options) end
+
+---Whether a shell that is its own program sees the workspaces declared with
+---`sol.workspaces`, through `ext-workspace-v1` (#60): `config.workspaces.offered`,
+---which the shipped `workspaces.lua` hands over. A switch such a client asks
+---for reaches the `surface` listeners as the action `workspaces.go`,
+---`{ id, monitor }`, from the surface `"ext-workspace"`. `false` hides the
+---global and tells every client that bound it that it is finished.
+---@param offered boolean
+---@return nil
+function sol.workspaces_offered(offered) end
+
+---Whether a program that arranges the monitors -- kanshi, wlr-randr, a
+---settings panel -- sees them, through `zwlr-output-management-v1` (#51):
+---`config.output_management`, which the shipped `init.lua` hands over. What
+---such a program proposes reaches the `surface` listeners as the action
+---`monitors.apply`, `{ monitors = { row, ... } }` with each row as
+---`sol.monitors` takes it, from the surface `"output-management"`; the
+---program is told it succeeded only when an answer called `sol.monitors`.
+---`false` hides the global and tells every program that bound it that it is
+---finished.
+---@param offered boolean
+---@return nil
+function sol.output_management(offered) end
+
+---Which window protocols a shell that is its own program is offered:
+---`config.toplevels`, which the shipped `init.lua` hands over. A protocol
+---taken away is hidden from clients and closes every handle it gave out. See
+---#50.
+---@param options? sol.ToplevelsOptions
+---@return nil
+function sol.toplevels(options) end
+
+---Who draws a Wayland window's frame, Solium or the application:
+---`config.frames`, which the shipped `init.lua` hands over. A change reframes
+---the windows already open. A broken table is refused whole, the default kept
+---and the reason logged. See #462.
+---@param options? sol.FramesOptions
+---@return nil
+function sol.frames(options) end
+
+---Which client layer surfaces below the windows take the pointer and touch:
+---`config.layer_shell`, which the shipped `init.lua` hands over. See #461.
+---@param options? sol.LayerShellOptions
+---@return nil
+function sol.layer_shell(options) end
+
+---Override the focus input policy: `config.focus`, which `lua/modes.lua`
+---hands over on every mode change as well as at load. See #219.
+---@param options? sol.FocusModeOptions
+---@return nil
+function sol.focus_mode(options) end
+
+---The work area of the monitor a window is on, or of the active monitor when
+---no window is named or the id is unknown.
+---@param id? integer
+---@return sol.Rect
+function sol.monitor(id) end
+
+---Where the pointer is.
+---@return sol.Point
+function sol.cursor() end
+
+---The window drawn at a point, asked the way the compositor asks it: against
+---where windows are drawn, on the monitors that draw them.
+---
+---`skip` leaves one window out, which is what makes it useful while dragging:
+---the dragged window is always the one under the pointer.
+---@param x number
+---@param y number
+---@param skip? integer
+---@return integer|nil id
+function sol.window_at(x, y, skip) end
+
+---Draw a window somewhere other than where it lives, animated.
+---
+---A transform: the window keeps its place and its client is told nothing, so
+---`sol.present_clear` puts it back exactly. Input follows the rect it is drawn
+---at.
+---
+---A present that lands exactly on the window's own frame (no rect, no rotation,
+---full opacity and client_opacity) lets the window go, as `sol.present_clear` does, rather than
+---holding it there.
+---@param id integer
+---@param options? sol.PresentOptions
+---@return nil
+function sol.present(id, options) end
+
+---Draw a window at a rect and animate it to where it lives: every "appears from
+---somewhere" animation. The rect is required. `opacity` and `client_opacity`
+---are what it starts at, as `sol.PresentOptions` has them; it lands opaque.
+---@param id integer
+---@param options { x: number, y: number, w: number, h: number, opacity?: number, client_opacity?: number, motion?: sol.PresentMotion, deform?: sol.Deform } `deform` is the shape it starts in, relaxed to none as it lands.
+---@return nil
+function sol.present_from(id, options) end
+
+---Whether the compositor was started with `--debug-mode` or with
+---`SOLIUM_DEBUG_MODE` set. The Developer Tweaks panel asks this.
+---@return boolean
+function sol.debug_mode() end
+
+---Read the configuration again, without ending the session.
+---
+---A configuration that fails to load leaves the running one in place. See
+---`sol.keep` and the `restore` event for what a reload carries.
+---@return nil
+function sol.reload() end
+
+---Take the compositor's shortcuts back from the window holding them.
+---
+---A window that is itself a desktop -- a virtual machine, a remote desktop, a
+---nested compositor -- can ask for every key, and while it has the keyboard no
+---binding fires over it except one that asked with `inhibited`. This hands
+---them back to the bindings until the keyboard leaves that window; the next
+---time the window has the keyboard, it holds them again. The shipped
+---`super+Escape` calls it. Nothing happens when no window holds them.
+---@return nil
+function sol.take_shortcuts_back() end
+
+---
+---Take the pointer back from the window holding it: a game that locked it
+---still or confined it to its window. Only the window with the keyboard ever
+---holds the pointer, so moving the keyboard elsewhere lets go of it too; this
+---is for when the keyboard is still on the game. The window holds the pointer
+---again once it is pressed on. An X11 window (a Proton game) also loses the
+---keyboard, because an X client lets go of its own grabs only when it loses
+---the focus. The shipped `super+Escape` calls it. Nothing happens when no
+---window holds the pointer.
+---@return nil
+function sol.release_pointer() end
+
+---Choose how every window is framed, at once.
+---
+---A name is a folder under `~/.config/solium/qml/panes` or the shipped
+---`qml/panes`, or a single file under `~/.config/solium/qml/decorations`; a
+---path is anyone's; `"none"` draws no frame. `SOLIUM_PANE`, when set, wins over
+---the name given here.
+---
+---A style folder's `effects.toml`, if it has one, is read here, every time, and
+---its effect rules bound for the windows it frames; what is wrong with it is
+---listed by `sol.problems()` under `style:<folder>`.
+---
+---Already open windows keep the frame they have until the new one is built:
+---a few of its scenes a frame, within `sol.pane_build`, and then every window
+---changes at once. A window's frame from the style before is kept, so a switch
+---back to it changes at once with nothing built.
+---@param name? string
+---@return nil
+function sol.pane(name) end
+
+---How long a frame may spend building the windows' frames when the pane style
+---changes, in milliseconds: `config.pane_build`. At least one scene is built a
+---frame, however small this is, so a switch always finishes; more time is a
+---shorter switch at the cost of the frames it is built in.
+---@param milliseconds number
+---@return nil
+function sol.pane_build(milliseconds) end
+
+---The old name for `sol.pane`, from when a style was a single QML file. The
+---same function.
+sol.decoration = sol.pane
+
+---Hand values of the configuration's own to every layer of every pane.
+---
+---Every layer's root reads them as one object, `values`, which `PaneStyle`
+---declares for an inline layer and a delegated layer declares itself
+---(`property var values: ({})`): so a setting the configuration reads can
+---reach the QML that draws by it, and the compositor never knows what the
+---setting is. Each call merges its keys into what is there, so two scripts
+---each handing their own keep both; a key, once given, keeps its last value
+---until the configuration is reloaded, which starts with none. Values are
+---what `sol.surface`'s `properties` take. A window opened later is told them
+---too.
+---@param values table
+---@return nil
+function sol.pane_values(values) end
+
+---Hand values to one window's frame alone (#417).
+---
+---Its layers read them as one object, `windowValues`, which `PaneStyle`
+---declares for an inline layer and a delegated layer declares itself
+---(`property var windowValues: ({})`): what the configuration keeps for that
+---window and its frame shows, its opacity on a quick-settings slider for one.
+---Merged by key, as `sol.pane_values` merges, and gone with the window; a
+---reload starts every window's afresh. A window that is not there is handed
+---nothing. What a frame sends back is heard with `sol.on("frame", ...)`.
+---@param id integer The window's id, as `sol.windows()` gives it.
+---@param values table
+---@return nil
+function sol.frame(id, values) end
+
+---Every frame style `sol.pane` could be given, found in the folders the
+---compositor looks in: sorted, bundles first, each name once.
+---@return sol.DecorationEntry[]
+function sol.decorations() end
+
+---Set what a window does between being asked for and its application arriving.
+---@param options sol.LoadingOptions
+---@return nil
+function sol.loading(options) end
+
+---Set whose own size limits a floating window's edge drag is held to.
+---
+---`floating = "ignore"` lets the drag go wherever the pointer does; anything
+---else believes every application. `ignore` lists applications, by `app_id`,
+---whose limits are never believed.
+---@param options? { floating?: "respect"|"ignore", ignore?: string[] }
+---@return nil
+function sol.client_sizes(options) end
+
+---Set how a window's picture is fitted while the window changes size -- an
+---edge or seam drag, a layout's glide, a fullscreen or maximise glide -- and
+---what fills the part it does not cover.
+---
+---`fill`: `"crop"` (the default) draws the picture at its own size from the
+---window's top-left whichever edge moves, cut to the window; `"anchor"` the
+---same against the edges that are not moving; `"stretch"` scales it to fill;
+---`"scene"` draws the window's QML scene, which today reaches only a window
+---resized before its application painted, and is `"anchor"` elsewhere.
+---`background`: what shows where the picture does not reach: `"edge"` (the
+---default: the picture's own edge, stretched), `"#rrggbb"`, `"#rrggbbaa"` or
+---`"none"`. Another value is logged and the default kept. `patience`: how
+---long, in milliseconds from 0 to 5000, a
+---picture waits for its application once a change is over -- after a drag's
+---release, a fullscreen or maximise glide's landing, or a layout glide's
+---landing, while it stays against the edges the glide did not move (default
+---250). `tell_hz`: how often, at most, a window whose edge is being dragged
+---is told its new size, in times a second from 1 to 1000; 0 (the default) tells
+---it on every frame the drag moves. `follow`: what a floating window is drawn
+---at while its edge is dragged, `"app"` (the default: the size its application
+---has drawn, against the edges not moving) or `"pointer"` (the drag's own
+---rectangle, with `fill` covering the difference). `sync`: how long, in
+---milliseconds from 0 to 5000, the windows a layout's drag moves wait for one
+---another's applications, so a seam moves as one (default 0: each follows the
+---pointer at once). `overlap`: whether a window being resized is told to draw
+---its next size as soon as a frame showing its last starts to be drawn
+---(default true; false waits for the screen). Each call sets all seven, a key
+---left out at its default. `init.lua` calls this with `config.resize`, and
+---`modes.lua`
+---again with a mode's own fill from `config.resize.modes` whenever the mode
+---changes, when that table names any mode.
+---@param options? { fill?: "anchor"|"crop"|"stretch"|"scene", background?: string, patience?: number, tell_hz?: number, follow?: "app"|"pointer", sync?: number, overlap?: boolean }
+---@return nil
+function sol.resize(options) end
+
+---Set what a fullscreen window covers.
+---
+---`"top"` (the default) covers the top layer, so bars go under it; `"none"`
+---leaves bars over it. Another name is logged and the default kept.
+---@param options? { covers?: "top"|"none" }
+---@return nil
+function sol.fullscreen(options) end
+
+---Set the pointer's XCursor theme, size and scene. Applied at once, so a reload
+---is how a theme or a scene is tried, and a scene whose files changed is built
+---again. Not `sol.cursor`, which says where the pointer is.
+---@param options? sol.CursorOptions
+---@return nil
+function sol.cursor_theme(options) end
+
+---Choose how QML renders, and how long the GPU trial may take.
+---
+---Read once, when the compositor starts, before any scene does; a reload does
+---not change it. `--qml`, `SOLIUM_QML` and `SOLIUM_QML_GPU` override it.
+---@param options? sol.QmlOptions
+---@return nil
+function sol.qml(options) end
+
+---Say how this session is announced, and how long a signal to end waits.
+---
+---Read once, when the compositor starts; a reload does not change it. Who is
+---told: the session bus, when Solium is started as the session with
+---`solium --tty --session`; nobody, for a `--tty` start by hand or a nested
+---run, unless `SOLIUM_SESSION_BUS` names a bus to tell instead. The shipped
+---`init.lua` calls it with `config.session`.
+---@param options? sol.SessionOptions
+---@return nil
+function sol.session(options) end
+
+---Stop presenting a window: animate it back to where it lives.
+---@param id integer
+---@return nil
+function sol.present_clear(id) end
+
+---Name a selection of windows, surfaces and monitors, so one transform can
+---carry them together.
+---
+---Declaring the name again replaces the membership and keeps the transform, so
+---a mode that rebuilds its groups on every pass does not restart its own
+---animation. `false` or `nil` takes the name away. With `parent`, the group's
+---members are carried by it and then by the parent: the faces of a cube by
+---the cube, the windows of a room by the camera.
+---@param name string
+---@param selection sol.Selection|false|nil
+---@return nil
+function sol.group(name, selection) end
+
+---Move, fade or turn a selection as one.
+---
+---Composes with each member's own `sol.present`, so a window tilted inside a
+---moving desk stays tilted within it. `motion` sets this call's own timing;
+---left out, it is whatever `sol.animate` set. With a `pose`, the selection is
+---turned as one about one origin, and a member posed is drawn in front of one
+---it comes nearer the viewer than:
+---
+---```lua
+---sol.present_group("cube", { pose = { rotate_y = -90, perspective = 2400,
+---    origin = { x = 800, y = 450, z = -800 } }, backface = true })
+---```
+---@param name string
+---@param shift? sol.Shift
+---@param motion? sol.Motion
+---@return nil
+function sol.present_group(name, shift, motion) end
+
+---Animate a selection back to where its members live.
+---@param name string
+---@param motion? sol.Motion
+---@return nil
+function sol.present_group_clear(name, motion) end
+
+---Set the timing for every animated command queued after this one in the same
+---handler. Left unset, it is 220 ms and `"outCubic"`. In a `"fullscreen"` or
+---`"maximize"` listener it is also how the window's own move is timed; there,
+---left unset, the move is instant.
+---@param options sol.Motion
+---@return nil
+function sol.animate(options) end
+
+---Give a window the keyboard. The `"focus"` event is told with what this
+---handler is answering (`sol.focus_source()`). With `warp`, the pointer goes
+---to the window once it has the keyboard, as `sol.warp` takes it: `true` is
+---its centre at once, a table says where and how. A focus the session's lock
+---refuses takes the pointer nowhere.
+---@param id integer
+---@param options? { warp?: boolean|sol.Warp }
+---@return nil
+function sol.focus(id, options) end
+
+---Claim a finger before its down is delivered. First accepted request wins.
+---Only the down currently being dispatched can be claimed; late/stale requests
+---are ignored. Capture keeps the stream in Lua; move/resize use shared drag
+---operations until up/cancel, without grabbing the pointer. No implicit focus.
+---@param slot integer
+---@param options sol.TouchOptions
+---@return nil
+function sol.touch(slot, options) end
+
+---Dispatch existing click listeners explicitly, for a Lua-selected touch action.
+---@param x number Global logical coordinate.
+---@param y number Global logical coordinate.
+---@return nil
+function sol.click(x, y) end
+
+---Take the pointer to a window or a point.
+---
+---The pointer is there at once: what it is over, what is hovered, which
+---client has it and the shape it shows are the destination's from the first
+---instant, and no focus follows it. Its picture flies there from wherever it
+---is drawn, along `warp.motion`; `Solium.cursor` says so while it does
+---(`moving`, `from`, `to`, `velocity`). Moving the mouse mid-flight carries on
+---from where the pointer is, or from the picture as `warp.interrupt` says; the
+---jump is never measured as the mouse's speed; a press lands it; and a warp
+---asked for while a press is handled waits for the buttons to come up, so the
+---click goes where it was aimed, and is refused then if a menu the click opened
+---holds the pointer. Carried out once every
+---command of this handler is applied, so a window it has just moved is warped
+---to where it was moved; the last warp asked for wins. Kept on a screen.
+---Refused while a button or a client holds the pointer, and while the session
+---is locked. A window that is not there takes it nowhere. Anything but a
+---window's id or a point `{ x, y }` is an error, as is `to` with a point.
+---@param target integer|sol.Point A window's id, or a point in the global space.
+---@param warp? sol.Warp
+---@return nil
+function sol.warp(target, warp) end
+
+---Press a button or a key on a window and let it go, as a device would: the
+---window's application hears it, and nothing of the compositor's does -- no
+---binding fires, no click focuses or raises, no scene hears it. A
+---configuration's "back" is this: a tablet shell's edge swipe sends `side`,
+---the mouse's back button, or `alt+Left`, or `Escape`, as it decides.
+---
+---`{ button = name }` is `left`, `right`, `middle`, `side` (`BTN_SIDE`, a
+---mouse's back) or `extra` (`BTN_EXTRA`, forward). The window is given the
+---pointer at its centre for the click, without the pointer moving or its
+---picture changing, and the pointer goes straight back to what is under it;
+---the keyboard stays where it is. Nothing is clicked while a button, a drag,
+---a menu or a scene holds the pointer, or while a client holds it (a game's
+---locked pointer) unless the window is that client's and already has it.
+---
+---`{ key = combo }` is a key, spelled as `sol.bind` spells it: `"Escape"`,
+---`"alt+Left"`, `"ctrl+shift+t"`, its key any xkb keysym name in any case,
+---found in the active layout first and then in the others, so `.` with
+---Russian active is Russian's `.` and the `t` of a shortcut is English's,
+---as a person would press them. A key to a window is
+---the window being typed into, so a window without the keyboard is focused
+---first, as `sol.focus` would, and keeps it.
+---
+---With no id, the focused window; with nothing focused, nothing happens. A
+---window that is not in `sol.windows()`, or is leaving or minimized, is an
+---error, as is a spec that is not one of the two. Nothing is pressed behind
+---the lock, and a binding allowed at the lock cannot ask for it.
+---@param id? integer
+---@param spec { button?: "left"|"right"|"middle"|"side"|"extra", key?: string }
+---@return nil
+function sol.press(id, spec) end
+
+---What the handler running now is answering, in the `"focus"` event's words:
+---what a `sol.focus` made here would be told with. For a policy that acts
+---where no window takes the keyboard, as `lua/workspaces.lua` does for a
+---switch to an empty workspace.
+---@return sol.FocusSource
+function sol.focus_source() end
+
+---Make a window fullscreen, or give it back its place if it already is. With no
+---id, the focused window; with nothing focused, nothing happens.
+---@param id? integer
+---@return nil
+function sol.toggle_fullscreen(id) end
+
+---Maximise a window to its monitor's work area, or give it back its place if
+---it already is. With no id, the focused window; with nothing focused, nothing
+---happens.
+---@param id? integer
+---@return nil
+function sol.toggle_maximize(id) end
+
+---Hold a window that is being dragged where it is, or let it go on (#452).
+---While it is held the pointer, or the finger, goes on, and the `"drag"`
+---listeners go on hearing it; let go, the window moves on from where it
+---stands, so nothing jumps. A window let go of while it is held has not been
+---moved by the drag, and no `"drop"` is told. Nothing for a window no drag
+---has. `lua/floating.lua` holds a maximised window this way until the pointer
+---has gone `maximize.restore_after`.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.drag_hold(id, held) end
+
+---Say where the pointer holds a window that is being dragged (#452): `x` and
+---`y` are shares of its frame's width and height, and `dx` and `dy` pixels
+---further, each 0 when left out, from the frame's top-left corner. The point
+---is kept inside the frame. The window is put so that point is under the
+---pointer at once, a glide it is part of the way through is aimed there, and
+---the drag goes on from there. The frame's size is the one the window was
+---last asked for, so a window restored a moment ago is gripped at its
+---restored size. Nothing for a window no drag has.
+---
+---    sol.drag_grip(id, { x = 0.25, dy = 16 }) -- a quarter along, 16 down
+---@param id integer
+---@param grip { x?: number, y?: number, dx?: number, dy?: number }
+---@return nil
+function sol.drag_grip(id, grip) end
+
+---Keep a window that is being resized as it is, or let the resize go on
+---(#454): the counterpart of `sol.drag_hold`. While it is held the pointer, or
+---the finger, goes on and the window keeps its size and place, and the
+---`"resize"` listeners are offered nothing, so no layout moves a seam for it.
+---Let go, the resize goes on from where the pointer is then, so nothing jumps.
+---A resize let go of while held ends with the window as it was. Hold it on the
+---`"resizing"` event's `"begin"` to hold it from the first motion. Nothing for
+---a window no resize has.
+---@param id integer
+---@param held boolean
+---@return nil
+function sol.resize_hold(id, held) end
+
+---Move the keyboard to the window beside the focused one. Every `direction`
+---listener is told `("focus", dir)`, and the layout in charge answers
+---(`lua/direction.lua`). Anything but the four directions is an error. The
+---listeners' time counts against the handler that called this, so one stopped
+---at the deadline stops that handler too.
+---@param dir "left"|"right"|"up"|"down"
+---@return nil
+function sol.focus_direction(dir) end
+
+---Move the focused window in a direction: `direction` listeners are told
+---`("move", dir)`. Tiling trades it with its neighbour, scrolling moves it
+---within or between columns, and a fullscreen or maximised window moved to
+---another monitor stays so there. Anything but the four directions is an error.
+---The listeners' time counts against the handler that called this, so one
+---stopped at the deadline stops that handler too.
+---@param dir "left"|"right"|"up"|"down"
+---@return nil
+function sol.move_direction(dir) end
+
+---Put a window where it lives: the layout's call.
+---
+---The client is told the size and asked to redraw. The rect is a tile unless
+---`tile = false`: a client that will not shrink to it is cut to it rather than
+---drawn over its neighbours. A rect is required.
+---@param id integer
+---@param options sol.PlaceOptions
+---@return nil
+function sol.place(id, options) end
+
+---Hand the compositor a tree of boxes, under `key`, which replaces the tree
+---of that name whole; an empty list takes it away. The compositor solves it
+---into rectangles, with each window's application's own least and largest
+---size taken into account as its box says, places each window in its box by
+---the motion `sol.animate` set, and keeps it solved: a window whose
+---application says another size is given room without being asked about,
+---and a window's dragged edge moves the seam beside it on every frame of the
+---drag, with the `"seam"` event telling where it was left once it is let go.
+---A window is in one tree at a time; placed with `sol.place`, it leaves it.
+---A tree that is not one is an error, said where it was made.
+---@param key string
+---@param area sol.Rect The rectangle the root fills.
+---@param boxes sol.Box[]
+---@return nil
+function sol.arrange(key, area, boxes) end
+
+---Where each window of a tree comes out, as the compositor solves it, in the
+---tree's order: the same arithmetic, to decide by before handing it over.
+---`limits`, by window id, stands for what the applications say of their sizes;
+---without it, the desktop's own windows do.
+---@param area sol.Rect
+---@param boxes sol.Box[]
+---@param limits? table<integer, { min?: { w: number, h: number }, max?: { w: number, h: number } }>
+---@return sol.Solved[]
+function sol.solve(area, boxes, limits) end
+
+---Grow a window in its tree by moving one seam: the one after it on `axis`,
+---or the one before it the other way when there is none after. `by` is a
+---share of the split's room; less than nothing shrinks it. Held to each box's
+---least and each application's as a drag is, and moved by the motion
+---`sol.animate` set. The `"seam"` event tells where it was left.
+---@param id integer
+---@param axis "x"|"y"
+---@param by number
+---@return nil
+function sol.grow(id, axis, by) end
+
+---Let a window go from its tile, when a layout stops arranging it.
+---`modes.use` sends this for every window when the layout in charge changes.
+---@param id integer
+---@return nil
+function sol.unplace(id) end
+
+---Ask a window to close. A request, not a kill: its application may refuse.
+---@param id integer
+---@return nil
+function sol.close(id) end
+
+---Minimize a window: it stays mapped and alive, is drawn only while a
+---present on it plays out, takes no pointer or touch, lets go of a pointer
+---lock, and gives up the keyboard. A modal dialog goes with the window it
+---belongs to: minimizing either minimizes both, and each is told `minimize`.
+---`minimize` is told once, and a window already minimized is left as it is.
+---With no id, the focused window; with nothing focused, nothing happens.
+---@param id? integer
+---@return nil
+function sol.minimize(id) end
+
+---Show a minimized window again, with its modal dialogs or the window it is
+---a dialog of: `unminimize` is told once for each, and a window that is not
+---minimized is left as it is. A window on no monitor is brought onto one
+---first. It does not take the keyboard from another window, but with nothing
+---focused the keyboard settles as it does after any window comes or goes;
+---`sol.focus` shows a minimized window and focuses it. With no id, the
+---focused window, which is never a minimized one.
+---@param id? integer
+---@return nil
+function sol.unminimize(id) end
+
+---Show a minimized window anyway, where a present puts it, or stop: what an
+---overview or a recents screen does to draw one as a thumbnail. Still no
+---pointer or touch reaches it, so the script that shows it asks its own
+---rectangles. Nothing for a window that is not minimized; showing it again
+---forgets it.
+---@param id integer
+---@param shown? boolean `true` when left out.
+---@return nil
+function sol.show_minimized(id, shown) end
+
+---Keep a window above every window that is not, or stop: in what is drawn and
+---in what is clicked. A click or the keyboard raises a window only among its
+---own kind, so focusing another window never puts it over one kept above;
+---windows kept above keep their usual order among themselves, and a window's
+---dialogs stay over it. A focused fullscreen window still covers it, and the
+---bars and the lock are as they were. The window's own state: a reload keeps
+---it, and it goes with the window. The row's `above` says which. With no id,
+---the focused window; with nothing focused, nothing happens.
+---@param id? integer
+---@param on? boolean|"toggle" `true` when left out.
+---@return nil
+function sol.keep_above(id, on) end
+
+---Perform an action of the vocabulary: the same names a scene sends with
+---`Solium.send`, `windows.focus`, `windows.close`, `windows.fullscreen`,
+---`windows.maximize`, `windows.minimize` and `windows.unminimize`, each with
+---`{ id = <window id> }`; `windows.fullscreen` and `windows.maximize` toggle.
+---`data` is handed over as a surface's `properties` are, so a table nested
+---deeper than 64 or holding more than 65 536 values, or one that contains
+---itself, is an error in the handler.
+---Queued like every other request, and answered by `done(ok, reason)` once
+---the compositor has acted, in a handler of its own; `reason` is
+---`"unknown-action"`, `"unknown-window"`, `"bad-data"`, for a
+---`windows.focus`, `windows.minimize` or `windows.unminimize` behind the lock
+---`"locked"`. A window still
+---loading is `"unknown-window"` to all but `windows.close`. A `done` that
+---calls `sol.act` again is told again in the same dispatch, 16 rounds at
+---most, and the rest at the next one. Answers the attempt's id, one no
+---earlier `sol.act` answered. A
+---`workspaces.*` action is not the compositor's: the file that keeps the
+---workspaces answers it, with `actions.override` in `lua/actions.lua`. An
+---override is a `surface` listener of its own, under the same deadline, so
+---one stopped three times is taken out alone, and its action goes to
+---`sol.act` again.
+---@overload fun(action: "windows.focus"|"windows.close"|"windows.fullscreen"|"windows.maximize"|"windows.minimize"|"windows.unminimize", data: { id: integer }, done?: fun(ok: boolean, reason?: string)): integer
+---@param action string
+---@param data? any
+---@param done? fun(ok: boolean, reason?: string)
+---@return integer attempt
+function sol.act(action, data, done) end
+
+---Start a program, with its arguments as separate strings:
+---`sol.spawn("foot", "-e", "htop")`. A loading window is opened for it, which
+---its first window fills -- its first that can: a splash, a window of one
+---fixed size, is shown over it instead -- and a command that opens none wants
+---`sol.run`.
+---
+---The program gets the environment Solium was started with, not what Qt and
+---the libraries it loads have written into Solium's own since. On top of that:
+---`WAYLAND_DISPLAY` naming this compositor; `DISPLAY` naming its own Xwayland,
+---or removed when there is none; `XDG_CURRENT_DESKTOP`, which is `Lilium`
+---unless the session named one; `XDG_SESSION_TYPE=wayland` when it is unset;
+---and `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, naming the window opened
+---for it. It holds no file descriptor beyond stdin, stdout and stderr. stdin
+---and stdout are `/dev/null`, and stderr is Solium's.
+---@param program string
+---@param ... string
+---@return nil
+function sol.spawn(program, ...) end
+
+---Start a program that shows no window: a command run in the background,
+---`sol.run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.5")`.
+---
+---The same child as `sol.spawn` starts — the environment Solium was started
+---with, the compositor's `WAYLAND_DISPLAY` and `DISPLAY`, no file descriptor
+---past stdin, stdout and stderr, a session of its own — but no loading window
+---is opened for it and it is handed no activation token, since nothing will
+---come back to fill either. Use `sol.spawn` for an application, which opens a
+---window; `sol.run` for a command, which does not. A program that exits with
+---an error is logged, as one `sol.spawn` starts is.
+---
+---With a table first, the program and its arguments, what it says comes back
+---(#472): `sol.run({ "nmcli", "-t", "radio", "wifi" }, { done = function(r)
+---... end })`. The same child, with stdin on `/dev/null` and stdout and stderr
+---read by Solium as they arrive, never waiting for it. `lines` is called with
+---each whole line, without its newline, and the stream it came from, and once
+---more at the end for a last line with no newline; `done` once, after the
+---last line, with a `sol.RunResult`. At `timeout` the child is killed with
+---every process it started, and `timed_out` is true. Past `max_output` bytes
+---a stream is closed: what was read is kept and `truncated` is true. Because
+---the pipe is closed, a child still writing ends with `SIGPIPE` (`signal`
+---13), as one piped into `head` would. Output a process the child started
+---writes after the child itself has exited is not read. The defaults for
+---`timeout` and `max_output` are `config.lua`'s `run` (`sol.run_defaults`).
+---Lines and
+---`done` are dispatched like any event, each under the handler deadline. A
+---reload kills every child this form started, and none of their functions is
+---called again.
+---@overload fun(argv: string[], options?: sol.RunOptions): nil
+---@param program string
+---@param ... string
+---@return nil
+function sol.run(program, ...) end
+
+---The defaults for what a `sol.run{}` leaves out: `config.run`, which the
+---shipped `init.lua` hands over (#472). A key left out, or one of the wrong
+---kind, keeps the built-in default, and a call's own option wins over either.
+---@param options? sol.RunDefaults
+---@return nil
+function sol.run_defaults(options) end
+
+---Call `fn` once, `ms` milliseconds from now, on the compositor's clock: the
+---one animations and QML run on. Checked once each time round the event loop,
+---which wakes at least every 16 ms, so it runs no earlier than asked and
+---rarely more than a frame later. Timers due at the same check run in the
+---order they fell due, and in the order they were made among those due at
+---the same moment; one set from inside a timer waits for the next check. A
+---reload cancels every timer.
+---@param ms number Milliseconds, 0 or more.
+---@param fn fun()
+---@return sol.Timer
+function sol.after(ms, fn) end
+
+---Call `fn` every `ms` milliseconds, on the compositor's clock, as
+---`sol.after` does once, until the handle's `cancel` or a reload. A period
+---the compositor fell behind on is caught up once, not once for each missed
+---period. A function stopped at the handler deadline three times is
+---cancelled.
+---@param ms number Milliseconds, above 0.
+---@param fn fun()
+---@return sol.Timer
+function sol.every(ms, fn) end
+
+---Read a file without holding the compositor (#473): it is read on a thread
+---of its own, to its end rather than to the size it reports, so `/proc` and
+---`/sys` files work, and `fn` is called with what it holds, or with `nil`
+---and why it could not be read, the error as the system words it (`"No such
+---file or directory (os error 2)"`). A file longer than `files.max_read` in
+---`config.lua` (`sol.files`), 4 MiB by default, is not read: `fn` gets `nil,
+---"longer than files.max_read"`. `fn` is dispatched like any event, under the
+---handler deadline, at most a frame after the read ends. A read of a path
+---waits for the `sol.write`s to it asked for before it, so a configuration
+---reads back what it wrote. At most four reads run at once; the rest wait,
+---in the order they were asked for. A reload drops `fn`, and it is not
+---called.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param fn fun(data: string?, err: string?)
+---@return nil
+function sol.read(path, fn) end
+
+---Write a file atomically, without holding the compositor (#473): `data` is
+---written beside it, as `<path>.solium-tmp-<pid>`, synced, renamed over it,
+---and the directory synced, on a thread of its own. Whatever happens
+---half-way, `path` is the old file, whole, or the new one. Writes to one
+---path land in the order they were asked for. A symbolic link is followed,
+---and an existing file keeps its permissions. The directory must exist; it
+---is not made. `fn`, when given, is called with `nil` once the file is
+---written, or with why it was not. A reload drops `fn`, but the write still
+---lands.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param data string
+---@param fn? fun(err: string?)
+---@return nil
+function sol.write(path, data, fn) end
+
+---Follow a file (#473): `fn` is called with a `sol.WatchEvent` each time it
+---is written and closed, created, removed, or another file is renamed onto
+---or off its name. The watch is on its directory, so a file replaced by a
+---rename, as editors and `sol.write` replace one, is still followed, and one
+---that does not exist yet is allowed and told `"created"` when it appears.
+---Writing a new file is told as `"created"`, then `"changed"`. Its
+---directory must exist: watching a file in a missing directory is an error.
+---When the directory is removed, the watch is told `"removed"`, once, and
+---ends, and `fn` is let go. Events are read once each
+---time round the event loop and dispatched like any event. The watch ends
+---with the handle's `cancel` or a reload, or when `fn` has been stopped at the
+---handler deadline three times.
+---@param path string Absolute, or starting with `~/`; anything else is an error.
+---@param fn fun(event: sol.WatchEvent)
+---@return sol.Watch
+function sol.watch(path, fn) end
+
+---A table that survives a restart (#473): `sol.keep`'s, also saved to
+---`$XDG_STATE_HOME/solium/state/<name>.json` (`~/.local/state/...` without
+---it). The file is read the first time the store is asked for in a
+---session, here, at the call: a key in it wins over the one in `defaults`,
+---and a default it lacks is filled in, inside nested tables too; a list is
+---taken whole. Mutate the table in place. Every `files.store_interval`
+---(a second) it is compared with what was last saved and, when it differs,
+---saved as `sol.write` writes; and before a reload, and when the compositor
+---stops, which waits two seconds at most for it. Only strings, finite
+---numbers, booleans, and tables of them (lists, and tables with string
+---keys) are saved; anything else is left out and named in the log once. A
+---missing file gives the defaults; one that is not a JSON object or list,
+---or is larger than `files.store_max` (1 MiB), gives the defaults, is named
+---in the log and is moved to `<name>.json.broken`, never written over.
+---`solium --check` reads the file and changes nothing: a broken one is a
+---warning in its output, left where it is.
+---
+---After that first read, the store lives in the compositor for the rest of
+---the session: a reload hands the table back from memory, as the plain data
+---it saves, without reading the file again, and a store the new
+---configuration does not ask for is kept too, for a later one that does.
+---Asked for twice under one name, it is the same table.
+---@param name string Letters, digits, `_` and `-`; anything else is an error.
+---@param defaults? table
+---@return table
+function sol.store(name, defaults) end
+
+---How much a `sol.read` reads, how often the stores are saved and how large
+---a store file is read: `config.files`, which the shipped `init.lua` hands
+---over (#473), before any `sol.store` of the configuration's. A key left
+---out, or one of the wrong kind, keeps the default.
+---@param options? sol.FilesOptions
+---@return nil
+function sol.files(options) end
+
+---How long the compositor waits for the window manager, which this
+---configuration runs in: `config.wm`, which the shipped `init.lua` hands
+---over. After `ask_ms` an event goes on without its answer, which is applied
+---when it comes; a window manager that stops answering, or goes, is started
+---again. A key left out, or one of the wrong kind, keeps the default.
+---@param options? sol.WmOptions
+---@return nil
+function sol.wm(options) end
+
+---Whether a program can be found on `PATH`. A name with a `/` in it is
+---checked as a path. Nothing is run.
+---@param program string
+---@return boolean
+function sol.which(program) end
+
+---End the session. `Ctrl+Alt+Backspace` does the same and cannot be rebound.
+---@return nil
+function sol.quit() end
+
+---Take input away from clients, or give it back.
+---
+---While a script holds it, keys it has not bound are swallowed, pointer
+---presses go to `click` listeners, and focus stops following the pointer.
+---Release it when you leave, or nothing reaches a window again.
+---@param grabbed boolean
+---@return nil
+function sol.grab_input(grabbed) end
+
+---Say which mode is in charge. The compositor keeps the text and logs a change
+---at debug level, and a hosted shell reads it as `Solium.status`; nothing the
+---compositor draws itself shows it.
+---@param text string
+---@return nil
+function sol.status(text) end
+
+---Bind a key combination to a function.
+---
+---The combination is normalised, so `super+shift+q` and `Shift+Super+Q` are
+---one binding. A later call for the same combination replaces the earlier one,
+---and what it asked for with it: a binding bound again with nothing asked asks
+---for nothing.
+---While the session is unlocked, a bound combination never reaches the
+---application with the keyboard. While it is locked, only a binding that asked
+---with `locked` fires, and the lock screen is not sent its key. A key a mode
+---needs only while it is up is bound when the mode starts and taken away with
+---`sol.unbind` when it stops, as `overview.lua` does with `escape`.
+---`note` is a short phrase saying where the binding came from, which
+---`solium --check` prints beside it; or a `sol.BindOptions` table, which holds
+---the note and what else the binding asks for, as
+---`{ note = "laptop keys", repeating = true, locked = true }` does for the
+---shipped volume keys.
+---@param combo string
+---@param handler fun()
+---@param note? string|sol.BindOptions
+---@return nil
+function sol.bind(combo, handler, note) end
+
+---What a binding asks for besides its handler: `sol.bind`'s third argument as
+---a table. Anything else in it is an error, so a misspelt option is not one
+---that quietly does nothing.
+---@class sol.BindOptions
+---@field note? string Where the binding came from, which `solium --check` prints beside it.
+---@field repeating? boolean While the key is held, the handler runs again at the keyboard's repeat delay and rate (`sol.keyboard()`'s `repeat_delay` and `repeat_rate`), as an application repeats a letter. It stops when the key comes up or any other key goes down or up, when the keyboard moves to another window by anything but the handler itself, at a VT switch, when the session locks, and when the handler fails. A modifier or a group toggle never repeats, nor anything on a keyboard whose rate is 0. A loop that looks late runs it once, not once for every repeat it missed. Spelled `repeating` because `repeat` is a word of Lua's own.
+---@field inhibited? boolean It fires while a window holds the compositor's shortcuts as well -- a virtual machine or a remote desktop that asked for every key -- over which no other binding does. For the key that takes them back, `sol.take_shortcuts_back`. Off unless asked.
+---@field locked? boolean It fires while the session is locked as well: for a key that is no way past the lock, such as volume, brightness and media. There its handler may not act on a window or a workspace, or end the session -- a `sol` call that would is an error the handler can catch -- and anything else, `sol.spawn` included, it may. At Solium's own lock screen it fires only for a key that types no character there: a letter, a digit or a symbol, with Shift or without, always goes into the password. Off unless asked.
+
+---Whether a combination is bound, in whatever spelling it is given.
+---@param combo string
+---@return boolean
+function sol.bound(combo) end
+
+---Take a binding away. The combination then reaches the application with the
+---keyboard again. With a `note`, `solium --check` lists the combination as
+---removed by the configuration.
+---@param combo string
+---@param note? string
+---@return nil
+function sol.unbind(combo, note) end
+
+---Report a setting nothing reads. `config.lua` calls this for each key of a
+---`user.lua` its defaults do not define; `solium --check` lists them and exits
+---with 1. `meant` is a near-miss suggestion.
+---@param key string
+---@param meant? string
+---@return nil
+function sol.unknown(key, meant) end
+
+---Listen for an event. Listeners are added, never replaced, and one that fails
+---is logged while the others still run.
+---
+---A listener runs under a 100 ms deadline: one that takes longer is stopped
+---with an error and logged with the file and line it was written at and the
+---file and line it was stopped at (for an `actions.override`, the listener
+---`actions.lua` writes for it, and the override's own line), the other
+---listeners still run, and one stopped three times is taken out until the
+---configuration is reloaded. The stops are counted by function, so a
+---function listening for two events counts the stops of both, and from its
+---third on is taken out of each event it is stopped in. Bindings, and each
+---`done` of `sol.act`, run under the same deadline, and a stopped binding is
+---logged the same way. A `done` is struck by function too, and one
+---stopped three times is not called again until the configuration is
+---reloaded; a `done` written inline is a new function at each `sol.act`, so
+---it is stopped each time rather than taken out. What a `done` asked for in
+---the run that was stopped is dropped.
+---The compositor starts each one's clock itself, so nothing a handler calls
+---puts it off. `pcall`, `xpcall` and `load` hand the stop on rather than
+---catch it, and `xpcall`'s message handler is not called for it. A `__gc`
+---finalizer, and the `__close` of a to-be-closed variable in the function a
+---stop interrupts, run where no hook does, so the deadline cannot stop a loop
+---in either.
+---@overload fun(event: "open"|"closing"|"close_landed"|"refused"|"close"|"minimize"|"unminimize"|"rename", handler: fun(id: integer))
+---@overload fun(event: "size", handler: fun(id: integer, w: integer, h: integer))
+---@overload fun(event: "focus", handler: fun(id: integer, source: sol.FocusSource, changed: boolean))
+---@overload fun(event: "activate", handler: fun(id: integer, why: "launch"|"request"))
+---@overload fun(event: "drag", handler: fun(id: integer, phase: "begin"|"move"|"end", x: number, y: number))
+---@overload fun(event: "resizing", handler: fun(id: integer, phase: "begin"|"end", x: number, y: number))
+---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
+---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
+---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
+---@overload fun(event: "seam", handler: fun(key: string, id: integer, shares: number[]))
+---@overload fun(event: "click", handler: fun(x: number, y: number))
+---@overload fun(event: "touch", handler: fun(event: sol.TouchEvent))
+---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))
+---@overload fun(event: "frame", handler: fun(id: integer, name: string, data: any))
+---@overload fun(event: "direction", handler: fun(verb: "focus"|"move", dir: "left"|"right"|"up"|"down"))
+---@overload fun(event: "layout"|"monitors"|"restore"|"problems", handler: fun())
+---@overload fun(event: "text_input", handler: fun(field: sol.TextField, why: "field"|"caret"|"framed"))
+---@overload fun(event: "keyboard", handler: fun(state: sol.KeyboardState, changed: "layout"|"caps"|"num"))
+---@overload fun(event: "notification", handler: fun(n: sol.Arrival): { banner?: boolean, keep?: boolean }|nil)
+---@overload fun(event: "notifications", handler: fun(event: sol.NotificationEvent))
+---@overload fun(event: "audio", handler: fun(event: sol.AudioEvent))
+---@param event sol.Event
+---@param handler function
+---@return nil
+function sol.on(event, handler) end
+
+---Write a line to the compositor's log, at info level.
+---@param message string
+---@return nil
+function sol.log(message) end
+
+---Internal: the bindings, by normalised combination. Use `sol.bind`,
+---`sol.bound` and `sol.unbind`.
+---@private
+---@type table<string, fun()>
+sol._bindings = {}
+
+---Internal: the listeners, by event. Use `sol.on`.
+---@private
+---@type table<string, function[]>
+sol._handlers = {}
+
+---Internal: each attempt's `done`, by attempt id. Use `sol.act`.
+---@private
+---@type table<integer, fun(ok: boolean, reason?: string)>
+sol._attempts = {}
+
+---Internal: what `sol.keep` holds, by name.
+---@private
+---@type table<string, table>
+sol._keeps = {}
+
+---Internal: how many times each listener or `done` was stopped, by function.
+---@private
+---@type table<function, integer>
+sol._strikes = {}
+
+---Internal: each `sol.run{}`'s `lines` and `done`, by run id, until it is
+---done (#472). Use `sol.run`.
+---@private
+---@type table<integer, { lines?: fun(line: string, stream: "stdout"|"stderr"), done?: fun(result: sol.RunResult) }>
+sol._runs = {}
+
+---Internal: each timer's function, by timer id, until it is cancelled or, for
+---`sol.after`, has run (#472). Use `sol.after` and `sol.every`.
+---@private
+---@type table<integer, fun()>
+sol._timers = {}
+
+---Internal: each `sol.read`'s function, and each `sol.write`'s that was
+---given one, by id, until it is told (#473). Use `sol.read` and `sol.write`.
+---@private
+---@type table<integer, function>
+sol._files = {}
+
+---Internal: each watch's function, by id, until it is cancelled (#473). Use
+---`sol.watch`.
+---@private
+---@type table<integer, fun(event: sol.WatchEvent)>
+sol._watches = {}
+
+---Internal: each store's table, by name (#473). Use `sol.store`.
+---@private
+---@type table<string, table>
+sol._stores = {}
+
+---Internal: the action functions of `sol.notify`'s own notifications, by the
+---token their command carries, until one runs (#346).
+---@type table<integer, table<string, function>>
+---@private
+sol._notify_actions = {}
+
+---Internal: the notes `sol.bind` and `sol.unbind` were given, by combination.
+---@private
+---@type table<string, string>
+sol._binding_sources = {}
+
+---Internal: what each binding asked for besides its handler, by combination,
+---for a binding that asked for something. Use `sol.bind`.
+---@private
+---@type table<string, { repeating: boolean, locked: boolean }>
+sol._binding_options = {}
+
+---Internal: what `sol.unknown` reported.
+---@private
+---@type { key: string, meant?: string }[]
+sol._unknown_settings = {}
+
+-- Timers --------------------------------------------------------------------
+
+---A timer `sol.after` or `sol.every` set (#472).
+---@class sol.Timer
+local Timer = {}
+
+---Cancel it: its function is not called again, even when it was due at the
+---same moment as the timer that cancels it. Cancelling one that has run or
+---was cancelled already does nothing.
+---@return nil
+function Timer:cancel() end
+
+-- Watches -------------------------------------------------------------------
+
+---A file `sol.watch` follows (#473).
+---@class sol.Watch
+local Watch = {}
+
+---Stop following it: its function is not called again, even for an event
+---already on its way. Cancelling one that has ended already does nothing.
+---@return nil
+function Watch:cancel() end

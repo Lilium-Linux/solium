@@ -1,6 +1,6 @@
 //! Focus-scoped shortcut requests from Wayland and XWayland clients.
 //!
-//! Policy is configured by `sol.input`. Both protocols share eligibility,
+//! Policy is configured by `input`. Both protocols share eligibility,
 //! reclaim and published ownership. XWayland's request is deliberately not a
 //! Smithay keyboard grab: it may take shortcuts while focused, but cannot pin
 //! focus over a user action, a hosted scene or the lock. The protocol permits

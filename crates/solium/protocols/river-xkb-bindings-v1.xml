@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="river_xkb_bindings_v1">
+  <copyright>
+    The interface of river's river-xkb-bindings-v1 protocol,
+    © Isaac Freund, published under the MIT licence: its names, types,
+    versions and order, which a window manager written for river and
+    this compositor must agree on. River's own descriptions are not
+    here; what Solium does with each message is in
+    crates/solium/src/river/. See THIRD_PARTY.md.
+  </copyright>
+  <description summary="key bindings for that window manager"/>
+  <interface name="river_xkb_bindings_v1" version="3">
+    <enum name="error" since="2">
+      <entry name="object_already_created" value="0" since="2"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="get_xkb_binding">
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+      <arg name="id" type="new_id" interface="river_xkb_binding_v1"/>
+      <arg name="keysym" type="uint"/>
+      <arg name="modifiers" type="uint" enum="river_seat_v1.modifiers"/>
+    </request>
+    <request name="get_seat" since="2">
+      <arg name="id" type="new_id" interface="river_xkb_bindings_seat_v1"/>
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+    </request>
+  </interface>
+  <interface name="river_xkb_binding_v1" version="3">
+    <request name="destroy" type="destructor"/>
+    <request name="set_layout_override">
+      <arg name="layout" type="uint"/>
+    </request>
+    <request name="enable"/>
+    <request name="disable"/>
+    <event name="pressed"/>
+    <event name="released"/>
+    <event name="stop_repeat" since="2"/>
+  </interface>
+  <interface name="river_xkb_bindings_seat_v1" version="3">
+    <request name="destroy" type="destructor" since="2"/>
+    <request name="ensure_next_key_eaten" since="2"/>
+    <request name="cancel_ensure_next_key_eaten" since="2"/>
+    <event name="ate_unbound_key" since="2"/>
+    <request name="modifiers_watch" since="3">
+      <arg name="modifiers" type="uint" enum="river_seat_v1.modifiers"/>
+    </request>
+    <event name="modifiers_update" since="3">
+      <arg name="old" type="uint" enum="river_seat_v1.modifiers"/>
+      <arg name="new" type="uint" enum="river_seat_v1.modifiers"/>
+    </event>
+  </interface>
+</protocol>

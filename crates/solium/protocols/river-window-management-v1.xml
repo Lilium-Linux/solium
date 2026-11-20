@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="river_window_management_v1">
+  <copyright>
+    The interface of river's river-window-management-v1 protocol,
+    © Isaac Freund, published under the MIT licence: its names, types,
+    versions and order, which a window manager written for river and
+    this compositor must agree on. River's own descriptions are not
+    here; what Solium does with each message is in
+    crates/solium/src/river/. See THIRD_PARTY.md.
+  </copyright>
+  <description summary="a window manager as a Wayland client of its own"/>
+  <interface name="river_window_manager_v1" version="7">
+    <enum name="error">
+      <entry name="sequence_order" value="0"/>
+      <entry name="role" value="1"/>
+      <entry name="unresponsive" value="2"/>
+    </enum>
+    <event name="unavailable"/>
+    <request name="stop"/>
+    <event name="finished"/>
+    <request name="destroy" type="destructor"/>
+    <event name="manage_start"/>
+    <request name="manage_finish"/>
+    <request name="manage_dirty"/>
+    <event name="render_start"/>
+    <request name="render_finish"/>
+    <event name="session_locked"/>
+    <event name="session_unlocked"/>
+    <event name="window">
+      <arg name="id" type="new_id" interface="river_window_v1"/>
+    </event>
+    <event name="output">
+      <arg name="id" type="new_id" interface="river_output_v1"/>
+    </event>
+    <event name="seat">
+      <arg name="id" type="new_id" interface="river_seat_v1"/>
+    </event>
+    <request name="get_shell_surface">
+      <arg name="id" type="new_id" interface="river_shell_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <request name="exit_session" since="4"/>
+  </interface>
+  <interface name="river_window_v1" version="7">
+    <enum name="error">
+      <entry name="node_exists" value="0"/>
+      <entry name="invalid_dimensions" value="1"/>
+      <entry name="invalid_border" value="2"/>
+      <entry name="invalid_clip_box" value="3"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <event name="closed"/>
+    <request name="close"/>
+    <request name="get_node">
+      <arg name="id" type="new_id" interface="river_node_v1"/>
+    </request>
+    <event name="dimensions_hint">
+      <arg name="min_width" type="int"/>
+      <arg name="min_height" type="int"/>
+      <arg name="max_width" type="int"/>
+      <arg name="max_height" type="int"/>
+    </event>
+    <event name="dimensions">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+    <request name="propose_dimensions">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="hide"/>
+    <request name="show"/>
+    <event name="app_id">
+      <arg name="app_id" type="string" allow-null="true"/>
+    </event>
+    <event name="title">
+      <arg name="title" type="string" allow-null="true"/>
+    </event>
+    <event name="parent">
+      <arg name="parent" type="object" interface="river_window_v1" allow-null="true"/>
+    </event>
+    <enum name="decoration_hint">
+      <entry name="only_supports_csd" value="0"/>
+      <entry name="prefers_csd" value="1"/>
+      <entry name="prefers_ssd" value="2"/>
+      <entry name="no_preference" value="3"/>
+    </enum>
+    <event name="decoration_hint">
+      <arg name="hint" type="uint" enum="decoration_hint"/>
+    </event>
+    <request name="use_csd"/>
+    <request name="use_ssd"/>
+    <enum name="edges" bitfield="true">
+      <entry name="none" value="0"/>
+      <entry name="top" value="1"/>
+      <entry name="bottom" value="2"/>
+      <entry name="left" value="4"/>
+      <entry name="right" value="8"/>
+    </enum>
+    <request name="set_borders">
+      <arg name="edges" type="uint" enum="edges"/>
+      <arg name="width" type="int"/>
+      <arg name="r" type="uint"/>
+      <arg name="g" type="uint"/>
+      <arg name="b" type="uint"/>
+      <arg name="a" type="uint"/>
+    </request>
+    <request name="set_tiled">
+      <arg name="edges" type="uint" enum="edges"/>
+    </request>
+    <request name="get_decoration_above">
+      <arg name="id" type="new_id" interface="river_decoration_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <request name="get_decoration_below">
+      <arg name="id" type="new_id" interface="river_decoration_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <event name="pointer_move_requested">
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+    </event>
+    <event name="pointer_resize_requested">
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+      <arg name="edges" type="uint" enum="edges"/>
+    </event>
+    <request name="inform_resize_start"/>
+    <request name="inform_resize_end"/>
+    <enum name="capabilities" bitfield="true">
+      <entry name="window_menu" value="1"/>
+      <entry name="maximize" value="2"/>
+      <entry name="fullscreen" value="4"/>
+      <entry name="minimize" value="8"/>
+    </enum>
+    <request name="set_capabilities">
+      <arg name="caps" type="uint" enum="capabilities"/>
+    </request>
+    <event name="show_window_menu_requested">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+    <event name="maximize_requested"/>
+    <event name="unmaximize_requested"/>
+    <request name="inform_maximized"/>
+    <request name="inform_unmaximized"/>
+    <event name="fullscreen_requested">
+      <arg name="output" type="object" interface="river_output_v1" allow-null="true"/>
+    </event>
+    <event name="exit_fullscreen_requested"/>
+    <request name="inform_fullscreen"/>
+    <request name="inform_not_fullscreen"/>
+    <request name="fullscreen">
+      <arg name="output" type="object" interface="river_output_v1"/>
+    </request>
+    <request name="exit_fullscreen"/>
+    <event name="minimize_requested"/>
+    <request name="set_clip_box" since="2">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <event name="unreliable_pid" since="2">
+      <arg name="unreliable_pid" type="int"/>
+    </event>
+    <request name="set_content_clip_box" since="3">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <event name="presentation_hint" since="4">
+      <arg name="hint" type="uint" enum="river_output_v1.presentation_mode"/>
+    </event>
+    <event name="identifier" since="4">
+      <arg name="identifier" type="string"/>
+    </event>
+    <request name="set_dimension_bounds" since="4">
+      <arg name="max_width" type="int"/>
+      <arg name="max_height" type="int"/>
+    </request>
+    <event name="capture_sessions" since="5">
+      <arg name="count" type="uint"/>
+    </event>
+    <event name="touch_move_requested" since="6">
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+      <arg name="touch_point" type="int"/>
+    </event>
+    <event name="touch_resize_requested" since="6">
+      <arg name="seat" type="object" interface="river_seat_v1"/>
+      <arg name="touch_point" type="int"/>
+      <arg name="edges" type="uint" enum="edges"/>
+    </event>
+  </interface>
+  <interface name="river_decoration_v1" version="7">
+    <enum name="error">
+      <entry name="no_commit" value="0"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="set_offset">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="sync_next_commit"/>
+  </interface>
+  <interface name="river_shell_surface_v1" version="7">
+    <enum name="error">
+      <entry name="node_exists" value="0"/>
+      <entry name="no_commit" value="1"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="get_node">
+      <arg name="id" type="new_id" interface="river_node_v1"/>
+    </request>
+    <request name="sync_next_commit"/>
+  </interface>
+  <interface name="river_node_v1" version="7">
+    <request name="destroy" type="destructor"/>
+    <request name="set_position">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="place_top"/>
+    <request name="place_bottom"/>
+    <request name="place_above">
+      <arg name="other" type="object" interface="river_node_v1"/>
+    </request>
+    <request name="place_below">
+      <arg name="other" type="object" interface="river_node_v1"/>
+    </request>
+  </interface>
+  <interface name="river_output_v1" version="7">
+    <request name="destroy" type="destructor"/>
+    <event name="removed"/>
+    <event name="wl_output">
+      <arg name="name" type="uint"/>
+    </event>
+    <event name="position">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+    <event name="dimensions">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+    <enum name="error" since="4">
+      <entry name="invalid_presentation_mode" value="0" since="4"/>
+    </enum>
+    <enum name="presentation_mode" since="4">
+      <entry name="vsync" value="0"/>
+      <entry name="async" value="1"/>
+    </enum>
+    <request name="set_presentation_mode" since="4">
+      <arg name="mode" type="uint" enum="presentation_mode"/>
+    </request>
+    <event name="capture_sessions" since="5">
+      <arg name="count" type="uint"/>
+    </event>
+  </interface>
+  <interface name="river_seat_v1" version="7">
+    <request name="destroy" type="destructor"/>
+    <event name="removed"/>
+    <event name="wl_seat">
+      <arg name="name" type="uint"/>
+    </event>
+    <request name="focus_window">
+      <arg name="window" type="object" interface="river_window_v1"/>
+    </request>
+    <request name="focus_shell_surface">
+      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"/>
+    </request>
+    <request name="clear_focus"/>
+    <event name="pointer_enter">
+      <arg name="window" type="object" interface="river_window_v1"/>
+    </event>
+    <event name="pointer_leave"/>
+    <event name="window_interaction">
+      <arg name="window" type="object" interface="river_window_v1"/>
+    </event>
+    <event name="shell_surface_interaction">
+      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"/>
+    </event>
+    <request name="op_start_pointer"/>
+    <event name="op_delta">
+      <arg name="dx" type="int"/>
+      <arg name="dy" type="int"/>
+    </event>
+    <event name="op_release"/>
+    <request name="op_end"/>
+    <enum name="modifiers" bitfield="true">
+      <entry name="none" value="0"/>
+      <entry name="shift" value="1"/>
+      <entry name="ctrl" value="4"/>
+      <entry name="mod1" value="8"/>
+      <entry name="mod3" value="32"/>
+      <entry name="mod4" value="64"/>
+      <entry name="mod5" value="128"/>
+    </enum>
+    <request name="get_pointer_binding">
+      <arg name="id" type="new_id" interface="river_pointer_binding_v1"/>
+      <arg name="button" type="uint"/>
+      <arg name="modifiers" type="uint" enum="modifiers"/>
+    </request>
+    <request name="set_xcursor_theme" since="2">
+      <arg name="name" type="string"/>
+      <arg name="size" type="uint"/>
+    </request>
+    <event name="pointer_position" since="2">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+    <request name="pointer_warp" since="3">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="op_start_touch" since="6">
+      <arg name="touch_point" type="int"/>
+    </request>
+    <event name="op_delta_touch" since="6">
+      <arg name="touch_point" type="int"/>
+      <arg name="dx" type="int"/>
+      <arg name="dy" type="int"/>
+    </event>
+    <event name="op_release_touch" since="6">
+      <arg name="touch_point" type="int"/>
+    </event>
+    <event name="op_cancel_touch" since="6">
+      <arg name="touch_point" type="int"/>
+    </event>
+    <request name="op_end_touch" since="6">
+      <arg name="touch_point" type="int"/>
+    </request>
+    <request name="notify_next_keyboard_input" since="7"/>
+    <event name="keyboard_input" since="7"/>
+  </interface>
+  <interface name="river_pointer_binding_v1" version="7">
+    <request name="destroy" type="destructor"/>
+    <request name="enable"/>
+    <request name="disable"/>
+    <event name="pressed"/>
+    <event name="released"/>
+  </interface>
+</protocol>

@@ -1,7 +1,9 @@
-//! What an `effect.lua` said, as plain data: no Lua here, so the schema is
-//! testable and the browser preview can read it (\[16\] §2, Ruling 5).
+//! What an effect's description said, its `effect.toml` (or `effect.lua`),
+//! as plain data, so the schema is testable and the browser preview can read
+//! it (\[16\] §2, Ruling 5).
 
-/// The keys an `effect.lua` may return. Anything else is refused by name.
+/// The keys an effect's description may have. Anything else is refused by
+/// name.
 pub const KEYS: [&str; 13] = [
     "api", "inputs", "params", "reach", "bleed", "stages", "frag", "pixels", "fallback",
     "duration", "easing", "grid", "mesh",
@@ -28,24 +30,6 @@ pub const RESERVED: [&str; 17] = [
     "axis",
     "reach",
     "bleed",
-];
-
-/// The fields of a `mesh`'s `t` the engine writes: a geometry effect's
-/// params share `t` with them, so none may take one of these names
-/// (`tests::names_inputs_and_defaults_are_checked`).
-pub const T_FIELDS: [&str; 12] = [
-    "progress",
-    "clamped",
-    "direction",
-    "axis",
-    "seed",
-    "scale",
-    "cols",
-    "rows",
-    "from",
-    "to",
-    "monitor",
-    "part",
 ];
 
 /// The inputs the engine has, besides `state:<name>`.
@@ -112,7 +96,7 @@ pub enum Given {
     Function,
 }
 
-/// An `effect.lua`'s table, read.
+/// An effect's description, read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EffectSpec {
     pub api: u32,
@@ -125,7 +109,8 @@ pub struct EffectSpec {
     pub easing: Option<String>,
     pub grid: Option<GridSpec>,
     pub stages: Given,
-    pub mesh: bool,
+    /// A geometry effect's `.vert`, a file in the folder.
+    pub mesh: Option<String>,
     pub reach: Extent,
     pub bleed: Extent,
 }
@@ -153,15 +138,17 @@ impl EffectSpec {
     /// What the schema cannot say by shape alone. `tests::an_effect_says_what_it_draws_once`,
     /// `tests::names_inputs_and_defaults_are_checked`.
     pub fn check(&self) -> Result<(), String> {
-        if self.api != 1 {
+        // 1 is an `effect.lua`'s, 2 an `effect.toml`'s; each reader holds a
+        // file to its own.
+        if !(1..=2).contains(&self.api) {
             return Err(format!(
-                "`api` is {}, and this Solium reads api 1",
+                "`api` is {}, and this Solium reads api 2 (an effect.toml) and api 1 (an effect.lua)",
                 self.api
             ));
         }
         if self.frag.is_none()
             && self.stages == Given::Absent
-            && !self.mesh
+            && self.mesh.is_none()
             && self.pixels.is_none()
         {
             return Err(
@@ -204,11 +191,6 @@ impl EffectSpec {
             if !is_identifier(name) {
                 return Err(format!(
                     "param `{name}`: a name is lower-case letters, digits and `_`"
-                ));
-            }
-            if self.mesh && T_FIELDS.contains(&name.as_str()) {
-                return Err(format!(
-                    "a param may not be called `{name}`: `t.{name}` is the engine's"
                 ));
             }
             if let Some(default) = number(&param.default)
@@ -450,7 +432,7 @@ mod tests {
         assert!(
             EffectSpec {
                 frag: None,
-                mesh: true,
+                mesh: Some("mesh.vert".to_owned()),
                 pixels: Some("fade".to_owned()),
                 ..minimal()
             }
@@ -459,7 +441,7 @@ mod tests {
         );
         assert!(
             EffectSpec {
-                api: 2,
+                api: 3,
                 ..minimal()
             }
             .check()
@@ -488,18 +470,14 @@ mod tests {
         assert!(with("passes").check().is_ok());
         let geometry = |name: &str| EffectSpec {
             frag: None,
-            mesh: true,
+            mesh: Some("mesh.vert".to_owned()),
             ..with(name)
         };
         assert!(
-            geometry("progress").check().is_err(),
-            "a mesh's `t.progress` is the engine's"
+            geometry("progress").check().is_ok(),
+            "a `.vert` reads a param as `p_progress`, the engine's as `sol_progress`"
         );
         assert!(geometry("spread").check().is_ok());
-        assert!(
-            with("progress").check().is_ok(),
-            "an effect with no mesh has no `t`"
-        );
         assert!(
             EffectSpec {
                 inputs: vec!["backdrop".to_owned(), "state:distance".to_owned()],

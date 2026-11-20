@@ -70,7 +70,7 @@ Every one of these is a file of Lua or QML in the default configuration.
 |---|---|
 | Window management | Floating, dwindle tiling, scrolling and overview; workspaces and layouts per monitor; XWayland clients |
 | Presentation | Animated placement, opacity and mesh transforms; immediate launch, resize and close feedback |
-| Appearance | QML window frames, wallpaper and hosted desktop scenes; reloadable Lua/QML; effects authored in Lua and GLSL |
+| Appearance | QML window frames, wallpaper and hosted desktop scenes; reloadable Lua/QML; effects described in TOML and drawn in GLSL |
 | Displays | Multiple monitors, hotplug, per-output scale and refresh rate, configurable arrangement and screen power |
 | Input | Keyboard layouts, bindings that work with non-Latin layouts, per-device libinput settings, cursor themes; touch on windows and compositor UI |
 | Desktop services | The notification server, and PipeWire audio with per-application streams, for QML scenes and Lua |
@@ -294,14 +294,17 @@ leaves the running configuration in place and reports the error in the log.
 
 Continue with [configuring Solium](docs/ricing.md), the
 [settings reference](https://lilium-linux.github.io/solium/generated/reference/settings.html)
-and the documented [defaults](crates/solium/lua/config.lua).
+and the documented [defaults](crates/solium-lua/lua/config.lua).
 
 ## How it is built
 
-Rust owns protocols, input, window state and rendering primitives. Lua chooses
-layouts, bindings and policy. QML supplies window frames and hosted desktop
-scenes; effect folders combine Lua and GLSL. One compositor clock drives
-window and QML animation.
+Rust owns protocols, input, window state and rendering primitives. A window
+manager chooses layouts, bindings and policy: it is a separate program that
+talks to the compositor over a socket, as a window manager talks to an X
+server. The one Solium ships runs the Lua configuration, and `wm.toml` names
+another, written in any language. QML supplies window frames and hosted
+desktop scenes; effect folders combine a TOML description and GLSL. One compositor clock
+drives window and QML animation.
 
 The renderer uses Smithay's GLES renderer. Hardware sessions use DRM/libinput;
 nested sessions use winit. QML uses the GPU on supported hardware after a
@@ -320,6 +323,7 @@ project. The default configuration is one configuration of the compositor.
 |---|---|
 | Configure the desktop | [Configuration guide](docs/ricing.md), [modes](docs/modes.md), [decorations](docs/decorations.md) |
 | Write a shell or effect | [Shell hosting and integration](docs/shell-boundary.md), [effects](crates/solium/effects/README.md) |
+| Write a window manager | [Writing a window manager](docs/window-managers.md), the examples in [Rust](crates/wm-protocol/examples/tiny_wm.rs) and [C#](sdk/csharp/README.md) |
 | Understand support and plans | [Status](docs/status.md), [known limitations](docs/gaps.md), [roadmap](docs/roadmap.md) |
 | Develop Solium | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [development tools](dev/README.md) |
 | Report a problem | [Issue tracker](https://github.com/Lilium-Linux/solium/issues), [security policy](SECURITY.md) |

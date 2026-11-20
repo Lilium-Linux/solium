@@ -1,0 +1,10 @@
+# A circular wave travelling from the window's centre toward every edge.
+api = 2
+duration = 1000
+easing = "linear"
+grid = { along = 40, across = 28 }
+mesh = "ripple.vert"
+
+[params]
+strength = { default = 10, min = 0, max = 40 }
+width = { default = 180, min = 60, max = 180 }

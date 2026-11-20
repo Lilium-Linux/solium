@@ -1,0 +1,7 @@
+# A geometry whose mesh fails between its ends: it draws the window where it
+# is at progress 0 and 1, so it passes the checks once it compiled, and
+# places no point anywhere between, so every frame of a flight is refused.
+# `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
+api = 2
+grid = [1, 1]
+mesh = "fail.vert"

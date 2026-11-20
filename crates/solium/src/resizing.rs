@@ -77,6 +77,11 @@
 //! for ever and hold the slot and the space apart for ever, which is precisely
 //! the disagreement [`PATIENCE`] exists to prevent.
 //!
+//! What a placement keeps on a tile is another hold, the one a fullscreen
+//! change keeps (`Solium::hold_for_answer`): it has no gesture to wait for,
+//! and `Solium::settle_answering` ends it when the client answers or its
+//! patience runs out.
+//!
 //! # The trap
 //!
 //! A client may **refuse** the size it is offered — Firefox has a minimum width

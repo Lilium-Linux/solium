@@ -66,7 +66,7 @@ PaneStyle {
 | `requires` | what the style needs from the machine. `["gpu"]` is the only term today: the software scene graph does not implement `ShaderEffect`, and `Canvas` does not appear to paint on it, so a style using either says so. A style whose terms this session cannot meet, or that names one this build has never heard of, is refused rather than drawn wrong: its windows are left bare, and the log names the term. A nested session renders in software under the default `qml.renderer = "auto"` |
 | `client.radius` | rounds the client's own surfaces, in logical pixels. The compositor cuts the corners as it draws the client, at no extra cost: no pass and no copy of the window (see "What it costs"). `0` is no effect at all, and so is leaving the key out — which is what nine of the twelve bundles that ship do. The example fixture writes `0`, to show the key exists and costs nothing; `glass/`, `rounded/` and `flush/` are the three that round |
 | `client.radiusTopLeft`, `.radiusTopRight`, `.radiusBottomLeft`, `.radiusBottomRight` | one corner each, in logical pixels. Every one of them defaults to `client.radius`, so a style that wants four the same writes one key and these never come up. **A `0` has to be written out**: squaring a corner is half of what these are for, so an absent corner follows `radius` rather than being square. `flush/` and `glass/` are the shipped examples |
-| `client.shadow` | reserved, and read by nobody: a shadow is an effect rule in the style's `effects.lua` (below) |
+| `client.shadow` | reserved, and read by nobody: a shadow is an effect rule in the style's `effects.toml` (below) |
 | the `Layer` children | the layers, in declaration order |
 
 **The client's corners are each window's own.** `client.radius` and its four
@@ -423,20 +423,25 @@ compositor at about a tenth of a core with `pulse` animating at the screen's
 full rate. Bind an endless animation to `focused`, as `pulse` and the `wave`
 demonstration do, and an unfocused window costs nothing.
 
-## effects.lua
+## effects.toml
 
-A style folder may hold `effects.lua` beside its `Pane.qml`: a list of effect
-rules for the windows this style frames, and for no others.
+A style folder may hold `effects.toml` beside its `Pane.qml`: a list of
+effect rules for the windows this style frames, and for no others.
 
-```lua
--- ~/.config/solium/qml/panes/mine/effects.lua
-return {
-    { match = "*", part = "pane", slot = "behind", effect = { "glow", spread = 24 } },
-}
+```toml
+# ~/.config/solium/qml/panes/mine/effects.toml
+[[rules]]
+match = "*"
+part = "pane"
+slot = "behind"
+effect = { effect = "glow", spread = 24 }
 ```
 
 Each rule is the rule `effects.rules` takes in your configuration, with every
-key it has ([the effects reference](../../effects/README.md#rules)), and the
+key it has ([the effects reference](../../effects/README.md#rules)): a link
+with params names its effect by its `effect` key, `{ effect = "glow", spread
+= 24 }`, since a TOML table cannot hold a name and keys the way
+`{ "glow", spread = 24 }` does in Lua. The
 effects it names are effect folders, yours or the shipped ones: a style ships
 rules, not effects of its own. Your own `effects.rules` win over a style's,
 for the same part and slot. A window the style does not frame gets none of
@@ -454,20 +459,20 @@ the style's layer named `bar`, or its first `frame` layer when none is:
 `behind` just under that layer, `front` just over it. A `layer:<name>`
 rule's go around that layer the same way, inside its depth.
 
-The file runs in an effect's Lua, not your configuration's: `math`, `table`
-and `string`, and no `sol`, no files and no `require`, stopped if it runs
-longer than 100 ms. It is read when the style is applied (at startup, at each
-`sol.pane`, at every reload), once for as long as it does not change, and
-every effect it names is loaded and every rule bound then. What is wrong with
-it is named in the top-right corner of your primary monitor, under
-`style:<folder>` and at `effects.lua`'s line: a file that does not run keeps
-the rules that ran before it, and a rule that cannot be bound (a key
+The file is data, and runs nothing. It is read when the style is applied (at
+startup, at each `sol.pane`, at every reload), once for as long as it does
+not change, and every effect it names is loaded and every rule bound then.
+What is wrong with it is named in the top-right corner of your primary
+monitor, under `style:<folder>` and at its line: a file that does not read
+keeps the rules that ran before it, and a rule that cannot be bound (a key
 misspelled, an effect nobody ships, a param it does not have) is named by its
-number, its slot is left empty, and the rest run. `solium --check` reads the
-`effects.lua` of each style of your own and fails on the same things.
+number, its slot is left empty, and the rest run. A style's rules were Lua
+once, in an `effects.lua`; one left without an `effects.toml` beside it is
+named there too, and gives no rules. `solium --check` reads the
+`effects.toml` of each style of your own and fails on the same things.
 
 As with your own rules, each is drawn in its slot as far as its tier allows
-([the effects reference](../../effects/README.md#tiers)). `glass/effects.lua`
+([the effects reference](../../effects/README.md#tiers)). `glass/effects.toml`
 is the shipped one: the `glass` effect behind the whole pane, and the `shade`
 in front of it while the window does not have the keyboard, fading with the
 focus (a rule's `fade`).
@@ -491,7 +496,7 @@ window.
 
 Each of those nine is one `frame` layer, which is what every decoration was
 before styles had layers, and the keyboard pill's layer, described below;
-`glass`'s shade is not a layer but an effect its `effects.lua` puts in front
+`glass`'s shade is not a layer but an effect its `effects.toml` puts in front
 of the pane. The rest are here to show what layers add:
 
 | folder | |
@@ -511,11 +516,11 @@ puts one on every window:
 | `sandwich/` | one layer behind the client and one above it, in colours that cannot be confused |
 | `wave/` | sine waves flowing round the whole window, outside it, all `bleed` at `behind` and nothing reserved |
 | `bleedy/` | what bleed does to hit-testing, and to the window next door |
-| `frosted/` | a translucent bar, and an `effects.lua` putting an effect behind the titlebar |
+| `frosted/` | a translucent bar, and an `effects.toml` putting an effect behind the titlebar |
 
 ## glass
 
-The window and its bar are one rounded piece of dark liquid glass: `effects.lua` puts the shipped [`glass`](../../effects/glass/README.md)
+The window and its bar are one rounded piece of dark liquid glass: `effects.toml` puts the shipped [`glass`](../../effects/glass/README.md)
 effect behind the whole pane, frame and client together, cut to the window's
 outline with every corner at the window's radius, so there is one rim round
 the window and no seam where the bar meets the client. A fullscreen window has
@@ -530,7 +535,7 @@ shows nothing when the window has no app id or the theme has no icon for it
 A window without the keyboard has a thin dark shade just inside its rounded
 outline, on all four sides and through the corners, and a dimmer title. The
 shade is the shipped [`shade`](../../effects/shade/README.md) effect, which
-`effects.lua` puts in front of the whole pane, frame and client, for a window
+`effects.toml` puts in front of the whole pane, frame and client, for a window
 that is not `focused`: so it darkens the window's own edge, an opaque
 application's too, and takes no input. It reads only the window's shape (tier
 T0), so it is one pass on the GPU, run once per size of the window and never
@@ -558,10 +563,10 @@ Its numbers, each a line to change in a copy of the folder,
 | `Pane.qml` | `client.radius`: the window's corners, in logical pixels | `16` |
 | `Pane.qml` | `insets.bottom`: the bar's height | `Theme.titlebarHeight`, 32 |
 | `Frame.qml` | `iconSize`: the application's icon, in logical pixels | `16` |
-| `effects.lua` | the shade's `width`: how far in it reaches, in pixels, fading to nothing there | `12` |
-| `effects.lua` | the shade's `strength`: how opaque it is at the window's very edge, 0 for no shade | `0.5` |
-| `effects.lua` | the shade's `color` | `{ 0, 0, 0, 1 }` |
-| `effects.lua` | the shade rule's `fade`: how long it takes to come and go with the focus, in milliseconds, and on which curve | `{ duration = 240, easing = "outCubic" }` |
+| `effects.toml` | the shade's `width`: how far in it reaches, in pixels, fading to nothing there | `12` |
+| `effects.toml` | the shade's `strength`: how opaque it is at the window's very edge, 0 for no shade | `0.5` |
+| `effects.toml` | the shade's `color` | `[0, 0, 0, 1]` |
+| `effects.toml` | the shade rule's `fade`: how long it takes to come and go with the focus, in milliseconds, and on which curve | `{ duration = 240, easing = "outCubic" }` |
 
 The glass and the shade are effects, and their params are changed where a rule
 names them: a rule of your own for `{ style = "glass" }` and `part = "pane"`
@@ -627,7 +632,7 @@ is the only place those numbers can live. It has no manifest to add
 `KeyboardPillLayer {}` to either, so with `keyboard.indicator.show = "pane"`
 its windows show no keyboard pill: draw one at `caret` yourself (with
 `property bool overlay: true`, since it paints over the client), or set
-`show = "surface"`. Nor has it a folder to keep an `effects.lua` in, so it
+`show = "surface"`. Nor has it a folder to keep an `effects.toml` in, so it
 gives its windows no effect rules.
 
 Nothing ships as one any more: the eight in the first table besides `glass`

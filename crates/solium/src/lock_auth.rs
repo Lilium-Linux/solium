@@ -4,7 +4,7 @@
 //! **The password lives here and nowhere else.** A key pressed while Solium
 //! holds the lock goes from the keyboard filter into a [`Secret`], the
 //! zeroised, locked page `solium-auth` shares ([`Solium::secret_edit`]). It
-//! never becomes a Qt key event, a `String`, a log line, or anything Lua or an
+//! never becomes a Qt key event, a `String`, a log line, or anything the window manager or an
 //! input method sees. A keypad key is hit-tested by the compositor, and the
 //! press or finger on it never reaches its scene ([`Solium::keypad_down`]).
 //! What QML is told is how many characters there are, whether they are
@@ -19,7 +19,7 @@
 //! the check under way is the one thing here that calls
 //! [`Solium::unlock_natively`]. logind's `Unlock`, the administrator's way
 //! out, is the only other caller. A scene can ask to submit or to clear, and
-//! the request carries nothing; Lua can do neither.
+//! the request carries nothing; the window manager can do neither.
 //! `tests::nothing_in_qml_can_unlock_or_read_the_secret`.
 //!
 //! **The states**, as `Lock.state` names them:
@@ -29,7 +29,7 @@
 //!   typed meanwhile is the password's as in any other state; the state is
 //!   the entry's until it ends.
 //! * `peeking`: no lock at all. The configuration is pulling the scenes down
-//!   over the unlocked desktop with a finger (`sol.lock_peek`), and
+//!   over the unlocked desktop with a finger (`lock-peek`), and
 //!   `Lock.progress` says how far; nothing typed reaches the field, which is
 //!   not armed until a lock is taken. Ended without one, the scenes go back
 //!   up reading `unlocking` for `lock.exit_ms` at most (`lock_scene.rs`).
@@ -107,7 +107,7 @@ use crate::{
 };
 
 /// `lock.*` for Solium's own lock: how a password is checked. Handed over by
-/// `sol.lock`, beside the locker settings `logind.rs` reads.
+/// `lock`, beside the locker settings `logind.rs` reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     /// When a run of wrong passwords shuts the field, and for how long.
@@ -3902,16 +3902,24 @@ mod tests {
                     readonly property int tray: Tray.items.count
                     readonly property int media: Media.players.count
                     readonly property int playing: Media.active.present ? 1 : 0
+                    readonly property int groups: Object.keys(Solium.groups).length
                     readonly property string monitor: Solium.monitor.name
                     readonly property int layouts: Keyboard.layouts.length
                     WorkspaceList { id: list }
                 }"#;
 
     /// The session as `READS_THE_SESSION` reads it: a status, an app, two
-    /// workspaces in an arrangement on `monitor`, and a tray item.
+    /// workspaces in an arrangement on `monitor`, a tray item, a media
+    /// player, and a group a window manager declared.
     fn fill_the_session(state: &mut Solium, monitor: &str) {
         use crate::models::workspaces::{Arrangement, Declared, Group, Workspace};
         state.status = "a window's secret title".to_owned();
+        state.groups.declare(
+            "a desk someone works on",
+            crate::group::Selection::default(),
+            None,
+            std::time::Duration::ZERO,
+        );
         state.apps_scan_pending = false;
         state.apps = std::rc::Rc::new(vec![crate::apps::Entry {
             id: "solium-lock-redaction-test".to_owned(),
@@ -3981,15 +3989,15 @@ mod tests {
 
     /// What a scene reading `READS_THE_SESSION` reads of the session: the
     /// status, the apps, the workspaces, a `WorkspaceList` of them, the
-    /// arrangement, the tray's items and the media players (the active one
-    /// counted with them).
+    /// arrangement and the groups (counted together), the tray's items and
+    /// the media players (the active one counted with them).
     fn session_read(scene: &mut crate::qml::Scene) -> (String, i32, i32, i32, i32, i32, i32) {
         (
             scene.get_string_for_test("status"),
             scene.get_int("apps"),
             scene.get_int("workspaces"),
             scene.get_int("listed"),
-            scene.get_int("arranged"),
+            scene.get_int("arranged") + scene.get_int("groups"),
             scene.get_int("tray"),
             scene.get_int("media") + scene.get_int("playing"),
         )
@@ -4002,7 +4010,7 @@ mod tests {
             && *apps >= 1
             && *workspaces >= 2
             && *listed >= 2
-            && *arranged > 0
+            && *arranged > 3
             && *tray >= 1
             && *media >= 2
     }
@@ -4013,8 +4021,9 @@ mod tests {
     }
 
     /// **A lock scene reads only what a lock may show, at all times**:
-    /// `Solium.status`, `Apps`, `Workspaces`, a `WorkspaceList`, the
-    /// arrangement, `Tray.items`, `Media.players` and `Media.active` read
+    /// `Solium.status`, `Solium.groups`, `Apps`, `Workspaces`, a
+    /// `WorkspaceList`, the arrangement, `Tray.items`, `Media.players` and
+    /// `Media.active` read
     /// empty in it while Solium holds the
     /// lock, through the entry and after it, and still empty once it is
     /// unlocked and the scene waits, quiet, for the next lock; the monitor
@@ -4033,6 +4042,8 @@ mod tests {
             fill_the_session(&mut locked.state, &name);
 
             locked.state.publish_models();
+            let now = locked.state.clock.now();
+            locked.state.publish_groups(now);
             assert_eq!(
                 session_read(locked.scene()),
                 read_empty(),
@@ -4047,6 +4058,8 @@ mod tests {
 
             locked.state.unlock_natively();
             locked.state.publish_models();
+            let now = locked.state.clock.now();
+            locked.state.publish_groups(now);
             let read = session_read(desktop.scene_for_test());
             assert!(reads_it_all(&read), "a desktop scene, unlocked: {read:?}");
             assert_eq!(
@@ -4057,6 +4070,8 @@ mod tests {
 
             locked.state.lock_natively();
             locked.state.publish_models();
+            let now = locked.state.clock.now();
+            locked.state.publish_groups(now);
             assert_eq!(
                 session_read(locked.scene()),
                 read_empty(),
@@ -4066,6 +4081,8 @@ mod tests {
             locked.state.clock.advance(enter);
             crate::lock_scene::settle(&mut locked.state);
             locked.state.publish_models();
+            let now = locked.state.clock.now();
+            locked.state.publish_groups(now);
             assert_eq!(
                 session_read(locked.scene()),
                 read_empty(),
@@ -4093,6 +4110,7 @@ mod tests {
                     readonly property int workspaces: Workspaces.count
                     readonly property int listed: list.count
                     readonly property int arranged: Object.keys(Workspaces.arrangement).length
+                        + Object.keys(Solium.groups).length
                     readonly property int windows: Windows.count + windowList.count
                     readonly property int folder: Folder.count
                     readonly property int monitors: Monitors.count
@@ -4103,8 +4121,8 @@ mod tests {
 
     /// **The pointer's scene reads only what a lock may show, at all
     /// times**: it is drawn over Solium's own lock, the one scene of the
-    /// session that is, so `Solium.status`, `Solium.dirs`, `Apps`,
-    /// `Workspaces`, a `WorkspaceList`, the arrangement, `Windows`, a
+    /// session that is, so `Solium.status`, `Solium.dirs`, `Solium.groups`,
+    /// `Apps`, `Workspaces`, a `WorkspaceList`, the arrangement, `Windows`, a
     /// `WindowList` and `Folder` read empty in it, unlocked, natively locked
     /// through the entry and after it, and unlocked again, while a desktop
     /// scene beside it reads the session; the monitors and the keyboard
@@ -4145,6 +4163,8 @@ mod tests {
 
             let mut check = |locked: &mut Locked, when: &str| {
                 locked.state.publish_models();
+                let now = locked.state.clock.now();
+                locked.state.publish_groups(now);
                 let session = session_read(desktop.scene_for_test());
                 assert!(
                     reads_it_all(&session),

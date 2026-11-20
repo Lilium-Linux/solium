@@ -11,7 +11,7 @@ use crate::json::Json;
 /// One row per installed, visible application, sorted by name (already the
 /// order [`crate::apps::scan`] leaves them in). Takes the entries rather than
 /// `&Solium` so this is testable without a compositor to build one, the same
-/// reason `solium-layout` and `solium-animation` are their own crates.
+/// reason `solium-animation` is a crate of its own.
 /// `tests::apps_rows_carry_name_icon_and_categories`.
 pub(crate) fn rows(apps: &[Entry]) -> Vec<Row> {
     apps.iter()

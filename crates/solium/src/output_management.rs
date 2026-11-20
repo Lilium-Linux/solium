@@ -11,11 +11,11 @@
 //!
 //! **What a program proposes is an action, and the configuration answers
 //! it.** A test is answered here: the arrangement is read whole, each mode
-//! must be one its monitor offers, each scale one `sol.monitors` takes, and
+//! must be one its monitor offers, each scale one `monitors` takes, and
 //! at least one monitor stays on. An apply that passes the same reading
-//! reaches Lua as the action `monitors.apply` from the surface named
-//! [`SURFACE`], with the arrangement as `sol.monitors` rows in `monitors`;
-//! the shipped `output_management.lua` answers it with `sol.monitors`, and
+//! reaches the window manager as the action `monitors.apply` from the surface named
+//! [`SURFACE`], with the arrangement as `monitors` rows in `monitors`;
+//! the shipped `output_management.lua` answers it with `monitors`, and
 //! the program is told it succeeded only when an answer took an arrangement.
 //! What is lit differently then -- a mode, a rotation, variable refresh -- is
 //! lit again by the backend, the path a cable takes (`monitor::Arrangement::lit_as`).
@@ -53,7 +53,7 @@ use crate::json::Json;
 use crate::state::Solium;
 
 /// The surface name a program's proposal reaches Lua's `surface` listeners
-/// with: `sol.on("surface", function(surface, action, data) end)` hears
+/// with: `surface-action end)` hears
 /// `surface == "output-management"` and `action == "monitors.apply"`.
 pub(crate) const SURFACE: &str = "output-management";
 
@@ -443,7 +443,7 @@ fn transform_of(value: wl_output::Transform) -> Option<Transform> {
     })
 }
 
-/// A proposal read whole against the heads: one `sol.monitors` row per
+/// A proposal read whole against the heads: one `monitors` row per
 /// head, what it did not set kept as it is, or why it cannot be.
 /// `tests::a_proposal_is_read_whole_into_rows`.
 fn rows_of(

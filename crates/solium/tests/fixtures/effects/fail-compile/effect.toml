@@ -1,0 +1,7 @@
+api = 2
+inputs = ["shape"]
+reach = 12
+frag = "effect.frag"
+
+[params]
+width = 4

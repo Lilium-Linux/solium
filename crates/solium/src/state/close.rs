@@ -143,7 +143,7 @@ impl Solium {
         //
         // Every route here arrives with the scripts back in their slot, which
         // is what `trigger_closing` needs to deliver this at all: the frame
-        // button is `frame_action` off a pointer press, and `sol.close` --
+        // button is `frame_action` off a pointer press, and `close` --
         // `super+q` included, which is a binding in `init.lua` -- is a
         // `Command::Close`, applied by `apply` after the dispatch that asked for
         // it has returned the scripts. See
@@ -707,7 +707,7 @@ impl Solium {
         // **And the pane is marked gone, which is what keeps it leaving once
         // the timers are cleared** (#128's review, findings 5 and 7). Clearing
         // them alone made a window that no longer exists an ordinary window
-        // for the rest of the frame: listed in `sol.windows()` as not leaving,
+        // for the rest of the frame: listed in the `window` rows as not leaving,
         // placed by a stateless layout and drawn at full opacity by
         // `move_pane`, closed a second time by `close_pane`, and put back into a
         // tree by an `adopt`. `Pane::leaving` answers yes for a gone pane, and

@@ -87,7 +87,7 @@ pub(crate) const DEFAULT_STYLE: &str = "top";
 pub(crate) enum Action {
     Close,
     ToggleMaximize,
-    /// Put the window away, as `sol.minimize` and the application's own
+    /// Put the window away, as `minimize` and the application's own
     /// button do: the configuration hears `minimize` and plays it (#417).
     /// `state::tests::real_client::reflow_on_close::minimize::a_frames_minimize_button_minimizes_its_window_through_the_configuration`.
     Minimize,
@@ -103,7 +103,7 @@ impl Action {
     }
 
     /// The built-in action a name is, if it is one: what a layer's
-    /// `Solium.send` does itself rather than hand to `sol.on("frame")`.
+    /// `Solium.send` does itself rather than hand to `frame-action`.
     pub(crate) fn named(name: &str) -> Option<Self> {
         match name {
             "close" => Some(Self::Close),
@@ -209,7 +209,7 @@ impl Insets {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Look<'a> {
     pub(crate) title: &'a str,
-    /// The window's application id, as `sol.windows()` and a rule's `app_id`
+    /// The window's application id, as the `window` rows and a rule's `app_id`
     /// read it (an X11 window's class), empty while it has none: `appId` on
     /// every layer, which a bar can show the application's icon by.
     /// `tests::a_layer_is_told_the_app_id_and_told_again_when_it_changes`.
@@ -229,7 +229,7 @@ pub(crate) struct Look<'a> {
     /// frame it had. `tests::a_layer_is_told_its_window_and_its_state_and_told_again_when_it_changes`.
     pub(crate) window: Option<FrameWindow>,
     /// What the configuration handed this window's frame, as
-    /// `windowValues`: `sol.frame(id, { key = value })`.
+    /// `windowValues`: `frame-values(id, { key = value })`.
     /// `tests::a_layer_is_told_its_windows_own_values`.
     pub(crate) window_values: &'a Values,
 }
@@ -237,12 +237,12 @@ pub(crate) struct Look<'a> {
 /// The window a frame belongs to, as every layer is told it (#417):
 /// `windowId`, `pid` and the window's state, so a bar can act on its own
 /// window and show what it is, and the configuration can tell which frame
-/// sent it something (`sol.on("frame")`).
+/// sent it something (`frame-action`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrameWindow {
-    /// The window's id, as `sol.windows()` gives it.
+    /// The window's id, as the `window` rows give it.
     pub(crate) id: u64,
-    /// Its process, as `sol.windows()` gives it; `-1` on a layer when it
+    /// Its process, as the `window` rows give it; `-1` on a layer when it
     /// cannot be told.
     pub(crate) pid: Option<u32>,
     pub(crate) maximized: bool,
@@ -251,7 +251,7 @@ pub(crate) struct FrameWindow {
     /// one a tiling layout let float.
     pub(crate) floating: bool,
     pub(crate) minimized: bool,
-    /// Kept above every window that is not (#424): `sol.keep_above`.
+    /// Kept above every window that is not (#424): `keep-above`.
     pub(crate) kept_above: bool,
 }
 
@@ -614,7 +614,7 @@ pub(crate) struct Decoration {
     /// Whether the radii changed, or their source was animating, when last
     /// read: a binding with a `Behavior` is followed frame by frame.
     corners_moving: bool,
-    /// The effect rules the style's `effects.lua` gives this pane, and the
+    /// The effect rules the style's `effects.toml` gives this pane, and the
     /// generation they were read at, copied from the `Style` for the reason
     /// `effects` is: a frame resolves the pane's slots from here. Shared,
     /// not copied, between the panes of one style
@@ -878,7 +878,7 @@ impl Decoration {
     ///
     /// The one answer every reader takes, through `Solium::insets_of`: the
     /// client's place, the hit test, the titlebar region, the slots around
-    /// the pane and `sol.windows()` all follow the frame as it grows.
+    /// the pane and the `window` rows all follow the frame as it grows.
     /// `state::tests::real_client::reflow_on_close::frames::a_floating_windows_frame_grows_and_its_client_moves_down_at_its_size`.
     pub(crate) const fn insets(&self) -> Insets {
         Insets {
@@ -2358,8 +2358,8 @@ impl Building {
 }
 
 /// Values the configuration hands every layer of every pane, as one object,
-/// `values`: `sol.pane_values{ key = value }`. A general channel from Lua to
-/// the decorations, so a setting the configuration reads can reach the QML
+/// `values`: the `pane-values` command. A general channel from the window
+/// manager to the decorations, so a setting the configuration reads can reach the QML
 /// that draws by it without the compositor knowing what the setting is.
 /// Each call merges its keys into what is there, so two scripts each handing
 /// their own keys keep both; a key, once given, keeps its last value until
@@ -2445,7 +2445,7 @@ impl Decorations {
         &self.values
     }
 
-    /// Forget what every `sol.pane_values{ ... }` and `sol.frame(id, ...)`
+    /// Forget what every `pane-values{ ... }` and `frame-values(id, ...)`
     /// handed over, for a reload.
     /// `tests::a_reload_starts_the_frames_values_afresh`.
     pub(crate) fn clear_values(&mut self, panes: &mut Panes) {
@@ -2457,7 +2457,7 @@ impl Decorations {
         }
     }
 
-    /// Merge what `sol.pane_values{ ... }` handed over; whether it changed.
+    /// Merge what `pane-values{ ... }` handed over; whether it changed.
     /// `tests::pane_values_merge_by_key_and_count_only_changes`.
     pub(crate) fn merge_values(
         &mut self,
@@ -2959,7 +2959,7 @@ pub(crate) fn style_file(style: Option<&str>) -> Option<PathBuf> {
 /// The style folder a window's frame is built from, by the lookup `Decorations::build`
 /// takes (the default style when none is named), or `None` for `none`, a
 /// single-file decoration or a name that is nowhere: where
-/// `Solium::apply_style_rules` reads `effects.lua` from.
+/// `Solium::apply_style_rules` reads `effects.toml` from.
 /// `state::tests::the_formats_probe_rebinds_the_styles_rules_too`,
 /// `state::tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`.
 pub(crate) fn style_dir(style: Option<&str>) -> Option<PathBuf> {
@@ -3006,16 +3006,6 @@ pub(crate) enum StyleKind {
     /// bundle — so this kind is now only ever the user's own files. The kind
     /// stays because those files do.
     File,
-}
-
-impl StyleKind {
-    /// The word a script sees. Matched in `lua/tweaks.lua`.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Bundle => "bundle",
-            Self::File => "file",
-        }
-    }
 }
 
 /// One thing this machine can be asked to draw.
@@ -3158,7 +3148,7 @@ pub(crate) fn ships() -> Vec<Offered> {
 /// the more specific intent.
 ///
 /// `SOLIUM_DECORATION` is the old spelling of the same knob, kept for the same
-/// reason `sol.decoration` is: a style used to be a single QML file and is now
+/// reason `decoration` is: a style used to be a single QML file and is now
 /// a folder, the name changed with it, and no session started from a shell
 /// history written before the change should silently draw something else. The
 /// new name wins when both are set.
@@ -7159,7 +7149,7 @@ mod tests {
 
     /// **The glass style draws no shade of its own and its bar no fill**:
     /// its layers are the bar and the keyboard pill, the shade being the
-    /// `shade` effect its `effects.lua` puts in front of the pane
+    /// `shade` effect its `effects.toml` puts in front of the pane
     /// (`state::tests::the_shipped_glass_style_binds_liquid_glass_behind_the_pane`);
     /// and the bar, focused or not, draws nothing across its band but its
     /// buttons, title and icon, so the glass behind it shows through.
@@ -7236,7 +7226,7 @@ mod tests {
     /// `qml::buffers::tests::a_scene_growing_a_pixel_a_frame_is_rebound_once_a_step`);
     /// read as the compositor reads it
     /// (`tests::a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second`).
-    /// The shade's are the `shade` effect's params, in `effects.lua`.
+    /// The shade's are the `shade` effect's params, in `effects.toml`.
     #[test]
     fn the_glass_bars_numbers_change_what_it_draws() {
         on_the_qt_thread(|| {
@@ -7293,7 +7283,7 @@ mod tests {
                 &[
                     ("Pane.qml", &read("Pane.qml")),
                     ("Frame.qml", &held),
-                    ("effects.lua", &read("effects.lua")),
+                    ("effects.toml", &read("effects.toml")),
                 ],
             );
             let style = crate::style::load(&dir).expect("the copied style loads");

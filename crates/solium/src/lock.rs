@@ -189,7 +189,7 @@
 //! Touch reaches the lock's scene as Qt touch events and nothing else
 //! (`a_finger_at_the_native_lock_reaches_its_scene_and_nothing_else`).
 //!
-//! It is ended only by [`Solium::unlock_natively`], which nothing in Lua, QML
+//! It is ended only by [`Solium::unlock_natively`], which nothing the window manager, QML
 //! or JavaScript can reach (`no_lua_function_unlocks_a_native_lock`,
 //! `lock_auth::tests::nothing_in_qml_can_unlock_or_read_the_secret`). It has
 //! two callers: `solium-auth` saying yes to the password typed at it
@@ -811,7 +811,7 @@ impl Solium {
         });
     }
 
-    /// Tell the scripts the lock's state (`sol.on("lock")`), once each time
+    /// Tell the scripts the lock's state (`lock-changed`), once each time
     /// it changes: what a configuration needs to move with the lock, a bar
     /// putting its clock away while the lock's flies out of it, and nothing
     /// more of the lock. `lock_auth::tests::the_scripts_hear_the_lock_come_and_go`.

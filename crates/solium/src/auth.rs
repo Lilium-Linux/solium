@@ -165,15 +165,7 @@ pub(crate) fn pam_file() -> Option<&'static Path> {
 /// layout's `<prefix>/libexec/solium-auth` first, then `solium-auth` beside
 /// the binary, as a build tree has it.
 pub(crate) fn candidates(exe: &Path) -> Vec<PathBuf> {
-    let Some(dir) = exe.parent() else {
-        return Vec::new();
-    };
-    let mut places = Vec::new();
-    if let Some(prefix) = dir.parent() {
-        places.push(prefix.join("libexec").join(NAME));
-    }
-    places.push(dir.join(NAME));
-    places
+    crate::assets::helpers(exe, NAME)
 }
 
 /// The first of [`candidates`] that is an executable file, opened.

@@ -1,6 +1,6 @@
-//! `sol.after` and `sol.every` (#472): timers on the compositor's clock.
+//! The `timer` command (#472): timers on the compositor's clock.
 //!
-//! Lua keeps each timer's function in `sol._timers`, by id; this keeps when
+//! A window manager names each timer by an id of its own; this keeps when
 //! each is due. [`settle`] checks once each time round the event loop, which
 //! wakes at least every 16 ms, and tells the configuration every timer due by
 //! then in one dispatch, in the order they fall due, and by creation among
@@ -58,7 +58,7 @@ impl Timers {
     }
 
     /// The timers due by `now`, in order, each with whether it was its last
-    /// time (`sol.after`). An `every` is set again a period after it was
+    /// time (`timer`). An `every` is set again a period after it was
     /// due, or a period from `now` when that has passed too, so one the loop
     /// fell behind on is told once rather than once for each period missed.
     pub(crate) fn due(&mut self, now: Duration) -> Vec<(u64, bool)> {

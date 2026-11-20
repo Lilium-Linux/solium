@@ -1,0 +1,14 @@
+api = 2
+inputs = ["self"]
+
+[params]
+n = 1
+
+[[stages]]
+state = "n"
+depends = "params"
+stages = [{ pass = "count.frag" }]
+
+[[stages]]
+pass = "read.frag"
+uses = ["n"]

@@ -227,7 +227,7 @@ impl Registry {
         self.live.remove(&id);
     }
 
-    /// An id for one of the shell's own notifications (`sol.notify`), from
+    /// An id for one of the shell's own notifications (`notify`), from
     /// the same counter so it can never clash with a client's.
     /// Its identity holds a NUL, which no D-Bus string can, so no client can
     /// replace or close one of the shell's own.

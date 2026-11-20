@@ -309,6 +309,20 @@ signals:
     void changed();
 };
 
+/* What `Solium.groups` reads: every group's own pose this pass, by name,
+ * as the compositor publishes it (`models::groups`). One per process, made on
+ * first use, the same shape as `SoliumStatus`.
+ * `qml::hosted::tests::a_published_group_reaches_solium_groups`. */
+class SoliumGroups : public QObject
+{
+    Q_OBJECT
+public:
+    static SoliumGroups &instance();
+    QVariantMap poses;
+signals:
+    void changed();
+};
+
 /* `Solium.dirs`: `crate::folder::desktop_dir`, for `Solium.dirs.desktop`.
  * One per process, made on first use, the same shape as `SoliumStatus`. */
 class SoliumDirs : public QObject
@@ -345,6 +359,13 @@ class SoliumAttached : public QObject
     /* `Solium.status`: the text `sol.status` set.
      * `qml::hosted::tests::the_workspaces_model_its_list_and_its_facades`. */
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    /* `Solium.groups`: each group's own pose this pass, by its name: `x`,
+     * `y`, `z`, `rotateX`, `rotateY`, `rotateZ`, `scale`, `originX`,
+     * `originY`, `originZ`, `perspective`, `dx`, `dy` and `opacity`. What a
+     * scene drawing a world in three dimensions puts its camera by, in step
+     * with the windows those groups carry.
+     * `qml::hosted::tests::a_published_group_reaches_solium_groups`. */
+    Q_PROPERTY(QVariantMap groups READ groups NOTIFY groupsChanged)
     /* `Solium.dirs.desktop`: `crate::folder::desktop_dir` (04-ui.md §4.9). */
     Q_PROPERTY(SoliumDirs *dirs READ dirs CONSTANT)
     /* `Solium.cursor`: the pointer as the compositor publishes it, and the
@@ -370,6 +391,7 @@ public:
     int inputClaim() const { return m_input; }
     SoliumKeyboard *keyboard();
     QString status() const;
+    QVariantMap groups() const;
     SoliumDirs *dirs() const;
     SoliumCursor *cursor();
     /* The object's `Solium.cursor` if anything has made it, else null.
@@ -389,6 +411,7 @@ public:
 signals:
     void inputChanged();
     void statusChanged();
+    void groupsChanged();
     void regionChanged();
     void materialChanged();
 

@@ -14,11 +14,11 @@
 //! ## What this module does
 //!
 //! On `Lock`, it locks the session the way [`Solium::lock_now`](crate::state::Solium::lock_now) does for every
-//! other caller (`sol.lock_now`, the shipped lock key, `idle.lock_after`):
+//! other caller (`lock-now`, the shipped lock key, `idle.lock_after`):
 //! with Solium's own lock while `lock.native` is in effect, which it is
 //! unless `lock.command` names a locker
 //! (`a_lock_signal_locks_natively_unless_a_locker_is_set`), and otherwise by
-//! running `lock.command` (`sol.lock{ command = "swaylock -f" }`), unless the
+//! running `lock.command` (`lock{ command = "swaylock -f" }`), unless the
 //! session already has a lock object
 //! (`a_lock_signal_while_already_locked_runs_nothing`) — running a second
 //! locker would only hear `finished` and exit, see `lock.rs`.
@@ -135,7 +135,7 @@ const DBUS_PATH: &str = "/org/freedesktop/DBus";
 const SESSION_WAIT: Duration = Duration::from_secs(2);
 
 /// `lock.*` in the configuration: logind's `Lock` and sleep signals, handed
-/// over by `sol.lock`.
+/// over by `lock`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
     /// What to run on `Lock`, and before sleep: `swaylock -f`, say. Split on
@@ -431,7 +431,7 @@ impl crate::state::Solium {
     /// while `lock.native` is in effect, and otherwise `lock.command`'s
     /// locker, unless the session already has a lock. The one way to lock
     /// that logind's `Lock`, the moment before sleep, `idle.lock_after`,
-    /// `sol.lock_now` and the shipped lock key all share.
+    /// `lock-now` and the shipped lock key all share.
     ///
     /// Only ever locks: over a session already locked, natively or by a
     /// client, it changes nothing, and nothing here can unlock

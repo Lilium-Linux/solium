@@ -125,10 +125,13 @@ fn check_qml_on_a_broken_file_exits_one() {
 /// `effect.lua`, and starts nothing (the same isolation as every test here).
 #[test]
 fn check_exits_1_on_a_broken_effect_folder() {
-    let folder = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/effects/api2");
+    let folder = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/effects/future-api"
+    );
     let (code, out, err) = run_args(&["--check", folder], "check-effect");
     assert_eq!(code, 1, "{out}{err}");
-    assert!(out.contains("api2/effect.lua"), "{out}");
+    assert!(out.contains("future-api/effect.toml"), "{out}");
 }
 
 /// **A good effect folder exits 0**, and is not also handed to the QML-file
@@ -148,7 +151,7 @@ fn check_exits_0_on_a_good_effect_folder() {
     );
 }
 
-/// **The shipped `glass` passes `solium --check`**: its `effect.lua`, its
+/// **The shipped `glass` passes `solium --check`**: its `effect.toml`, its
 /// params, `refract.frag`'s checks, and the shipped `blur` its `use` stage
 /// names, found beside it.
 #[test]
@@ -159,45 +162,6 @@ fn check_exits_0_on_the_shipped_glass() {
     assert!(out.contains("glass: ok"), "{out}");
 }
 
-/// **`--check <folder>` reads the configuration's `effects.sandbox`**, as
-/// the session loads the folder under it: one that builds 20 MiB exits 1
-/// with no configuration (the default 16 MiB) and 0 under one that gives
-/// 64.
-#[test]
-fn check_of_a_folder_reads_the_configured_sandbox() {
-    let check = |name: &str, configured: bool| {
-        let folder = std::env::temp_dir()
-            .join(format!("solium-cli-test-{}-{name}", std::process::id()))
-            .join("big");
-        let argument = folder.to_string_lossy().into_owned();
-        run_args_with(&["--check", &argument], name, |dir| {
-            std::fs::create_dir_all(dir.join("big")).expect("the folder");
-            std::fs::write(
-                dir.join("big/effect.lua"),
-                "local big = string.rep('x', 20 * 1024 * 1024)\nreturn { api = 1, inputs = { 'self' }, frag = 'effect.frag' }\n",
-            )
-            .expect("its effect.lua");
-            std::fs::write(
-                dir.join("big/effect.frag"),
-                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
-            )
-            .expect("its frag");
-            if configured {
-                std::fs::write(
-                    dir.join("init.lua"),
-                    "sol.effects({ sandbox = { memory_mib = 64, load_ms = 5000 } })\n",
-                )
-                .expect("an init.lua");
-            }
-        })
-    };
-    let (code, out, err) = check("check-caps-default", false);
-    assert_eq!(code, 1, "the premise: 20 MiB under 16: {out}{err}");
-    let (code, out, err) = check("check-caps-roomy", true);
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(out.contains("big: ok"), "{out}");
-}
-
 /// **Plain `--check` exits 1 on a broken folder in the user's effects/**
 /// (spec §8.4), and 0 with the same configuration and no such folder.
 #[test]
@@ -205,14 +169,14 @@ fn check_exits_1_on_a_broken_user_effect_folder() {
     let config = |dir: &Path, broken: bool| {
         std::fs::write(dir.join("init.lua"), "sol.pane('none')\n").expect("an init.lua");
         if broken {
-            let api2 = Path::new(concat!(
+            let future = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/effects/api2"
+                "/tests/fixtures/effects/future-api"
             ));
-            let into = dir.join("solium/effects/api2");
+            let into = dir.join("solium/effects/future-api");
             std::fs::create_dir_all(&into).expect("the user's effects folder");
-            for file in ["effect.lua", "effect.frag"] {
-                std::fs::copy(api2.join(file), into.join(file)).expect("copying the fixture");
+            for file in ["effect.toml", "effect.frag"] {
+                std::fs::copy(future.join(file), into.join(file)).expect("copying the fixture");
             }
         }
     };
@@ -222,7 +186,7 @@ fn check_exits_1_on_a_broken_user_effect_folder() {
     let (broken, out, err) =
         run_args_with(&["--check"], "check-user-broken", |dir| config(dir, true));
     assert_eq!(broken, 1, "{out}{err}");
-    assert!(out.contains("api2/effect.lua"), "{out}");
+    assert!(out.contains("future-api/effect.toml"), "{out}");
 }
 
 /// **The default configuration names its scenes where it lives** (#502): the
@@ -254,6 +218,129 @@ assert(user.shell.scene == here .. "/shell/Shell.qml", "shell.scene is " .. user
         .expect("an init.lua");
     });
     assert_eq!(code, 0, "{out}{err}");
+}
+
+/// **`wm.toml` names the window manager that is started, and a check says
+/// which**: the command is run as it is written, so a check of this
+/// configuration reports the bindings of the file the command names, not of
+/// the `init.lua` a check without it reads. The program is the Lua window
+/// manager, named by hand as any other would be.
+#[test]
+fn check_runs_the_window_manager_wm_toml_names() {
+    let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("solium-lua");
+    let write = |dir: &Path, toml: &str| {
+        std::fs::write(
+            dir.join("init.lua"),
+            r#"sol.bind("super+f7", function() end)"#,
+        )
+        .expect("an init.lua");
+        std::fs::write(
+            dir.join("named.lua"),
+            r#"sol.bind("super+f8", function() end)"#,
+        )
+        .expect("the file the command names");
+        std::fs::create_dir_all(dir.join("solium")).expect("the configuration directory");
+        std::fs::write(dir.join("solium/wm.toml"), toml).expect("a wm.toml");
+    };
+
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-none", |dir| {
+        std::fs::write(
+            dir.join("init.lua"),
+            r#"sol.bind("super+f7", function() end)"#,
+        )
+        .expect("an init.lua");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("super+f7") && !out.contains("wm.toml"),
+        "{out}"
+    );
+
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-named", |dir| {
+        write(
+            dir,
+            &format!(
+                "command = [{:?}, {:?}]\n",
+                wm.display().to_string(),
+                dir.join("named.lua").display().to_string(),
+            ),
+        );
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("  window manager  ")
+            && out.contains("named.lua")
+            && out.contains("(wm.toml)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("super+f8") && !out.contains("super+f7"),
+        "{out}"
+    );
+
+    // What the file gets wrong fails the check, with the key named, and the
+    // rest of it is still used.
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-wrong", |dir| {
+        write(dir, "comand = [\"my-wm\"]\ncpu_weight = 20000\n");
+    });
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("wm.toml: `comand` is not a key of this file")
+            && out.contains("wm.toml: `cpu_weight` is 1 to 10000, not 20000"),
+        "{out}"
+    );
+    assert!(
+        out.contains("super+f7"),
+        "the shipped window manager ran: {out}"
+    );
+
+    // A program that is not there fails it too, saying which.
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-missing", |dir| {
+        write(dir, "command = [\"/no/such/window-manager\"]\n");
+    });
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(
+        out.contains("starting /no/such/window-manager"),
+        "{out}{err}"
+    );
+}
+
+/// **A window manager that is not the Lua one is checked as it is**: the
+/// example written in Rust against the protocol crate
+/// (`crates/wm-protocol/examples/tiny_wm.rs`), started as its own program
+/// from `wm.toml`, answers `hello` with its bindings, and the check lists
+/// them with what each does. No Lua runs.
+#[test]
+fn check_lists_the_bindings_of_a_window_manager_in_another_language() {
+    let wm = Path::new(env!("CARGO_BIN_EXE_solium")).with_file_name("examples/tiny_wm");
+    assert!(
+        wm.is_file(),
+        "{} is not built: cargo build -p solium-wm-protocol --examples",
+        wm.display()
+    );
+    let (code, out, err) = run_args_with(&["--check"], "check-wm-toml-rust", |dir| {
+        // Not Lua at all: a window manager that read it would fail to load.
+        std::fs::write(dir.join("init.lua"), "this is not a configuration").expect("an init.lua");
+        std::fs::create_dir_all(dir.join("solium")).expect("the configuration directory");
+        std::fs::write(
+            dir.join("solium/wm.toml"),
+            format!("command = [{:?}]\n", wm.display().to_string()),
+        )
+        .expect("a wm.toml");
+    });
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("tiny_wm  (wm.toml)"), "{out}");
+    assert!(out.contains("ok: 5 binding(s)"), "{out}");
+    for (combo, note) in [
+        ("super+return", "open a terminal"),
+        ("shift+super+e", "end the session"),
+    ] {
+        assert!(
+            out.lines()
+                .any(|line| line.contains(combo) && line.contains(note)),
+            "{combo}: {out}"
+        );
+    }
 }
 
 /// **`solium pin set` and `solium pin clear` need a terminal**: with

@@ -10,8 +10,8 @@ use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::{Physical, Rectangle};
 
 use super::run::Held;
-use super::tree::Tree;
 use super::xray::Cut;
+use crate::script::{Doc, DocTable};
 
 /// Which memo: a monitor, the cut of xray it reads, and the chained content
 /// key of the prefix steps up to the one it holds (`upto`, the prefix's
@@ -330,14 +330,14 @@ pub(crate) struct MemoConfig {
 /// The keys `effects.memo` takes.
 const KEYS: [&str; 3] = ["split", "keep_passes", "budget_mib"];
 
-/// `effects.memo`, read and checked through `Tree`'s own shape: a table of
+/// `effects.memo`, read and checked through `Doc`'s own shape: a table of
 /// named keys, each refused by name outside its words or bounds, an unknown
 /// key named with the nearest known one (as Ruling 28's are).
 /// `tests::effects_memo_is_read_and_checked`,
 /// `tests::effects_memo_refuses_what_is_not_its_shape`.
-pub(crate) fn parse(tree: &Tree) -> Result<MemoConfig, String> {
+pub(crate) fn parse(tree: &Doc) -> Result<MemoConfig, String> {
     use solium_effects::stage::Split;
-    let Tree::Table { list, fields } = tree else {
+    let Doc::Table(DocTable { list, fields, .. }) = tree else {
         return Err(
             "`effects.memo` is a table: { split = \"resize\", keep_passes = 0, budget_mib = 0 }"
                 .to_owned(),
@@ -351,9 +351,9 @@ pub(crate) fn parse(tree: &Tree) -> Result<MemoConfig, String> {
         match key.as_str() {
             "split" => {
                 config.split = match value {
-                    Tree::Text(word) if word == "resize" => Split::Resize,
-                    Tree::Text(word) if word == "longest" => Split::Longest,
-                    Tree::Text(word) if word == "off" => Split::Off,
+                    Doc::Text(word) if word == "resize" => Split::Resize,
+                    Doc::Text(word) if word == "longest" => Split::Longest,
+                    Doc::Text(word) if word == "off" => Split::Off,
                     _ => return Err("`effects.memo.split` is resize, longest or off".to_owned()),
                 };
             }
@@ -375,14 +375,14 @@ pub(crate) fn parse(tree: &Tree) -> Result<MemoConfig, String> {
 /// `effects.memo.<name>`, a whole number from 0 to `max`: an integer, or a
 /// float with no fraction, as Lua holds `2^6`.
 /// `tests::effects_memo_refuses_what_is_not_its_shape`.
-fn whole(name: &str, value: &Tree, max: u32) -> Result<u64, String> {
+fn whole(name: &str, value: &Doc, max: u32) -> Result<u64, String> {
     let number = match value {
-        Tree::Int(int) => *int,
+        Doc::Int(int) => *int,
         #[expect(
             clippy::cast_possible_truncation,
             reason = "finite, whole and far inside an i64, so the cast is exact"
         )]
-        Tree::Number(float) if float.fract() == 0.0 && float.abs() < 1e15 => *float as i64,
+        Doc::Num(float) if float.fract() == 0.0 && float.abs() < 1e15 => *float as i64,
         _ => {
             return Err(format!(
                 "`effects.memo.{name}` is a whole number, 0 to {max}"
@@ -1164,8 +1164,8 @@ pub(crate) mod tests {
         assert_eq!(super::plan_bytes(&plan, (101, 61)), u64::MAX);
     }
 
-    fn tree(lua: &str) -> crate::effect::tree::Tree {
-        crate::effect::tree::tests::tree(lua).expect("a table")
+    fn tree(lua: &str) -> crate::script::Doc {
+        crate::script::doc::tests::plain(lua).expect("a table")
     }
 
     /// **`effects.memo` is read and checked by name.**
@@ -1221,15 +1221,16 @@ pub(crate) mod tests {
     /// the nearest one.
     #[test]
     fn effects_memo_refuses_what_is_not_its_shape() {
-        use crate::effect::tree::Tree;
+        use crate::script::{Doc, DocTable};
         assert_eq!(
             super::parse(&tree("{ keep_passes = 2^6 }")).map(|config| config.keep_passes),
             Ok(64)
         );
-        let not_finite = Tree::Table {
+        let not_finite = Doc::Table(DocTable {
             list: Vec::new(),
-            fields: [("budget_mib".to_owned(), Tree::Number(f64::INFINITY))].into(),
-        };
+            fields: [("budget_mib".to_owned(), Doc::Num(f64::INFINITY))].into(),
+            ..DocTable::default()
+        });
         assert!(
             super::parse(&not_finite)
                 .expect_err("refused")

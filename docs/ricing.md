@@ -83,7 +83,7 @@ different list, not a longer one.
 
 [Every setting](https://lilium-linux.github.io/solium/generated/reference/settings.html)
 is the list of everything you can put in there, one row per section, and
-[the configuration reference](../crates/solium/lua/config.lua) explains each
+[the configuration reference](../crates/solium-lua/lua/config.lua) explains each
 key. Both are made from `config.lua`, the file that sets the defaults, so they
 cannot drift from it. [Key bindings](https://lilium-linux.github.io/solium/generated/reference/bindings.html)
 is every key that ships, and what it does.
@@ -107,7 +107,7 @@ Three guides go deeper than the recipes below:
 | your loading window | `~/.config/solium/qml/loading/*.qml` |
 | your pointer | any QML file, named by `cursor.scene` ([below](#your-own-pointer)) |
 | your colours and fonts | `~/.config/solium/qml/Solium/Theme.qml`, once [#88](https://github.com/Lilium-Linux/solium/issues/88) is fixed |
-| the shipped files, to copy from | `crates/solium/qml` and `crates/solium/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
+| the shipped files, to copy from | `crates/solium/qml` and `crates/solium-lua/lua` in a checkout; `share/solium/qml` and `share/solium/lua` under the prefix of an install: `/usr` for the Fedora package, `~/.local` for `dev/install.sh` |
 | the log | `~/.local/state/solium/session.log`, for a session started with `solium --tty` or from the login screen. A nested run logs to the terminal it was started from |
 
 `~/.config` is `$XDG_CONFIG_HOME` when that is set, and `~/.local/state` is
@@ -343,7 +343,7 @@ rows, which in a terminal is the top half of the first line.
 
 ### Effects
 
-An effect is a folder of Lua and GLSL, yours in `~/.config/solium/effects/`
+An effect is a folder of a TOML description and GLSL, yours in `~/.config/solium/effects/`
 or one Solium ships, and a rule puts it in a slot of a part of a window. To
 blur what mpv itself draws, in its own place:
 
@@ -363,8 +363,8 @@ its pane style, its `region:titlebar`, or a scripted or layer surface; `slot`
 is `behind` it, in `front` of it, or `replace` it; `effect` is a name, a name
 with params (`{ "blur", passes = 3 }`), a chain of them, or `false` to empty
 the slot. A later rule for the same part and slot wins, and yours win over a
-pane style's: a style may give its own windows rules in an `effects.lua`
-beside its `Pane.qml` ([pane styles](../crates/solium/qml/panes/README.md#effectslua)). `source = "self"` is what makes this blur read mpv's own
+pane style's: a style may give its own windows rules in an `effects.toml`
+beside its `Pane.qml` ([pane styles](../crates/solium/qml/panes/README.md#effectstoml)). `source = "self"` is what makes this blur read mpv's own
 pixels. Without it, a blur reads what is behind the window: put it `behind`
 a translucent terminal and the wallpaper shows through blurred, the blur run
 once per monitor and shared by every window it is behind
@@ -2778,9 +2778,10 @@ A mode is a Lua module that reacts to events — a window opening, closing or
 taking focus, a drag ending, the monitors changing, and the rest
 [modes.md lists](modes.md#what-a-mode-is-told) — and asks for placements.
 `tiling.lua` is Hyprland's dwindle and `scrolling.lua` is niri's model; each
-decides where windows go and when, and leaves the arithmetic of the tree and
-the strip to `crates/layout`. Copy either into your own directory and it takes
-over.
+decides where windows go and when, and leaves the tree and the strip to
+`layouts/dwindle.lua` and `layouts/scroller.lua`; the compositor solves the
+tree's tiles and moves its seams. Copy any of them
+into your own directory, `layouts/` included, and the copy takes over.
 
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines
 and the two mistakes everyone makes first.
@@ -2861,7 +2862,7 @@ as it animates. The pane styles' README has the rest, under
 
 Solium ships a definitions file for
 [lua-language-server](https://luals.github.io/),
-[`lua/meta/sol.lua`](../crates/solium/lua/meta/sol.lua), which describes every
+[`lua/meta/sol.lua`](../crates/solium-lua/lua/meta/sol.lua), which describes every
 `sol.*` function with its arguments. Point the server at it and your editor
 completes `sol.` and checks what you pass. A `.luarc.json` in
 `~/.config/solium`, beside your `user.lua`:
@@ -2874,7 +2875,7 @@ completes `sol.` and checks what you pass. A `.luarc.json` in
 ```
 
 That is where a package puts Solium's Lua. `dev/install.sh` puts it in
-`~/.local/share/solium/lua`, and in a checkout it is `crates/solium/lua`; write
+`~/.local/share/solium/lua`, and in a checkout it is `crates/solium-lua/lua`; write
 the whole path either way. Naming the `lua` folder rather than `lua/meta`
 also lets the server follow `require("modes")` and the other shipped modules.
 The same file is the Lua API page of the documentation site.

@@ -1,7 +1,7 @@
 //! Scenarios: the shipped configuration driven as a person drives it, and
 //! checked by what the compositor then holds.
 //!
-//! A feature written as configuration -- Lua policy, and QML drawing from the
+//! A feature written as configuration -- a window manager's policy, and QML drawing from the
 //! data the compositor publishes -- has no Rust of its own, and its tests
 //! should not need any either: the compositor is not meant to know the
 //! feature exists. So they are written beside it, as data, and this plays
@@ -49,21 +49,21 @@
 //! | step | |
 //! |---|---|
 //! | `pane = "name", client = { w, h }` | a frame built from the shipped style of that name, around a client that size |
-//! | `tell = { caret = { x, y, w, h } or false, values = { ... } }` | what a frame tells it: the caret, and values merged as `sol.pane_values` merges them; and, kept until told again, `focused` (true until then), `inside` (whether the pointer is over the window, false until then), `title` and `app_id` (each empty until then) |
+//! | `tell = { caret = { x, y, w, h } or false, values = { ... } }` | what a frame tells it: the caret, and values merged as `pane-values` merges them; and, kept until told again, `focused` (true until then), `inside` (whether the pointer is over the window, false until then), `title` and `app_id` (each empty until then) |
 //! | `point = { x, y }` | the pointer moved there, in the pane's own space, as the compositor hands it to every layer; `point = false`, gone from the pane, which is also no longer `inside` it |
 //! | `wait = ms` | that much time, on the clock QML's animations and timers run on |
-//! | `scene = "path", size = { w, h }` | a shipped scene, `qml/` and that path, built that size, as a `sol.surface` builds one |
+//! | `scene = "path", size = { w, h }` | a shipped scene, `qml/` and that path, built that size, as a `surface` builds one |
 //! | `set = { ... }` | properties written into that scene, as a redeclared surface writes them |
 //!
 //! And for either, `expect = function(world) end`, which fails the scenario by
 //! raising an error, `assert` included. `world` holds what the compositor holds:
 //! `surfaces` (by name: `x`, `y`, `w`, `h` for one placed at a rect, and its
-//! `properties`), `panes` (what `sol.pane_values` handed every pane), `field`
-//! (what `sol.text_input()` answers, `framed` included), `windows` (each
+//! `properties`), `panes` (what `pane-values` handed every pane), `field`
+//! (what ``text-field` change answers, `framed` included), `windows` (each
 //! window opened: `id`; `x`, `y`, `w`, `h`, where it lives; `drawn` -- the
 //! rectangle it is drawn at now, `x`, `y`, `w`, `h` -- `transformed`,
 //! whether it holds a presentation transform at all, `maximized`, and
-//! `values`, what `sol.frame` handed its frame) and `unknown` (each
+//! `values`, what `frame-values` handed its frame) and `unknown` (each
 //! setting `solium --check` would report: `key`, and the `meant` it
 //! suggests); or, on the Qt thread,
 //! `pixel(layer, x, y)`, the frame's layer of that name rendered, answering
@@ -742,7 +742,7 @@ mod tests {
             crate::qml::qt_test::on_the_qt_thread(move || super::on_the_qt_thread(&path));
             return;
         }
-        let own = crate::script::Scripts::user_config_dir()
+        let own = solium_paths::user_config_dir()
             .and_then(|own| std::fs::read_dir(own).ok())
             .is_some_and(|entries| {
                 entries

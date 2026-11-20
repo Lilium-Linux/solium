@@ -284,7 +284,7 @@ pub fn clamp_of(name: &str) -> String {
     format!("sol_{name}_clamp")
 }
 
-fn glsl_type(kind: ParamKind) -> &'static str {
+pub(crate) fn glsl_type(kind: ParamKind) -> &'static str {
     match kind {
         ParamKind::Float => "float",
         ParamKind::Int => "int",
@@ -357,7 +357,7 @@ pub struct Lint {
 /// A block comment leaves one space, as GLSL reads it, so the names either
 /// side of one stay two names.
 /// `tests::lint_skips_comments`, `tests::per_part_names_are_found_outside_comments`.
-fn uncommented(text: &str) -> String {
+pub(crate) fn uncommented(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -391,7 +391,7 @@ fn uncommented(text: &str) -> String {
 }
 
 /// Every identifier on a line.
-fn identifiers(line: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn identifiers(line: &str) -> impl Iterator<Item = &str> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|word| !word.is_empty())
 }

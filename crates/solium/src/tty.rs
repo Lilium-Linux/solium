@@ -348,6 +348,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
 
     let mut solium = Solium::new(display_handle.clone());
     solium.socket_name = start_socket(&mut event_loop, display)?;
+    crate::wm::link::set_wayland_socket(std::ffi::OsStr::new(&solium.socket_name));
 
     let loop_handle = event_loop.handle();
     solium.explicit_sync.sender = Some(crate::explicit_sync::install(
@@ -356,14 +357,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
     )?);
     let x11_coming = crate::xwayland::start(&loop_handle, &display_handle);
 
-    let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    let scripts = solium.first_scripts(crate::wm::Which::Chosen);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
@@ -387,7 +381,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         solium.session.x11(None);
     }
     // Before the scripts, same as the session: `lock.before_sleep`'s default
-    // (on) takes the inhibitor at once, and a `sol.lock` in the first dispatch
+    // (on) takes the inhibitor at once, and a `lock` in the first dispatch
     // (`start_scripts`, next) reconfigures it through `Command::Lock` like any
     // reload. `SOLIUM_LOGIND_BUS` names a bus to hear logind on instead of the
     // system bus, the same override `SOLIUM_SESSION_BUS` is for the session.
@@ -396,6 +390,9 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
         crate::dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    solium.wm_watch = Some(crate::wm::Watch::new(loop_handle.clone(), |state| {
+        &mut state.solium
+    }));
     solium.start_scripts(scripts);
     // After the scripts, as nested: see `winit.rs` and `screensaver.rs`.
     solium.idle.serve_dbus(place, crate::dev::session_bus());
@@ -870,6 +867,11 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // reported it. See `settle_resize`.
             // And a move drag's last motion, told once (#452).
             crate::input::grab::settle_drags(&mut state.solium, false);
+            // What this pass told the window manager without waiting (its
+            // fingers, its drags), sent, and answered in time for the
+            // frame when one is about to be drawn: `wm::before_frame`.
+            let drawable = state.drawable_now(crate::pacing::monotonic_now());
+            crate::wm::before_frame(&mut state.solium, drawable);
             state.solium.settle_resize();
             // What the focused text field said since the last pass, told to the
             // configuration once, so a pill it moves to the caret is in this
@@ -915,13 +917,16 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
             // What logind's `Lock` and sleep signals ask for: see `logind.rs`.
             crate::logind::settle(&mut state.solium);
             crate::services::settle(&mut state.solium);
-            // What `sol.run{}`'s children said, and the timers due, on the
+            // What `run{}`'s children said, and the timers due, on the
             // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
             crate::runs::settle(&mut state.solium);
             crate::timers::settle(&mut state.solium);
             // What its reads, writes and watches came to, and its stores
             // saved when they changed (#473): `files.rs`.
             crate::files::settle(&mut state.solium);
+            // What the window manager answered after the compositor stopped
+            // waiting for it, and one that has stopped, started again: `wm`.
+            crate::wm::settle(&mut state.solium);
             // The native lock's password check: the one place its yes unlocks.
             crate::lock_auth::settle(&mut state.solium);
             // And the end of its exit, at `lock.exit_ms` whatever the scene
@@ -2711,7 +2716,7 @@ fn handle_input(
 }
 
 /// What a device got, for the log -- the issue's own "log what each device
-/// got", and the only thing that stands in for `sol.input_devices()` today:
+/// got", and the only thing that stands in for `input_devices` today:
 /// a device's settings are told to the log, not yet to Lua (#157's own
 /// deliberate cut, see the PR this lands in).
 fn log_device(info: &crate::input::devices::DeviceInfo, report: &crate::input::devices::Report) {

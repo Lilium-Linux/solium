@@ -6,10 +6,9 @@
 //! would drift the first time either changed, and the drift would be
 //! invisible -- the page would still bend something plausible.
 //!
-//! A grid is written into a fixed scratch buffer rather than allocated, the
-//! same way `solium_layout::ffi` publishes its rectangles: the crate has no
-//! dependencies and wants none, and a wasm module that never allocates is a
-//! wasm module with nothing to leak.
+//! A grid is written into a fixed scratch buffer rather than allocated: the
+//! crate has no dependencies and wants none, and a wasm module that never
+//! allocates is a wasm module with nothing to leak.
 
 use crate::{Axis, Deform, Rect};
 

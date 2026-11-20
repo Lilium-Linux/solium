@@ -944,7 +944,7 @@ fn held(
         .and_then(|window| state.real_geometry(&window))
         .map(|real| real.loc.to_f64());
 
-    // Only the window with the keyboard, and not one `sol.release_pointer`
+    // Only the window with the keyboard, and not one `release-pointer`
     // took it back from (#427): see `state::pointer_hold`. One that holds it
     // and may no longer is let go of here too, whatever moved the keyboard.
     let may = state.may_hold_pointer(&surface);
@@ -2586,7 +2586,7 @@ mod tests {
         const RIGHT: u32 = 114;
         const DOWN: u32 = 116;
 
-        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
         let script = format!(
             "package.path = {shipped:?} .. \"/?.lua\"\n\
              sol.toggle_fullscreen = function() sol.status(\"fullscreen\") end\n\
@@ -2650,7 +2650,7 @@ mod tests {
         const CTRL: u32 = 37;
         const L: u32 = 46;
 
-        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
         let script = format!(
             "package.path = {shipped:?} .. \"/?.lua\"\ndofile({shipped:?} .. \"/init.lua\")\n"
         );
@@ -2690,7 +2690,7 @@ mod tests {
     fn every_shipped_binding_fires_on_both_groups_of_us_ru() {
         use smithay::input::keyboard::xkb;
 
-        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/lua");
+        let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/../solium-lua/lua");
         let directory = std::env::temp_dir().join("solium-reachable-us-ru");
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("creating the entry directory");

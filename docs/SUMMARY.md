@@ -20,6 +20,11 @@
 - [Decorations](decorations.md)
 - [Effects](generated/repo/crates/solium/effects/README.md)
 
+# Window managers
+
+- [Writing a window manager](window-managers.md)
+- [The protocol](generated/reference/protocol.md)
+
 # Shells and QML
 
 - [Shell hosting and integration](shell-boundary.md)

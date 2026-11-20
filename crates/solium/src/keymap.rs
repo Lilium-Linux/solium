@@ -13,7 +13,7 @@
 //!
 //! * **No configuration.** An environment variable set in a wrapper script is
 //!   not a setting; it is a thing you have to already know. Everything else in
-//!   this compositor is configured in one Lua file and this was not in it.
+//!   this compositor was configured in one Lua file and this was not in it.
 //! * **The repeat rate was hardcoded** at 200 ms and 25 Hz, in the call that
 //!   created the seat. xkbcommon has nothing to say about repeat rate, so no
 //!   environment variable reached it and there was no way to change it at all.
@@ -40,7 +40,7 @@ use crate::state::Solium;
 /// A keyboard configuration, as a script asks for it.
 ///
 /// Every field is optional and absent means "leave it alone", so
-/// `sol.keyboard{ active = 2 }` from a binding does not quietly reset the
+/// `keyboard{ active = 2 }` from a binding does not quietly reset the
 /// repeat rate somebody set in their configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Request {
@@ -52,7 +52,7 @@ pub(crate) struct Request {
     pub(crate) repeat: Option<(i32, i32)>,
     /// Which layout to make live, one-based as a person counts them.
     pub(crate) active: Option<usize>,
-    /// Caps Lock and Num Lock, on or off: `sol.keyboard{ caps = true }`.
+    /// Caps Lock and Num Lock, on or off: `keyboard{ caps = true }`.
     /// `tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`.
     pub(crate) caps: Option<bool>,
     pub(crate) num: Option<bool>,
@@ -86,7 +86,7 @@ impl Keymap {
     }
 }
 
-/// What the keyboard currently is, for `sol.keyboard()` and for a shell.
+/// What the keyboard currently is, for `keyboard` and for a shell.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
     /// Human-readable, in group order: "Ukrainian", "English (Dvorak)".
@@ -94,7 +94,7 @@ pub(crate) struct State {
     /// Each layout's short name, in the same order: "EN", "RU".
     /// `tests::a_layouts_short_name_is_the_one_xkbs_rules_give_it`.
     pub(crate) short: Vec<String>,
-    /// One-based, to match how `sol.keyboard{ active = 2 }` reads.
+    /// One-based, to match how `keyboard{ active = 2 }` reads.
     pub(crate) active: usize,
     /// Whether Caps Lock and Num Lock are on, as the keyboard's lights say.
     /// `tests::caps_and_num_are_what_the_keys_left_locked`.
@@ -380,7 +380,7 @@ fn set_lock(state: &mut Solium, lock: Lock, on: bool) -> bool {
 /// active is the key Russian puts it on, not English's, which types `ю` there;
 /// a shortcut's `t` is the key that has it on English, as a person presses it.
 /// For a lock, for `SOLIUM_KEY_AT`, which presses keys by name, and for
-/// `sol.press`. `tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`,
+/// `press`. `tests::sol_keyboard_turns_the_locks_on_and_off_and_leaves_russian_live`,
 /// `press::a_key_is_found_in_the_active_layout_first`.
 pub(crate) fn keycode_of(state: &mut Solium, keysym: Keysym) -> Option<Keycode> {
     let keyboard = state.seat.get_keyboard()?;
@@ -621,7 +621,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// **`sol.keyboard()`'s keyboard names the live layout and its short
+    /// **`keyboard`'s keyboard names the live layout and its short
     /// name**, from the keymap and the machine's own xkb rules: Russian, RU.
     #[test]
     fn sol_keyboard_names_the_live_layout_and_its_short_name() {
@@ -662,7 +662,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// **`sol.keyboard{ caps = true }` turns Caps Lock on, and `false` off
+    /// **`keyboard{ caps = true }` turns Caps Lock on, and `false` off
     /// again, and Num Lock the same, with Russian left live**: the lock is
     /// pressed as xkb would have it pressed, and the group it was in stays.
     /// Asking for a lock that is already so changes nothing.

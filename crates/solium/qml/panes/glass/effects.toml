@@ -1,0 +1,39 @@
+# The glass style's rules, for every window it frames but a fullscreen one,
+# which has no frame and keeps direct scanout (a fullscreen window has no
+# frame, so no style's rule reaches it anyway; the match says so here too,
+# where the rule is read):
+#
+# * the shipped `glass` effect behind the whole pane, frame and client
+#   together, cut to the window's outline, every corner rounded at the
+#   window's (Pane.qml's `client.radius`). So the window is one piece of
+#   glass, with one rim round its rounded outline and no seam where the bar
+#   meets the client.
+# * the shipped `shade` in front of the whole pane while the window does not
+#   have the keyboard: a thin dark edge just inside its rounded outline,
+#   round all four sides and through the corners. Drawn on the GPU from the
+#   window's shape alone, once per size; its `fade` brings it in as the
+#   window loses the keyboard and takes it away as it gets it back, the
+#   compositor blending the edge it has at another opacity on each frame.
+#
+# Your own `effects.rules` win over these for the same part and slot:
+# `{ match = { style = "glass" }, part = "pane", slot = "behind", effect = false }`
+# takes the glass away, and `effect = { "glass", haze = 1 }` there gives it
+# other params; `slot = "front"` the same for the shade, such as
+# `effect = { "shade", width = 6, strength = 0.7 }`, with a `fade` of its own.
+
+[[rules]]
+match = { fullscreen = false }
+part = "pane"
+slot = "behind"
+effect = "glass"
+
+[[rules]]
+match = { fullscreen = false, focused = false }
+part = "pane"
+slot = "front"
+# How far in it reaches, in pixels, how opaque it is at the very edge, and
+# its colour: the shade's own params (effects/shade). A link names its
+# effect by its `effect` key here, beside the params.
+effect = { effect = "shade", width = 12, strength = 0.5, color = [0, 0, 0, 1] }
+# How long it takes to come and go with the focus, and on which curve.
+fade = { duration = 240, easing = "outCubic" }

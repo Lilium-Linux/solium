@@ -383,6 +383,9 @@ impl Solium {
             }
         }
         for (name, action, data) in asked {
+            // At debug, which scene asks what: one that sends an action a
+            // frame is a round trip to the window manager a frame.
+            tracing::debug!(surface = name, action, "a scene's action");
             let snapshot = self.snapshot();
             let Some(mut scripts) = self.scripts.take() else {
                 return;
@@ -524,7 +527,7 @@ impl Solium {
             | "windows.minimize" | "windows.unminimize" => {}
             _ => {
                 if self.unknown_actions.insert(action.to_owned()) {
-                    tracing::warn!(action, "sol.act: no such action");
+                    tracing::warn!(action, "act: no such action");
                 }
                 return Err("unknown-action");
             }

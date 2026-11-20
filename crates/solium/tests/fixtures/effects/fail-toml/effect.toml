@@ -1,0 +1,3 @@
+# An effect.toml that is not TOML.
+api = 2
+frag = = "effect.frag"

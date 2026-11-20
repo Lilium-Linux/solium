@@ -7,6 +7,7 @@
 pub(crate) mod apps;
 pub(crate) mod diff;
 pub(crate) mod folder;
+pub(crate) mod groups;
 pub(crate) mod keyboard;
 pub(crate) mod monitors;
 pub(crate) mod pointer;
@@ -63,6 +64,8 @@ pub(crate) struct Published {
     keyboard: keyboard::Published,
     /// `pointer::tests::a_named_shape_reaches_solium_cursor_shape`.
     pointer: pointer::Published,
+    /// What `Solium.groups` last took (`groups::publish`).
+    pub(crate) groups: Option<String>,
 }
 
 /// The shared lists and service views `publish_models` last made rows from,
@@ -95,6 +98,13 @@ impl crate::state::Solium {
     /// Every model's changes since what Qt last took, one batch per model:
     /// `tests::publish_models_carries_the_compositors_monitors_to_their_scenes`,
     /// `tests::a_batch_qt_cannot_take_is_sent_again_once_it_can`.
+    /// Every group's pose at `now` for `Solium.groups`, if it changed
+    /// (`groups::publish`): `render::frame_tick` asks it at the instant the
+    /// pass is drawn at, after `publish_models`, whose instant comes before.
+    pub(crate) fn publish_groups(&mut self, now: std::time::Duration) {
+        groups::publish(&self.groups, now, &mut self.published.groups);
+    }
+
     pub(crate) fn publish_models(&mut self) {
         self.refresh_inhibitors();
         // The workspaces a shell that is its own program sees, from the same

@@ -46,3 +46,14 @@ docs/superpowers/
 # The documentation site. dev/docs/generate.py writes these pages from the
 # code on every build, so they are never committed; see book.toml.
 docs/generated/
+
+# What `dotnet build` writes for the C# package in sdk/csharp, the
+# protocol's generated types among them, and for the window managers in
+# examples/ that are built on it; and the films made for Bad Apple.
+examples/bad-apple/bin/
+examples/bad-apple/obj/
+examples/space/bin/
+examples/space/obj/
+sdk/csharp/*/bin/
+sdk/csharp/*/obj/
+*.frames

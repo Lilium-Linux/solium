@@ -71,10 +71,31 @@ impl<'a> Report<'a> {
 /// `tests::a_config_that_does_not_load_still_fails`,
 /// `tests::an_unrecognised_setting_still_fails`,
 /// `tests::the_bindings_block_stays_where_generate_py_reads_it`.
-pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::Scripts> {
-    report.line(&format!("checking {}", path.display()));
+pub(crate) fn config(
+    which: impl Into<crate::wm::Which>,
+    report: &mut Report,
+) -> Option<crate::script::Scripts> {
+    report.line("checking the window manager");
+    // Which window manager answers for it: the program `wm.toml` names, or
+    // the shipped one. What is wrong with that file fails the check, as a
+    // setting nothing reads does: the file would not do what it says.
+    let (chosen, said) = crate::wm::Chosen::read();
+    match chosen.command.as_deref() {
+        Some(command) => report.line(&format!(
+            "  window manager  {}  (wm.toml)",
+            crate::wm::Chosen::spelled(command)
+        )),
+        None => match crate::wm::link::program() {
+            Ok(program) => report.line(&format!("  solium-lua  {}", program.display())),
+            Err(why) => report.line(&format!("  solium-lua  missing: {why}")),
+        },
+    }
+    for line in &said {
+        let file = crate::wm::Chosen::file().unwrap_or_default();
+        report.fail(&format!("  {}: {line}", file.display()));
+    }
     // Read only: a check changes none of the user's files (#473).
-    match crate::script::Scripts::load_for_check(path) {
+    match crate::script::Scripts::load_for_check(which) {
         Err(err) => {
             // Printed rather than only returned: this is a command someone
             // runs to read the answer, and the chain is where the answer is.
@@ -85,6 +106,11 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
             None
         }
         Ok(scripts) => {
+            // Where it said its configuration is: the file to mend when
+            // what follows fails.
+            if let Some(source) = scripts.source() {
+                report.line(&format!("  configuration  {}", source.display()));
+            }
             let bindings = scripts.bindings();
             report.line(&format!("  ok: {} binding(s)", bindings.len()));
             for binding in bindings {
@@ -150,18 +176,22 @@ pub(crate) fn config(path: &Path, report: &mut Report) -> Option<crate::script::
                 }
             }
 
-            // A refused engine key refuses the whole `sol.effects` call at
+            // A refused engine key refuses the whole `effects` call at
             // run time, its rules included, so it fails here, naming the key
             // (Ruling 9, `tests::a_refused_effects_key_fails_the_check`).
             if let Some(Err(error)) = scripts.effect_settings_at_load() {
                 report
-                    .fail("  sol.effects is refused -- neither its settings nor its rules apply:");
+                    .fail("  the `effects` section is refused -- neither its settings nor its rules apply:");
                 report.line(&format!("    {error}"));
             }
 
             // A store's file a session would set aside: said, not failed,
             // and left as it is (#473).
             // `tests::a_check_leaves_a_broken_store_file_as_it_was`.
+            for refused in scripts.refused_at_load() {
+                report.fail(&format!("  {refused}"));
+            }
+
             for note in scripts.check_notes() {
                 report.line(&format!("  warning: {note}"));
             }
@@ -346,16 +376,15 @@ pub(crate) fn scenes(scripts: &mut crate::script::Scripts, report: &mut Report) 
 }
 
 /// Your own pane-style bundles, every layer included, and the rules of each
-/// one's `effects.lua`, read as the compositor reads them. The shipped ones
+/// one's `effects.toml`, read as the compositor reads them. The shipped ones
 /// are `cargo test`'s, which builds them
 /// (`decoration::tests::a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style`).
 /// `tests::a_broken_style_of_your_own_fails`,
-/// `tests::a_broken_effects_lua_of_your_own_fails`.
-pub(crate) fn styles(report: &mut Report, caps: crate::effect::settings::Caps) {
+/// `tests::a_broken_effects_toml_of_your_own_fails`.
+pub(crate) fn styles(report: &mut Report) {
     styles_in(
         &crate::style::directories(),
         &crate::style::shipped(),
-        caps,
         report,
     );
 }
@@ -363,12 +392,7 @@ pub(crate) fn styles(report: &mut Report, caps: crate::effect::settings::Caps) {
 /// [`styles`], over directories handed in, so a test can hand in its own.
 /// `tests::a_broken_style_of_your_own_fails`,
 /// `tests::the_shipped_styles_are_left_to_cargo_test`.
-fn styles_in(
-    directories: &[std::path::PathBuf],
-    shipped: &Path,
-    caps: crate::effect::settings::Caps,
-    report: &mut Report,
-) {
+fn styles_in(directories: &[std::path::PathBuf], shipped: &Path, report: &mut Report) {
     for directory in directories.iter().filter(|directory| *directory != shipped) {
         let Ok(bundles) = std::fs::read_dir(directory) else {
             continue;
@@ -392,13 +416,13 @@ fn styles_in(
             let Some(dir) = manifest.parent() else {
                 continue;
             };
-            let file = dir.join("effects.lua");
-            if !file.is_file() {
+            let file = dir.join("effects.toml");
+            // An `effects.lua` alone is read too, for the problem that says
+            // to write `effects.toml` instead.
+            if !file.is_file() && !dir.join("effects.lua").is_file() {
                 continue;
             }
-            // Under the configured sandbox, as the session reads it
-            // (`tests::a_styles_effects_lua_is_checked_under_the_configured_sandbox`).
-            let read = crate::style::rules_with(dir, caps);
+            let read = crate::style::rules_of(dir);
             if read.problems.is_empty() {
                 report.line(&format!(
                     "    ok {}: {} rule(s)",
@@ -447,7 +471,6 @@ pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
     report: &mut Report,
     dir: &Path,
     shipped: &Path,
-    caps: crate::effect::settings::Caps,
     gpu: Option<(&mut C, crate::pool::Formats)>,
 ) {
     use crate::effect::host::{Host, Library};
@@ -476,9 +499,6 @@ pub(crate) fn effect_folder<C: crate::effect::host::Compiler>(
     // The folder's own place first, then the shipped folders: a user's copy of
     // `zoom` names the shipped `fade` (`tests::a_user_folder_naming_a_shipped_effect_passes`).
     let mut host: Host<C::Program> = Host::new(Library::with(Some(parent), shipped.to_path_buf()));
-    // Under the configured sandbox, as the session loads it
-    // (`tests::an_effect_is_checked_under_the_configured_sandbox`).
-    host.set_caps(caps);
     // Known before the folder is bound, so a rung this GPU cannot render
     // into is dropped as at run time; with no render node every rung is kept.
     if let Some((_, formats)) = &gpu {
@@ -516,7 +536,6 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
     report: &mut Report,
     library: &crate::effect::host::Library,
     wanted: &[String],
-    caps: crate::effect::settings::Caps,
     mut gpu: Option<(&mut C, crate::pool::Formats)>,
 ) {
     report.line("  effects:");
@@ -526,8 +545,17 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
     }
     let mut seen = std::collections::BTreeSet::new();
     for dir in library.user_folders() {
-        if !dir.join("effect.lua").is_file() {
-            report.fail(&format!("    {}: has no effect.lua", dir.display()));
+        if crate::effect::host::description_of(&dir).is_none() {
+            let lua = dir.join("effect.lua").is_file();
+            report.fail(&format!(
+                "    {}: has no effect.toml{}",
+                dir.display(),
+                if lua {
+                    ", only an effect.lua, which Solium no longer reads: describe the effect in an effect.toml"
+                } else {
+                    ""
+                }
+            ));
             continue;
         }
         seen.insert(
@@ -539,7 +567,6 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
             report,
             &dir,
             library.shipped(),
-            caps,
             gpu.as_mut()
                 .map(|(compiler, formats)| (&mut **compiler, *formats)),
         );
@@ -550,7 +577,6 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
                 report,
                 &dir,
                 library.shipped(),
-                caps,
                 gpu.as_mut()
                     .map(|(compiler, formats)| (&mut **compiler, *formats)),
             ),
@@ -580,18 +606,6 @@ pub(crate) fn configured_rules(
     }
 }
 
-/// The `effects.sandbox` the configuration gives every effect's Lua, which
-/// `--check` loads effects and styles under, as the session does: the
-/// defaults when it names none or its `sol.effects` is refused.
-/// `tests::an_effect_is_checked_under_the_configured_sandbox`,
-/// `cli::check_of_a_folder_reads_the_configured_sandbox`.
-pub(crate) fn configured_caps(scripts: &crate::script::Scripts) -> crate::effect::settings::Caps {
-    match scripts.effect_settings_at_load() {
-        Some(Ok(settings)) => settings.sandbox,
-        _ => crate::effect::settings::Caps::default(),
-    }
-}
-
 /// Every effect the rules name, each once: what [`effects`] checks beside
 /// the user's folders. `tests::the_effects_a_rule_names_are_checked`.
 pub(crate) fn wanted_by(rules: &[crate::effect::rules::Rule]) -> Vec<String> {
@@ -608,37 +622,31 @@ pub(crate) fn rules(
     report: &mut Report,
     library: &crate::effect::host::Library,
     rules: Option<&[crate::effect::rules::Rule]>,
-    caps: crate::effect::settings::Caps,
     formats: Option<crate::pool::Formats>,
+    file: &Path,
 ) {
     report.line("  effects.rules:");
-    // Rules that did not parse, or whose `sol.effects` was refused, which
+    // Rules that did not parse, or whose `effects` was refused, which
     // `config` has failed, are not said to pass
     // (`tests::rules_that_did_not_parse_are_not_called_ok`).
     let Some(rules) = rules else {
-        report.line("    rules not checked: they did not parse, or their sol.effects was refused");
+        report.line(
+            "    rules not checked: they did not parse, or their `effects` section was refused",
+        );
         return;
     };
     let mut host = crate::effect::host::Host::new(library.clone());
-    // Under the configured sandbox, as the session binds them
-    // (`tests::an_effect_is_checked_under_the_configured_sandbox`).
-    host.set_caps(caps);
     if let Some(formats) = formats {
         host.set_formats(formats);
     }
     host.want("check", wanted_by(rules));
-    let config = crate::script::Scripts::config_path();
     let mut refused = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
         if rule.fill == crate::effect::rules::Fill::Off {
             continue;
         }
         if let Err(problem) = crate::effect::plan::Chains::bind(&mut host, rule) {
-            refused.push(crate::effect::plan::rule_problem(
-                index + 1,
-                problem,
-                &config,
-            ));
+            refused.push(crate::effect::plan::rule_problem(index + 1, problem, file));
         }
     }
     say(report, &refused);
@@ -674,7 +682,7 @@ fn say(report: &mut Report, problems: &[crate::effect::host::Problem]) {
     unsafe_code,
     reason = "opening a headless renderer on a render node for --check"
 )]
-fn render_node() -> Option<smithay::backend::renderer::gles::GlesRenderer> {
+pub(crate) fn render_node() -> Option<smithay::backend::renderer::gles::GlesRenderer> {
     use smithay::backend::{
         allocator::gbm::GbmDevice,
         drm::DrmDeviceFd,
@@ -948,16 +956,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
     match single {
         // An effect folder: checked alone, with no Qt
         // (`cli::check_exits_0_on_a_good_effect_folder`).
-        Some(dir) if dir.is_dir() && dir.join("effect.lua").is_file() => {
-            // Under the configuration's `effects.sandbox`, as the session
-            // loads the folder; the defaults when it does not load
-            // (`cli::check_of_a_folder_reads_the_configured_sandbox`).
-            let caps =
-                crate::script::Scripts::load_for_check(&crate::script::Scripts::config_path())
-                    .map_or_else(
-                        |_| crate::effect::settings::Caps::default(),
-                        |scripts| configured_caps(&scripts),
-                    );
+        Some(dir) if dir.is_dir() && crate::effect::host::description_of(dir).is_some() => {
             let mut gpu = render_node();
             let formats = gpu.as_mut().map(crate::pool::probe_formats);
             let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
@@ -965,7 +964,6 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                 &mut report,
                 dir,
                 &crate::assets::effects(),
-                caps,
                 compiler.as_mut().zip(formats),
             );
         }
@@ -984,11 +982,10 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
             }
         }
         None => {
-            if let Some(mut scripts) = config(&crate::script::Scripts::config_path(), &mut report) {
+            if let Some(mut scripts) = config(crate::wm::Which::Chosen, &mut report) {
                 // Read before `scenes` takes what the configuration handed
                 // over as it loaded.
                 let configured = configured_rules(&scripts);
-                let caps = configured_caps(&scripts);
                 // Software, as for one file: what is checked is whether each
                 // scene builds, not what it looks like on this machine.
                 crate::qml::renderer::decide(
@@ -998,7 +995,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                 match crate::qml::start() {
                     Ok(()) => {
                         scenes(&mut scripts, &mut report);
-                        styles(&mut report, caps);
+                        styles(&mut report);
                         let mut gpu = render_node();
                         let formats = gpu.as_mut().map(crate::pool::probe_formats);
                         let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
@@ -1007,10 +1004,10 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                             &mut report,
                             &library,
                             &wanted_by(configured.as_deref().unwrap_or_default()),
-                            caps,
                             compiler.as_mut().zip(formats),
                         );
-                        rules(&mut report, &library, configured.as_deref(), caps, formats);
+                        let file = scripts.named_in();
+                        rules(&mut report, &library, configured.as_deref(), formats, &file);
                         let pane = ["SOLIUM_PANE", "SOLIUM_DECORATION", "SOLIUM_QML_TITLEBAR"]
                             .into_iter()
                             .find_map(|name| std::env::var(name).ok());
@@ -1043,7 +1040,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                         .map(|dir| dir.join(format!("{name}.portal")))
                         .find(|path| path.is_file())
                 },
-                crate::script::which("slurp"),
+                crate::launch::which("slurp"),
             );
         }
     }
@@ -1325,9 +1322,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&directory);
         let path = directory.join("init.lua");
         std::fs::write(&path, r#"prefs = sol.store("prefs", { volume = 50 })"#).expect("the file");
+        // A check never asks for the stores, so saves none: the state
+        // directory is as it was, below.
         let (passed, text) = reported(|report| {
-            let scripts = config(&path, report).expect("it loads");
-            assert!(scripts.stores().is_empty(), "a check would save");
+            let _ = config(&path, report).expect("it loads");
         });
         assert!(passed, "{text}");
         assert!(
@@ -1359,7 +1357,7 @@ mod tests {
     /// which comes first; then there is nothing this test can say.
     #[test]
     fn an_unrecognised_setting_still_fails() {
-        if let Some(own) = crate::script::Scripts::user_config_dir()
+        if let Some(own) = solium_paths::user_config_dir()
             && let Ok(entries) = std::fs::read_dir(&own)
             && entries
                 .filter_map(Result::ok)
@@ -1376,7 +1374,7 @@ mod tests {
         )
         .expect("user.lua");
         let path = directory.join("init.lua");
-        std::fs::copy(crate::assets::lua().join("init.lua"), &path).expect("the shipped init.lua");
+        std::fs::copy(solium_lua::shipped().join("init.lua"), &path).expect("the shipped init.lua");
         let (passed, text) = reported(|report| {
             let _ = config(&path, report);
         });
@@ -1558,7 +1556,7 @@ mod tests {
     /// first by `scripted::find_scene`. Then a test about the shipped
     /// configuration has nothing to say.
     fn the_users_own_files_are_in_the_way() -> bool {
-        let lua = crate::script::Scripts::user_config_dir()
+        let lua = solium_paths::user_config_dir()
             .and_then(|own| std::fs::read_dir(own).ok())
             .is_some_and(|mut entries| {
                 entries.any(|entry| {
@@ -1645,7 +1643,7 @@ mod tests {
         }
         crate::qml::qt_test::on_the_qt_thread(|| {
             software_qt();
-            let shipped = crate::assets::lua().join("init.lua");
+            let shipped = solium_lua::shipped().join("init.lua");
             let (passed, text) = check_scenes(&shipped);
             assert!(passed, "{text}");
         });
@@ -1658,22 +1656,17 @@ mod tests {
             software_qt();
             let own = fixture("");
             let (passed, text) = reported(|report| {
-                styles_in(
-                    std::slice::from_ref(&own),
-                    &crate::style::shipped(),
-                    CAPS,
-                    report,
-                );
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
             });
             assert!(!passed, "{text}");
             assert!(text.contains("Ring.qml"), "{text}");
         });
     }
 
-    /// **A style of your own whose `effects.lua` is broken fails**, at its
+    /// **A style of your own whose `effects.toml` is broken fails**, at its
     /// file and line, as the overlay names it, though every layer builds.
     #[test]
-    fn a_broken_effects_lua_of_your_own_fails() {
+    fn a_broken_effects_toml_of_your_own_fails() {
         crate::qml::qt_test::on_the_qt_thread(|| {
             software_qt();
             let own = std::env::temp_dir().join(format!(
@@ -1689,21 +1682,16 @@ mod tests {
             )
             .expect("writing the manifest");
             std::fs::write(
-                style.join("effects.lua"),
-                "return {\n  { part = = 'client' } }\n",
+                style.join("effects.toml"),
+                "[[rules]]\npart = = \"client\"\n",
             )
-            .expect("writing effects.lua");
+            .expect("writing effects.toml");
             let (passed, text) = reported(|report| {
-                styles_in(
-                    std::slice::from_ref(&own),
-                    &crate::style::shipped(),
-                    CAPS,
-                    report,
-                );
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
             });
             let _ = std::fs::remove_dir_all(&own);
             assert!(!passed, "{text}");
-            assert!(text.contains("effects.lua:2: "), "{text}");
+            assert!(text.contains("effects.toml:2: "), "{text}");
         });
     }
 
@@ -1713,7 +1701,7 @@ mod tests {
     fn the_shipped_styles_are_left_to_cargo_test() {
         let shipped = crate::style::shipped();
         let (passed, text) = reported(|report| {
-            styles_in(std::slice::from_ref(&shipped), &shipped, CAPS, report);
+            styles_in(std::slice::from_ref(&shipped), &shipped, report);
         });
         assert!(passed, "{text}");
         assert!(!text.contains("Pane.qml"), "{text}");
@@ -1768,33 +1756,36 @@ mod tests {
 
     type Counting = crate::effect::host::tests::Counting;
 
-    /// `effects.sandbox` at its defaults, as a configuration naming none
-    /// gives it.
-    const CAPS: crate::effect::settings::Caps = crate::effect::settings::Caps::DEFAULT;
-
     /// **A broken effect folder fails the check**, naming the file.
     #[test]
     fn a_broken_effect_folder_fails_check() {
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &effect_fixture("api2"), &shipped(), CAPS, None);
+            effect_folder::<Counting>(report, &effect_fixture("future-api"), &shipped(), None);
         });
         assert!(!passed, "{out}");
         assert!(
-            out.contains("api2/effect.lua") && out.contains("api"),
+            out.contains("future-api/effect.toml") && out.contains("api"),
             "{out}"
         );
     }
 
-    /// **A geometry file that moves the window at rest fails the check**, at
-    /// its `mesh`'s line, as it is refused at load.
+    /// **A geometry that moves the window at rest fails the check**, at its
+    /// `.vert`, as it is refused once its mesh compiled; with no render node
+    /// nothing runs it.
     #[test]
-    fn a_geometry_file_that_moves_the_window_at_rest_fails_the_check() {
+    fn a_geometry_that_moves_the_window_at_rest_fails_the_check() {
+        let mut compiler = Counting::default();
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &effect_fixture("mover"), &shipped(), CAPS, None);
+            effect_folder(
+                report,
+                &effect_fixture("mover"),
+                &shipped(),
+                Some((&mut compiler, crate::pool::Formats { rgba16f: true })),
+            );
         });
         assert!(!passed, "{out}");
         assert!(
-            out.contains("mover/effect.lua:7") && out.contains("progress 0"),
+            out.contains("mover/mover.vert") && out.contains("progress 0"),
             "{out}"
         );
     }
@@ -1804,7 +1795,7 @@ mod tests {
     #[test]
     fn a_frag_reading_an_undeclared_param_fails_check_at_its_line() {
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &effect_fixture("typo"), &shipped(), CAPS, None);
+            effect_folder::<Counting>(report, &effect_fixture("typo"), &shipped(), None);
         });
         assert!(!passed);
         assert!(out.contains("down.frag:2"), "{out}");
@@ -1817,14 +1808,14 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "soft",
-            "return { api = 1, inputs = { 'self', 'backdrop' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\", \"backdrop\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_backdrop(uv); }\n",
             )],
         );
         let (passed, out) =
-            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), CAPS, None));
+            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), None));
         let _ = std::fs::remove_dir_all(place);
         assert!(passed, "{out}");
         assert!(
@@ -1843,15 +1834,14 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "mine",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag', fallback = { 'identity' } }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\nfallback = [\"identity\"]\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
             )],
         );
-        let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &dir, &effect_fixtures(), CAPS, None)
-        });
+        let (passed, out) =
+            reported(|report| effect_folder::<Counting>(report, &dir, &effect_fixtures(), None));
         let _ = std::fs::remove_dir_all(place);
         assert!(
             passed,
@@ -1860,7 +1850,7 @@ mod tests {
     }
 
     /// **A folder's `use`s are checked with it**: a stage list that cannot be
-    /// read fails at `effect.lua`, and so does an effect it uses that is
+    /// read fails at `effect.toml`, and so does an effect it uses that is
     /// broken or that nobody ships, while one using a shipped effect passes.
     #[test]
     fn a_folders_uses_are_checked_with_it() {
@@ -1869,23 +1859,21 @@ mod tests {
             let dir = crate::effect::host::tests::folder(
                 &place,
                 name,
-                &format!("return {{ api = 1, inputs = {{ 'self' }}, stages = {stages} }}"),
+                &format!("api = 2\ninputs = [\"self\"]\n{stages}"),
                 &[],
             );
-            reported(|report| {
-                effect_folder::<Counting>(report, &dir, &effect_fixtures(), CAPS, None)
-            })
+            reported(|report| effect_folder::<Counting>(report, &dir, &effect_fixtures(), None))
         };
-        let (passed, out) = check("fine", "{ { 'use', 'tint' } }");
+        let (passed, out) = check("fine", "[[stages]]\nuse = \"tint\"\n");
         assert!(passed, "{out}");
-        let (passed, out) = check("broken", "{ { 'use', 'api2' } }");
-        assert!(!passed && out.contains("api2/effect.lua"), "{out}");
-        let (passed, out) = check("missing", "{ { 'use', 'nowhere' } }");
+        let (passed, out) = check("broken", "[[stages]]\nuse = \"future-api\"\n");
+        assert!(!passed && out.contains("future-api/effect.toml"), "{out}");
+        let (passed, out) = check("missing", "[[stages]]\nuse = \"nowhere\"\n");
         assert!(!passed && out.contains("`nowhere`"), "{out}");
-        let (passed, out) = check("typo", "{ { 'pass', 'a.frag', scal = 1 } }");
+        let (passed, out) = check("typo", "[[stages]]\npass = \"a.frag\"\nscal = 1\n");
         let _ = std::fs::remove_dir_all(&place);
         assert!(
-            !passed && out.contains("typo/effect.lua") && out.contains("`scal`"),
+            !passed && out.contains("typo/effect.toml") && out.contains("`scal`"),
             "{out}"
         );
     }
@@ -1895,7 +1883,7 @@ mod tests {
     #[test]
     fn with_no_render_node_shaders_are_said_not_compiled() {
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), CAPS, None);
+            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), None);
         });
         assert!(passed, "{out}");
         assert!(
@@ -1912,7 +1900,7 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "bad",
-            "return { api = 1, frag = 'effect.frag' }",
+            "api = 2\nfrag = \"effect.frag\"\n",
             &[("effect.frag", "vec4 sol_effect(vec2 uv) {\n  FAIL\n}\n")],
         );
         let mut compiler = Counting::default();
@@ -1921,7 +1909,6 @@ mod tests {
                 report,
                 &dir,
                 &shipped(),
-                CAPS,
                 Some((&mut compiler, crate::pool::Formats { rgba16f: true })),
             );
         });
@@ -1936,12 +1923,12 @@ mod tests {
     #[test]
     fn with_no_render_node_formats_are_said_not_checked() {
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), CAPS, None);
+            effect_folder::<Counting>(report, &effect_fixture("identity"), &shipped(), None);
         });
         assert!(passed && out.contains("formats not checked"), "{out}");
         let library = crate::effect::host::Library::with(None, effect_fixtures());
         let (passed, out) = reported(|report| {
-            effects::<Counting>(report, &library, &["identity".to_owned()], CAPS, None);
+            effects::<Counting>(report, &library, &["identity".to_owned()], None);
         });
         assert!(
             passed && out.contains("    formats not checked: no render node"),
@@ -1958,7 +1945,7 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "deep",
-            "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'effect.frag', format = 'rgba16f' } } }",
+            "api = 2\ninputs = [\"self\"]\n[[stages]]\npass = \"effect.frag\"\nformat = \"rgba16f\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1971,7 +1958,6 @@ mod tests {
                     report,
                     &dir,
                     &shipped(),
-                    CAPS,
                     Some((&mut compiler, crate::pool::Formats { rgba16f })),
                 );
             })
@@ -1992,7 +1978,7 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "plain",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -2000,7 +1986,7 @@ mod tests {
         );
         std::fs::create_dir_all(dir.join("inner")).expect("a folder inside");
         let (passed, out) = reported(|report| {
-            effect_folder::<Counting>(report, &dir.join("inner/.."), &shipped(), CAPS, None);
+            effect_folder::<Counting>(report, &dir.join("inner/.."), &shipped(), None);
         });
         let _ = std::fs::remove_dir_all(place);
         assert!(passed, "{out}");
@@ -2016,14 +2002,14 @@ mod tests {
         let dir = crate::effect::host::tests::folder(
             &place,
             "Glow",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
             )],
         );
         let (passed, out) =
-            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), CAPS, None));
+            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), None));
         let _ = std::fs::remove_dir_all(place);
         assert!(!passed, "{out}");
         assert!(
@@ -2042,7 +2028,7 @@ mod tests {
         crate::effect::host::tests::folder(
             &user,
             "good",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -2051,12 +2037,12 @@ mod tests {
         std::fs::create_dir_all(user.join("empty")).expect("a folder with nothing in it");
         let library = crate::effect::host::Library::with(Some(user), effect_fixtures());
         let check = |wanted: &[String]| {
-            reported(|report| effects::<Counting>(report, &library, wanted, CAPS, None))
+            reported(|report| effects::<Counting>(report, &library, wanted, None))
         };
         let (passed, out) = check(&[]);
         assert!(!passed, "{out}");
         assert!(
-            out.contains("empty: has no effect.lua") && out.contains("good: ok"),
+            out.contains("empty: has no effect.toml") && out.contains("good: ok"),
             "{out}"
         );
         std::fs::remove_dir(place.join("user/empty")).expect("the empty folder goes");
@@ -2120,8 +2106,7 @@ mod tests {
         let wanted = super::wanted_by(&rules);
         assert_eq!(wanted, ["identity".to_owned(), "typo".to_owned()]);
         let library = crate::effect::host::Library::with(None, effect_fixtures());
-        let (passed, out) =
-            reported(|report| effects::<Counting>(report, &library, &wanted, CAPS, None));
+        let (passed, out) = reported(|report| effects::<Counting>(report, &library, &wanted, None));
         assert!(!passed, "{out}");
         assert!(
             out.contains("identity: ok") && out.contains("down.frag:2"),
@@ -2138,7 +2123,7 @@ mod tests {
         crate::effect::host::tests::folder(
             &effects,
             "soft",
-            "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"backdrop\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -2147,7 +2132,15 @@ mod tests {
         let library = crate::effect::host::Library::with(Some(effects.clone()), place.join("none"));
         let check = |rules: &str| {
             let rules = rules_from(&place, rules);
-            reported(|report| super::rules(report, &library, rules.as_deref(), CAPS, None))
+            reported(|report| {
+                super::rules(
+                    report,
+                    &library,
+                    rules.as_deref(),
+                    None,
+                    Path::new("init.lua"),
+                )
+            })
         };
         let (passed, out) = check(
             r#"{ { match = "*", part = "client", slot = "behind", effect = { "soft", source = "live" } } }"#,
@@ -2172,8 +2165,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         assert!(rules.is_none(), "the premise: the rules did not parse");
         let library = crate::effect::host::Library::with(None, effect_fixtures());
-        let (_, out) =
-            reported(|report| super::rules(report, &library, rules.as_deref(), CAPS, None));
+        let (_, out) = reported(|report| {
+            super::rules(
+                report,
+                &library,
+                rules.as_deref(),
+                None,
+                Path::new("init.lua"),
+            )
+        });
         assert!(!out.contains("ok") && out.contains("not checked"), "{out}");
     }
 
@@ -2186,14 +2186,14 @@ mod tests {
         let config = directory.join("init.lua");
         std::fs::write(
             &config,
-            r#"sol.effects({ rules = { { match = "*", part = "client", slot = "behind", effect = "identity" } }, sandbox = { load_ms = 1 } })"#,
+            r#"sol.effects({ rules = { { match = "*", part = "client", slot = "behind", effect = "identity" } }, limits = { params = 0 } })"#,
         )
         .expect("writing");
         let mut scripts = None;
         let (passed, out) = reported(|report| scripts = super::config(&config, report));
         let _ = std::fs::remove_dir_all(directory);
         assert!(!passed, "{out}");
-        assert!(out.contains("effects.sandbox.load_ms"), "{out}");
+        assert!(out.contains("effects.limits.params"), "{out}");
         let scripts = scripts.expect("the configuration loads");
         assert!(
             super::configured_rules(&scripts).is_none(),
@@ -2201,86 +2201,29 @@ mod tests {
         );
     }
 
-    /// The caps `effects.sandbox = { memory_mib = 64 }` gives, with a long
-    /// budget beside it so a busy machine building a string slowly is not
-    /// what is tested.
-    const ROOMY: crate::effect::settings::Caps = crate::effect::settings::Caps {
-        load: std::time::Duration::from_millis(5000),
-        memory: 64 << 20,
-    };
-
-    /// A 20 MiB string, built as an effect's Lua loads.
-    const BIG: &str = "local big = string.rep('x', 20 * 1024 * 1024)\n";
-
-    /// **An effect is checked under the configured `effects.sandbox`**: a
-    /// folder that builds 20 MiB fails under the default 16 and passes
-    /// under 64, as the session loads it; and so does a rule naming it.
+    /// **A settings section the compositor refuses fails the check, with
+    /// why**: the configuration still loads, but `sol.input` with a
+    /// shortcuts policy that is not one applies nothing, and the check says
+    /// which section and what is wrong with it.
     #[test]
-    fn an_effect_is_checked_under_the_configured_sandbox() {
-        let place = crate::effect::host::tests::scratch("check-caps");
-        let dir = crate::effect::host::tests::folder(
-            &place,
-            "big",
-            &format!("{BIG}return {{ api = 1, inputs = {{ 'self' }}, frag = 'effect.frag' }}"),
-            &[(
-                "effect.frag",
-                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
-            )],
-        );
-        let (passed, out) =
-            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), CAPS, None));
-        assert!(!passed, "the premise: 20 MiB under 16: {out}");
-        let (passed, out) =
-            reported(|report| effect_folder::<Counting>(report, &dir, &shipped(), ROOMY, None));
-        assert!(passed, "{out}");
-        let library = crate::effect::host::Library::with(Some(place.clone()), shipped());
-        let rules = rules_from(
-            &place,
-            r#"{ { match = "*", part = "client", slot = "behind", effect = "big" } }"#,
-        );
-        let (passed, out) =
-            reported(|report| super::rules(report, &library, rules.as_deref(), ROOMY, None));
-        let _ = std::fs::remove_dir_all(place);
-        assert!(passed, "{out}");
-    }
-
-    /// **A style's `effects.lua` is checked under the configured
-    /// `effects.sandbox`**: one that builds 20 MiB fails under the default
-    /// 16 and passes under 64.
-    #[test]
-    fn a_styles_effects_lua_is_checked_under_the_configured_sandbox() {
-        crate::qml::qt_test::on_the_qt_thread(|| {
-            software_qt();
-            let own = std::env::temp_dir().join(format!(
-                "solium-check-test-{}-style-caps",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&own);
-            let style = own.join("roomy");
-            std::fs::create_dir_all(&style).expect("a style folder");
-            std::fs::write(
-                style.join("Pane.qml"),
-                "import Solium\nPaneStyle { Layer { depth: \"frame\"; name: \"bar\" } }\n",
-            )
-            .expect("writing the manifest");
-            std::fs::write(style.join("effects.lua"), format!("{BIG}return {{}}\n"))
-                .expect("writing effects.lua");
-            let check = |caps| {
-                reported(|report| {
-                    styles_in(
-                        std::slice::from_ref(&own),
-                        &crate::style::shipped(),
-                        caps,
-                        report,
-                    );
-                })
-            };
-            let (refused, said) = check(CAPS);
-            let (passed, out) = check(ROOMY);
-            let _ = std::fs::remove_dir_all(&own);
-            assert!(!refused, "the premise: 20 MiB under 16: {said}");
-            assert!(passed, "{out}");
+    fn a_refused_settings_section_fails_the_check() {
+        let directory = crate::effect::host::tests::scratch("check-refused-section");
+        let config = directory.join("init.lua");
+        std::fs::write(
+            &config,
+            r#"sol.input({ shortcuts_inhibit = { allow = "sometimes" } })"#,
+        )
+        .expect("writing");
+        let (passed, out) = reported(|report| {
+            let _ = super::config(&config, report);
         });
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(!passed, "{out}");
+        assert!(out.contains("the `input` section is refused"), "{out}");
+        assert!(
+            out.contains("allow must be true, false or 'fullscreen'"),
+            "{out}"
+        );
     }
 
     /// **The shipped effects pass the check**, every one of them, GPU-free.
@@ -2291,7 +2234,7 @@ mod tests {
             .expect("the shipped folders")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.join("effect.lua").is_file())
+            .filter(|path| crate::effect::host::description_of(path).is_some())
             .collect();
         assert!(
             !folders.is_empty(),
@@ -2299,7 +2242,7 @@ mod tests {
         );
         for dir in folders {
             let (passed, out) = reported(|report| {
-                effect_folder::<Counting>(report, &dir, shipped, CAPS, None);
+                effect_folder::<Counting>(report, &dir, shipped, None);
             });
             assert!(passed, "{}: {out}", dir.display());
         }

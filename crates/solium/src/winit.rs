@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
+        allocator::gbm::GbmDevice,
         renderer::{
             Renderer as _,
             damage::OutputDamageTracker,
@@ -91,6 +92,7 @@ pub(crate) fn run() -> Result<()> {
         .context("binding a wayland socket")?;
     let socket_name = source.socket_name().to_string_lossy().into_owned();
     state.socket_name = socket_name.clone();
+    crate::wm::link::set_wayland_socket(std::ffi::OsStr::new(&socket_name));
 
     // X11 clients, if XWayland is installed. Started before the socket source
     // so that a client launched from a script's startup has a display to find.
@@ -359,24 +361,7 @@ pub(crate) fn run() -> Result<()> {
     }
 
     if state.dmabuf_global.is_some() {
-        let device = (|| -> anyhow::Result<_> {
-            let device = smithay::backend::egl::EGLDevice::device_for_display(
-                backend.renderer().egl_context().display(),
-            )?;
-            let node = device
-                .try_get_render_node()?
-                .ok_or_else(|| anyhow::anyhow!("renderer has no DRM render node"))?;
-            let path = node
-                .dev_path()
-                .ok_or_else(|| anyhow::anyhow!("render node has no device path"))?;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)?;
-            Ok(smithay::backend::drm::DrmDeviceFd::new(
-                smithay::utils::DeviceFd::from(std::os::fd::OwnedFd::from(file)),
-            ))
-        })();
+        let device = render_node_fd(&mut backend);
         match device {
             Ok(device) => state.explicit_sync.enable(&display_handle, device, true),
             Err(err) => tracing::info!(?err, "nested explicit sync unavailable"),
@@ -458,22 +443,32 @@ pub(crate) fn run() -> Result<()> {
         .map(|(output, _)| output.clone())
         .ok_or_else(|| anyhow::anyhow!("no outputs: SOLIUM_OUTPUTS must be at least 1"))?;
 
-    // Scripts are loaded before the first frame so a mode can be triggered
-    // immediately. A broken config leaves the compositor usable and unbound
-    // rather than refusing to start.
-    let config = Scripts::config_path();
-    let scripts = match Scripts::load(&config) {
-        Ok(scripts) => Some(scripts),
-        Err(err) => {
-            tracing::error!(?err, config = %config.display(), "no scripts loaded");
-            None
-        }
-    };
+    // The window manager is started before the first frame so a mode can be
+    // triggered immediately. One that will not start is replaced by the
+    // shipped configuration rather than refusing to start
+    // (`Solium::first_scripts`).
+    let scripts = state.first_scripts(crate::wm::Which::Chosen);
     // Here, with the configuration read and nothing drawn yet: every scene is
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
     let qml = scripts.as_ref().map(Scripts::qml).unwrap_or_default();
-    crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    let renderer = crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    // Asked for, the GPU path renders scenes into buffers from the host's
+    // render node, the one the window is drawn with: what lets a scene in Qt
+    // Quick 3D, which the software path cannot draw, be seen nested. Before
+    // any scene is built, since one built without an allocator refuses for
+    // the rest of its life (`tty.rs` says the same).
+    if renderer == crate::qml::renderer::Renderer::Gpu {
+        match render_node_fd(&mut backend)
+            .and_then(|fd| GbmDevice::new(fd).context("creating the GBM device"))
+        {
+            Ok(gbm) => crate::qml::set_allocator(gbm),
+            Err(err) => tracing::warn!(
+                ?err,
+                "no render node for QML scenes on the GPU nested: none will draw"
+            ),
+        }
+    }
     // How a GPU scene's buffer is sized, before any scene is built:
     // `qml.buffers` (`qml::buffers`), read here as the renderer is.
     crate::qml::buffers::configure(qml.buffers.unwrap_or_default());
@@ -498,6 +493,7 @@ pub(crate) fn run() -> Result<()> {
         dev::logind_bus(),
         crate::logind::Settings::default(),
     );
+    state.wm_watch = Some(crate::wm::Watch::new(event_loop.handle(), |state| state));
     state.start_scripts(scripts);
     // After the scripts, so that `idle.dbus_inhibit = false` owns nothing even
     // for a moment (`idle_dbus_inhibit_false_owns_nothing`), and by the
@@ -884,6 +880,10 @@ pub(crate) fn run() -> Result<()> {
         // And a move drag's last motion, told once (#452). Before the
         // resize, so a window a listener restores is placed in this frame.
         crate::input::grab::settle_drags(&mut state, false);
+        // What this pass told the window manager without waiting (its
+        // fingers, its drags), sent, and answered in time for the frame:
+        // `wm::before_frame`.
+        crate::wm::before_frame(&mut state, true);
         state.settle_resize();
         // What the focused text field said since the last pass, told to the
         // configuration once, so a pill it moves to the caret is in this
@@ -1386,13 +1386,16 @@ pub(crate) fn run() -> Result<()> {
         crate::logind::settle(&mut state);
         // What the services' threads heard, and their timers: `services`.
         crate::services::settle(&mut state);
-        // What `sol.run{}`'s children said, and the timers due, on the
+        // What `run{}`'s children said, and the timers due, on the
         // same once-a-loop check (#472): `runs.rs`, `timers.rs`.
         crate::runs::settle(&mut state);
         crate::timers::settle(&mut state);
         // What its reads, writes and watches came to, and its stores saved
         // when they changed (#473): `files.rs`.
         crate::files::settle(&mut state);
+        // What the window manager answered after the compositor stopped
+        // waiting for it, and one that has stopped, started again: `wm`.
+        crate::wm::settle(&mut state);
         // The native lock's password check: the one place its yes unlocks.
         crate::lock_auth::settle(&mut state);
         // And the end of its exit, at `lock.exit_ms` whatever the scene does.
@@ -1479,4 +1482,28 @@ fn frame_interval(output: &smithay::output::Output) -> std::time::Duration {
     std::time::Duration::from_nanos(
         1_000_000_000_000_u64 / u64::try_from(refresh).unwrap_or(60_000),
     )
+}
+
+/// The render node the nested window is drawn with, opened: what clients'
+/// dmabufs are synced against, and what QML scenes on the GPU path render
+/// into buffers from.
+fn render_node_fd(
+    backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
+) -> Result<smithay::backend::drm::DrmDeviceFd> {
+    let device = smithay::backend::egl::EGLDevice::device_for_display(
+        backend.renderer().egl_context().display(),
+    )?;
+    let node = device
+        .try_get_render_node()?
+        .ok_or_else(|| anyhow::anyhow!("renderer has no DRM render node"))?;
+    let path = node
+        .dev_path()
+        .ok_or_else(|| anyhow::anyhow!("render node has no device path"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    Ok(smithay::backend::drm::DrmDeviceFd::new(
+        smithay::utils::DeviceFd::from(std::os::fd::OwnedFd::from(file)),
+    ))
 }

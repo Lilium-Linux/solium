@@ -1,0 +1,20 @@
+# A geometry with twelve numeric params, `a` to `l`, that draws the window
+# where it is: more than `effects.limits.params`' default 8.
+# `state::tests::real_client::a_geometry_effect_with_twelve_params_presents_under_a_raised_limit`.
+api = 2
+grid = [1, 1]
+mesh = "flat.vert"
+
+[params]
+a = 0.0
+b = 0.0
+c = 0.0
+d = 0.0
+e = 0.0
+f = 0.0
+g = 0.0
+h = 0.0
+i = 0.0
+j = 0.0
+k = 0.0
+l = 0.0

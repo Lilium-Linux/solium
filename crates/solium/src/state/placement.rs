@@ -18,7 +18,7 @@ pub(crate) enum Standing {
     /// A layout's tile. The client is held inside this rectangle from now on.
     Tile,
     /// A layout placing a window it does not tile: `dialogs.lua` centring a
-    /// modal over its parent, through `sol.place` with `tile = false`. The pane
+    /// modal over its parent, through `place` with `tile = false`. The pane
     /// is taken out of any tile it was in, because a dialog is a floating
     /// window whichever mode is running -- at once, or, for a window being
     /// closed, once it is back: see `Pane::let_go`.
@@ -28,7 +28,7 @@ pub(crate) enum Standing {
     /// brought back to; a floating one is still floating.
     Kept,
     /// A layout's tile, which is this outer rectangle, with the window placed
-    /// inside it smaller than it: `sol.place`'s `tile = { x, y, w, h }`, which
+    /// inside it smaller than it: `place`'s `tile = { x, y, w, h }`, which
     /// `tiling.lua` says for a window centred at its own maximum size (#115).
     ///
     /// The tile is what `Pane::placed` records, so the client is held inside
@@ -45,9 +45,9 @@ pub(crate) enum Standing {
 /// motion it is drawn with (#49): which event they hear it as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
-    /// Fullscreen, entered or left: `sol.on("fullscreen", fn(id, entering))`.
+    /// Fullscreen, entered or left: `fullscreen)`.
     Fullscreen,
-    /// Maximised, or restored: `sol.on("maximize", fn(id, entering))`.
+    /// Maximised, or restored: `maximize)`.
     Maximize,
 }
 
@@ -337,12 +337,12 @@ impl Solium {
         // `close`, or its client has left it fading where it stood: a
         // stateless layout placing the rows of `close`'s own snapshot -- which
         // lists the window closing -- would otherwise move the tile a fading
-        // picture is cut to, and a script holding the id can `sol.place` it.
+        // picture is cut to, and a script holding the id can `place` it.
         // `a_window_that_left_is_nobodys_to_find` places one.
         //
         // **Nor a minimized one** (#30). Its layout has taken it out, and it
         // keeps the place it had for when it is shown again; a stray
-        // `sol.place` would otherwise start a glide over the present taking
+        // `place` would otherwise start a glide over the present taking
         // it away. `tests::real_client::reflow_on_close::minimize::a_placement_leaves_a_minimized_window_where_it_is`.
         //
         // **But the rescue moves it** (`Standing::Kept`, which only
@@ -462,6 +462,10 @@ impl Solium {
         // and `a_window_the_layout_moved_mid_close_comes_back_where_it_was_put`
         // asserts that rather than this paragraph asserting it.
         let leaving = self.panes.get(pane).is_some_and(Pane::leaving);
+        // The window, when this placement asks its application for a size
+        // it has not drawn: held at the rectangle below, once the slot is
+        // set.
+        let mut asked = None;
 
         // A client is moved and resized for real, and the space is told,
         // because the space is the authority for a mapped window.
@@ -484,6 +488,9 @@ impl Solium {
             }
             if !leaving && self.offers_size(pane, &window, client, now) {
                 size_window(&window, client);
+                if window.geometry().size != client.size {
+                    asked = Some(window.clone());
+                }
             }
             // Placing is not focusing. It is still a raise -- see
             // `map_stacked` -- and `map_laid_out` is what keeps that raise from
@@ -520,6 +527,33 @@ impl Solium {
                 // `a_rescue_during_a_fade_keeps_the_let_go_it_is_waiting_on`.
                 Standing::Kept => held.move_tile(outer),
             }
+        }
+
+        // **And the rectangle is the window's from the next frame, whatever
+        // its application has drawn.** The slot set above is the one
+        // `sync_panes` writes over with the size the client last committed,
+        // on the first frame nothing holds it: so a window placed at a new
+        // size was its old size in its new place until its application
+        // answered -- from the frame after a placement of no length, and
+        // from the frame a glide landed on -- with a gap beside it, or over
+        // its neighbour. A drag has held its panes since #113 and a
+        // fullscreen change since #49; a placement holds its pane the same
+        // way, at the rectangle it was given, with the client's last picture
+        // fitted into it as `resize.fill` says, until the client answers or
+        // `resize.patience` after the move lands, when the client's own size
+        // wins (`Self::settle_answering`).
+        //
+        // **A tile only.** A window placed where it floats is the size its
+        // client committed, from the commit: a dialog that grows itself is
+        // drawn grown, and nothing holds it to the rectangle it was centred
+        // in. `a_dialog_a_layout_centres_is_not_held_in_its_rect`.
+        //
+        // Not while a drag is live: the drag's own holds are the truth for
+        // the panes its sweep moves, and they are told at its pace.
+        // `tests::real_client::fullscreen_glides::a_window_placed_at_a_new_size_is_drawn_there_until_its_client_answers`.
+        let tile = matches!(standing, Standing::Tile | Standing::Within(_));
+        if let Some(window) = asked.filter(|_| tile && self.resize_gesture.is_none()) {
+            self.hold_for_answer(pane, &window, now, now + animation.duration);
         }
 
         // **And the transform, unless this pane is leaving.**
@@ -626,7 +660,7 @@ impl Solium {
         // **Not when the placement leaves the pane where it is (#289).** A
         // layout places every window on every pass, at the rect it already
         // has; gliding from what is drawn to `Frame::real` then cancels a
-        // script's `sol.present` (a hidden app came back at full size behind
+        // script's `present` (a hidden app came back at full size behind
         // a mobile shell's home grid, its recents cards snapped back) and a
         // mode's thumbnails alike. With nothing moved there is nothing to
         // glide: a pane at rest stays at rest, one mid-glide keeps its glide,
@@ -1066,7 +1100,7 @@ impl Solium {
     /// `a_client_that_never_answers_is_drawn_as_it_is_once_its_patience_runs_out`.
     ///
     /// **The motion is the scripts'**: the listeners of `change`'s event set
-    /// it with `sol.animate`, and with no answer -- no listener, or no
+    /// it with `motion`, and with no answer -- no listener, or no
     /// scripts -- the window is where it lives on the next frame, as before
     /// #49. A layout's own glide for a window going back into a tile is
     /// replaced, so the change's motion is the one it is drawn with, there as
@@ -1074,8 +1108,8 @@ impl Solium {
     /// and `tests/scenarios/fullscreen-tiled.lua` for the tile.
     ///
     /// **The compositor's move comes after the listeners' commands**, so a
-    /// `sol.present` of the window in one is replaced by it, and a change a
-    /// listener makes -- `sol.toggle_fullscreen` back again -- is made at once
+    /// `present` of the window in one is replaced by it, and a change a
+    /// listener makes -- `toggle-fullscreen` back again -- is made at once
     /// and not told: telling it would ask the same listener again, for ever.
     /// `a_listener_that_toggles_the_change_back_is_not_told_it_again`.
     pub(super) fn transition(
@@ -1086,7 +1120,7 @@ impl Solium {
         start: Option<Frame>,
     ) {
         // **A mode's picture is the mode's**, and asked before the listeners
-        // run: a `sol.present` one of them makes is the glide's to replace,
+        // run: a `present` one of them makes is the glide's to replace,
         // as the move comes after their commands, and asked afterwards it
         // kept the window at its old rectangle, transformed for good.
         // `a_present_a_listener_makes_is_replaced_by_the_glide`.
@@ -1250,7 +1284,7 @@ impl Solium {
     }
 
     /// Fill the work area, or go back to where the window was: the user's
-    /// maximise, by key, by `sol.toggle_maximize` or by the frame's button.
+    /// maximise, by key, by `toggle-maximize` or by the frame's button.
     pub(super) fn toggle_maximize(&mut self, window: &Window) {
         self.maximize_toggled(window, window_state::Asker::User);
     }

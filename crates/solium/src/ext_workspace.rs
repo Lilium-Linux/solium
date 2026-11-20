@@ -2,9 +2,9 @@
 //! `ext-workspace-v1`, so a dock or a bar over `wlr-layer-shell` can show
 //! which workspaces there are, which each monitor shows, and switch to one.
 //!
-//! **A view of what Lua declared, and nothing else.** The compositor does not
+//! **A view of what the window manager declared, and nothing else.** The compositor does not
 //! know what a workspace is: `workspaces.lua` declares the groups, their
-//! monitors, their workspaces and which each shows with `sol.workspaces`
+//! monitors, their workspaces and which each shows with `workspaces`
 //! (`models::workspaces::Declared`), and this tells every bound client the
 //! same, as the `Workspaces` model tells a scene. A group is a declared group
 //! with its monitors as its outputs; a workspace is a declared workspace with
@@ -12,7 +12,7 @@
 //! and `active` while its group shows it, `hidden` when it was declared so.
 //!
 //! **What a client asks is an action, and the configuration answers it.**
-//! `activate` reaches Lua at the manager's `commit` as the action
+//! `activate` reaches the window manager at the manager's `commit` as the action
 //! `workspaces.go`, `{ id, monitor }`, from the surface named [`SURFACE`] --
 //! exactly what a scene of the shell sends -- so `actions.lua` routes it and
 //! `workspaces.lua` switches. That is the one request each workspace offers:
@@ -43,7 +43,7 @@ use crate::models::workspaces::Declared;
 use crate::state::Solium;
 
 /// The surface name a client's request reaches Lua's `surface` listeners
-/// with: `sol.on("surface", function(surface, action, data) end)` hears
+/// with: `surface-action end)` hears
 /// `surface == "ext-workspace"`.
 pub(crate) const SURFACE: &str = "ext-workspace";
 

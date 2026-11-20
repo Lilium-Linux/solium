@@ -411,13 +411,15 @@ pointer", above), `WindowList` ("Windows, live") and `WorkspaceList`
 ("Workspaces, as the configuration has them"); the pane-style types
 `PaneStyle` and `Layer`, and the keyboard pill's `KeyboardPill` and
 `KeyboardPillLayer` (the [panes README](../crates/solium/qml/panes/README.md)); and the attached
-`Solium` object, which any item can read, with exactly ten members:
+`Solium` object, which any item can read, with exactly eleven members:
 `Solium.monitor`, the monitor this instance of the scene is on (below);
 `Solium.input`, `true`, `false` or `"hover"` (above);
 `Solium.surface.reserve.top`, `right`, `bottom` and `left` ("Room of its own",
 below); `Solium.keyboard.wants` and `claims` (above); `Solium.status`,
 the text `sol.status` set ("Workspaces, as the configuration has them",
-below); `Solium.send(action, data)`, what it asks Lua to do
+below); `Solium.groups`, each group's pose this frame, by its name
+([below](#a-world-the-window-manager-moves)); `Solium.send(action, data)`,
+what it asks Lua to do
 ([below](#what-a-hosted-shell-is-given)); `Solium.cursor`, the pointer, and
 the hotspot a pointer scene sets
 ([What a pointer scene is given](#what-a-pointer-scene-is-given));
@@ -591,6 +593,24 @@ the log names each once
 `models::workspaces::tests::an_unknown_monitor_or_window_is_logged_once_per_name`,
 `models::workspaces::tests::a_workspace_declared_twice_is_one_row`,
 `models::workspaces::tests::a_workspace_of_a_group_left_out_is_not_logged_as_declared_twice`).
+
+### A world the window manager moves
+
+`Solium.groups` is every group a window manager declared, by its name, each
+with the numbers its `present-group` has it at this frame: its pose (`x`,
+`y`, `z`, `rotateX`, `rotateY`, `rotateZ`, `scale`, `originX`, `originY`,
+`originZ`, `perspective`), its displacement (`dx`, `dy`) and its `opacity`.
+They are read at the instant the frame is drawn at, the one the compositor
+draws the groups' windows at, so a scene that builds a world from them (a
+room in Qt Quick 3D whose camera is where the window manager's camera groups
+are) has its walls where the windows the groups hang on them are, through
+every frame of a spring
+(`models::groups::tests::a_groups_pose_is_its_numbers_at_the_instant_asked`,
+`qml::hosted::tests::a_published_group_reaches_solium_groups`).
+`examples/space/qml/Room/Room.qml` reads four groups so. Qt Quick 3D needs
+QML on the GPU: on the hardware that is the default, and nested it is
+`SOLIUM_QML=gpu`, which renders scenes into buffers from the host's render
+node.
 
 **Installed applications, and their icons.** `Apps` (03 §3.2.13) is every
 installed, visible application (`NoDisplay` and `Hidden` entries are left out
@@ -941,8 +961,8 @@ absent row, and `Solium.send`, `Grab` and `Solium.keyboard` do nothing in it.
 It is drawn over Solium's own lock, so it reads of the session what a lock
 may show and nothing more, at all times: `Monitors` and `Keyboard` read in
 it, and `Windows`, `Workspaces`, `Apps`, `Folder`, a `WindowList` or
-`WorkspaceList`, `Solium.status` and `Solium.dirs` read empty, as in a lock
-scene; the floor, `qml/cursor.qml`, the same
+`WorkspaceList`, `Solium.status`, `Solium.groups` and `Solium.dirs` read
+empty, as in a lock scene; the floor, `qml/cursor.qml`, the same
 (`lock_auth::tests::the_pointer_scene_reads_only_what_a_lock_may_show`).
 With no scene configured, nothing of this runs: the pointer is the theme, and
 then `qml/cursor.qml`, as before

@@ -35,6 +35,7 @@ mod ffi {
         pub(super) fn solium_qml_host_next_from(qml: *const c_char);
         pub(super) fn solium_qml_rows_apply(model: c_int, ops_json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_status(text: *const c_char) -> c_int;
+        pub(super) fn solium_qml_set_groups(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_arrangement(json: *const c_char) -> c_int;
         pub(super) fn solium_qml_set_apps_ready(ready: c_int) -> c_int;
         pub(super) fn solium_qml_set_dirs_desktop(text: *const c_char) -> c_int;
@@ -190,7 +191,7 @@ pub(crate) fn apply_rows(model: Model, ops: &str) -> bool {
     unsafe { ffi::solium_qml_rows_apply(model as c_int, ops.as_ptr()) != 0 }
 }
 
-/// What `Solium.status` reads: the text `sol.status` set. Whether Qt took
+/// What `Solium.status` reads: the text `status` set. Whether Qt took
 /// it. `tests::the_workspaces_model_its_list_and_its_facades`,
 /// `crate::models::tests::publish_models_carries_the_workspaces_the_status_and_the_arrangement`.
 #[expect(unsafe_code, reason = "calling into the Qt host")]
@@ -201,6 +202,19 @@ pub(crate) fn set_status(text: &str) -> bool {
     };
     // SAFETY: `text` outlives the call; the host copies it.
     unsafe { ffi::solium_qml_set_status(text.as_ptr()) != 0 }
+}
+
+/// What `Solium.groups` reads: each group's pose by name, as one JSON
+/// object (`models::groups::json`). Whether Qt took it.
+/// `tests::a_published_group_reaches_solium_groups`.
+#[expect(unsafe_code, reason = "calling into the Qt host")]
+pub(crate) fn set_groups(json: &str) -> bool {
+    touched();
+    let Ok(json) = CString::new(json) else {
+        return false;
+    };
+    // SAFETY: `json` outlives the call; the host copies what it keeps.
+    unsafe { ffi::solium_qml_set_groups(json.as_ptr()) != 0 }
 }
 
 /// `Notifications`' own values (#346): `available`, `serving`, `dnd` and
@@ -417,7 +431,7 @@ pub(crate) fn set_arrangement(json: &str) -> bool {
 
 impl Scene {
     /// A window frame's layer, hosted on no monitor (#417): `Solium.send`
-    /// queues what it sends, for `sol.on("frame")`, a `Grab` holds the
+    /// queues what it sends, for `frame-action`, a `Grab` holds the
     /// pointer and the keys for it, and its window is active, so an item
     /// with `focus: true` hears the keys it is given. `Solium.monitor` reads
     /// the absent row an unhosted scene reads.
@@ -4063,8 +4077,47 @@ pub(crate) mod tests {
 
     /// **`WorkspaceList` is the group of its monitor, `showing(monitor)` is a
     /// stable facade for what that monitor shows, `current` what the monitor
-    /// in front shows, and `Solium.status` is what `sol.status` set**
+    /// in front shows, and `Solium.status` is what `status` set**
     /// (Ruling 19); with no rows, the facades are empty.
+    /// **A published group reaches `Solium.groups`**: a scene binding its
+    /// camera's turn to a group reads the pose the compositor published, by
+    /// the group's name, and the next one when it moves; a name nobody
+    /// published reads as nothing.
+    #[test]
+    fn a_published_group_reaches_solium_groups() {
+        on_the_qt_thread(|| {
+            let (directory, scene) = hosted(
+                "solium-hosted-groups",
+                r#"
+                import QtQuick
+                import Solium
+                Item {
+                    readonly property var turn: Solium.groups["turn"]
+                    readonly property real yaw: turn ? turn.rotateY : -1
+                    readonly property real eye: turn ? turn.originZ : -1
+                    readonly property bool none: Solium.groups["nobody"] === undefined
+                }
+                "#,
+                "groups-mon",
+            );
+            assert!(super::set_groups(
+                r#"{"turn":{"rotateY":-30,"originZ":960,"x":0}}"#
+            ));
+            crate::qml::tick(std::time::Duration::from_millis(16));
+            assert!((scene.get_real("yaw", 0.0) + 30.0).abs() < 1e-9);
+            assert!((scene.get_real("eye", 0.0) - 960.0).abs() < 1e-9);
+            assert!(scene.get_bool("none"));
+            assert!(super::set_groups(
+                r#"{"turn":{"rotateY":-45,"originZ":960}}"#
+            ));
+            crate::qml::tick(std::time::Duration::from_millis(32));
+            assert!((scene.get_real("yaw", 0.0) + 45.0).abs() < 1e-9);
+            assert!(super::set_groups("{}"));
+            drop(scene);
+            let _ = std::fs::remove_dir_all(directory);
+        });
+    }
+
     #[test]
     fn the_workspaces_model_its_list_and_its_facades() {
         use crate::json::Json;

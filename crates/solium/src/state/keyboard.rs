@@ -432,7 +432,7 @@ impl Solium {
         // left to `give_keyboard` to refuse halfway through. A focus that is
         // refused must not restack a window behind the lock, activate an X11
         // window, or tell a layout that something is focused when nothing is.
-        // Scripts (`sol.focus`), layouts' event handlers, xdg-activation and
+        // Scripts (`focus`), layouts' event handlers, xdg-activation and
         // `settle_focus` all arrive here, and all of them can while locked.
         if !self.may_focus(window) {
             tracing::debug!("refused window focus by the seat policy");
@@ -440,9 +440,9 @@ impl Solium {
         }
         // **A minimized window is shown again before it is focused** (#30):
         // it may never hold the keyboard minimized, and focusing one -- a
-        // click in an overview, `sol.focus`, an activation -- is asking for
+        // click in an overview, `focus`, an activation -- is asking for
         // it back. After the lock's rule above, so a focus behind the lock
-        // shows nothing and reflows nothing, as `sol.act("windows.unminimize")`
+        // shows nothing and reflows nothing, as `act("windows.unminimize")`
         // is answered `locked` there.
         // `tests::real_client::reflow_on_close::minimize::focusing_a_minimized_window_shows_it_first`,
         // `tests::real_client::lock_focus::focusing_a_minimized_window_behind_the_lock_leaves_it_minimized`.
@@ -463,7 +463,7 @@ impl Solium {
         // went, by `settle_focus`'s choice or by anyone else's.
         self.keyboard_left = None;
         // Any explicit focus ends a scene's hold on the keyboard, a click on a
-        // window and `sol.focus` among them (Ruling 14).
+        // window and `focus` among them (Ruling 14).
         // `tests::real_client::reflow_on_close::hosted::clicking_a_window_ends_the_shells_hold`,
         // `tests::real_client::reflow_on_close::hosted::sol_focus_ends_the_shells_hold`.
         self.end_keyboard_hold(false);

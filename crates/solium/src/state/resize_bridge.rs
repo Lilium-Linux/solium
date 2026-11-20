@@ -132,6 +132,9 @@ impl Solium {
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
         let settled = self.settle_resize_hold(now) | self.settle_resize_bridge(now);
+        // The trees of boxes: solved again for a window whose limits
+        // changed, and the seams a drag moved told once it is over.
+        let solved = self.settle_trees();
         // A recorded release exists to be handed to a hold that had not been
         // born yet. If nothing survived this frame, nothing can be: the only
         // things that create one are `hold_resize` and `offers_size`, and the
@@ -140,7 +143,7 @@ impl Solium {
         if self.resize_hold.is_none() && self.resize_bridge.is_none() {
             self.resize_ended = None;
         }
-        settled || dragged
+        settled || dragged || solved
     }
 
     /// Tell `move_pane` that the layout sweep it is about to see belongs to a
@@ -373,12 +376,37 @@ impl Solium {
                 crate::resizing::Settle::Done => {}
                 crate::resizing::Settle::Adopt(taken) => {
                     self.land_on(&held.window, held.pane, &held.hold, taken);
+                    // And the window manager is told, once this pass's
+                    // holds are settled: the size the window has now is
+                    // not the one it gave it.
+                    if let Some(outer) = self.pane_outer_of(held.pane) {
+                        self.took_sizes
+                            .push((held.pane.get(), (outer.size.w, outer.size.h)));
+                    }
                 }
             }
         }
         kept.append(&mut self.answering);
         self.answering = kept;
         waiting
+    }
+
+    /// Stop holding a pane until its client answers: its layout has let
+    /// it go, and a window nothing places is the size its client drew.
+    pub(super) fn let_go_of_answer(&mut self, pane: crate::pane::PaneId) {
+        self.answering.retain(|held| held.pane != pane);
+    }
+
+    /// A window has committed, which may be the answer a hold in
+    /// [`Self::answering`] is waiting for: settled now rather than at the
+    /// end of the pass, so that what its client answered is the window's
+    /// size from the commit on.
+    /// `a_client_that_rounds_its_size_does_not_move_the_seam`.
+    pub(crate) fn settle_answer_of(&mut self, window: &Window) {
+        if self.answering.iter().any(|held| &held.window == window) {
+            let now = self.clock.now();
+            self.settle_answering(now);
+        }
     }
 
     /// The hold governing this pane, whichever path put it there.
@@ -762,8 +790,8 @@ impl Solium {
     /// client's minimum is read since #115 (`state::limits_of`) and the layouts
     /// keep a window at it where there is room, so a refusal that reaches this
     /// is one they could not avoid: a tile laid out `cramped`, or a size the
-    /// client never declared. `floor_tests::a_sibling_gives_no_more_than_it_holds`
-    /// in the layout crate has a cramped one.
+    /// client never declared. "a sibling gives no more than it holds" in the
+    /// shipped dwindle tree's specs has a cramped one.
     fn land_on(
         &mut self,
         window: &Window,
@@ -942,6 +970,7 @@ impl Solium {
         // hold born a moment later waiting for it for ever. See
         // [`Self::resize_ended`].
         self.resize_ended = Some((window.clone(), now));
+        self.trees.released();
         self.release_bridge(window, now);
 
         let Some(held) = self.resize_hold.as_ref() else {
@@ -1371,9 +1400,9 @@ impl Solium {
     /// `crate::input::resize::dragged_edge` builds it from the pane's own
     /// laid-out edge and the drag's total movement rather than from the seat.
     ///
-    /// It is in the layout's **outer** space — the space `sol.place` writes and
+    /// It is in the layout's **outer** space — the space `place` writes and
     /// `tree:layout` returns — because it comes from `Solium::pane_laid_out`,
-    /// which is the rectangle `sol.place` was last handed for this pane. Not
+    /// which is the rectangle `place` was last handed for this pane. Not
     /// from `Solium::pane_outer`, which is that rectangle only until the client
     /// commits a size of its own.
     ///
@@ -1383,6 +1412,12 @@ impl Solium {
     /// drag moves depends on which edge the hand is on; see
     /// [`crate::input::resize::sides`].
     pub(crate) fn trigger_resize(&mut self, request: &ResizeRequest) -> bool {
+        // A window in a tree of boxes with a seam along the dragged side is
+        // the compositor's to resize: the seam follows the edge on this
+        // frame, whatever the window manager is doing. See `super::trees`.
+        if let Some(claimed) = self.drag_seams(request) {
+            return claimed;
+        }
         let id = self.window_id(&request.window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {

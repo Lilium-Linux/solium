@@ -23,7 +23,7 @@ impl Solium {
     ///
     /// A layer's `Solium.send("close" | "maximize" | "minimize")` is the
     /// built-in action, as its `action` property is; any other name goes to
-    /// Lua as `sol.on("frame", id, name, data)`, in the order the layers sent
+    /// Lua as `frame-action`, in the order the layers sent
     /// them.
     /// `tests::real_client::reflow_on_close::frames::a_frame_sends_a_named_action_with_its_data_to_lua`.
     ///
@@ -109,8 +109,8 @@ impl Solium {
         self.settle_scenes_once_dispatched();
     }
 
-    /// Tell the scripts a frame sent something: `sol.on("frame", id, name,
-    /// data)`.
+    /// Tell the window manager a frame sent something: the `frame-action`
+    /// event.
     fn trigger_frame(&mut self, pane: PaneId, name: &str, data: &Json) {
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {

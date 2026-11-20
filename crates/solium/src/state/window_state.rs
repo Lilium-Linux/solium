@@ -32,7 +32,7 @@ pub(crate) struct States {
 /// A window's [`States`], whichever kind it is: for an xdg toplevel the state
 /// its next configure carries, so nothing waits for the client, and for an X11
 /// window its `_NET_WM_STATE`. The one answer for everything that asks: the
-/// stacking over the bars, a rule's `fullscreen`, `sol.windows()`, the windows
+/// stacking over the bars, a rule's `fullscreen`, the `window` rows, the windows
 /// model, and the toggles themselves.
 pub(crate) fn states(window: &Window) -> States {
     if let Some(toplevel) = window.toplevel() {
@@ -183,7 +183,7 @@ pub(crate) enum MaximizeAnswer {
 /// layout's tile outranks it (`Pane::maximized_by_client`, #450).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Asker {
-    /// The person at the machine: super+shift+m, `sol.toggle_maximize`, the
+    /// The person at the machine: super+shift+m, `toggle-maximize`, the
     /// frame's button or a double click on its titlebar. Lifts a window out
     /// of its tile (#150).
     User,
@@ -472,7 +472,7 @@ impl Solium {
         self.fullscreen(window, output);
     }
 
-    /// Fullscreen if it is not, and back if it is: `sol.toggle_fullscreen`,
+    /// Fullscreen if it is not, and back if it is: `toggle-fullscreen`,
     /// super+f, and a hosted scene's `windows.fullscreen`, made as the
     /// window's own client would ask.
     /// `a_script_toggles_fullscreen_and_maximised_as_the_client_would`.

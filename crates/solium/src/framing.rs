@@ -1,5 +1,5 @@
 //! Who draws a window's frame: Solium, from its pane style, or the
-//! application itself (#462). `config.frames`, handed over by `sol.frames`.
+//! application itself (#462). `config.frames`, handed over by `frames`.
 //!
 //! **A client's say is what it asked through `xdg-decoration`, or that it
 //! never asked.** The protocol leaves the frame to the client when there is

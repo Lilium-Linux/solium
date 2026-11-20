@@ -92,7 +92,7 @@ pub(crate) struct Profile {
     ///
     /// True for every form factor: the bug this guards against -- a window
     /// that cannot be unfocused -- has nothing to do with what the machine
-    /// is. `sol.focus_mode` can still turn it off from `config.lua`'s
+    /// is. `focus_mode` can still turn it off from `config.lua`'s
     /// `focus.clear_on_empty_click`.
     pub(crate) clear_focus_on_empty_click: bool,
 }

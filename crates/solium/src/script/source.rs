@@ -1,0 +1,106 @@
+//! The production source of `script/`, for the tests that read it as text:
+//! where `mlua` may not appear.
+//!
+//! One list, checked against the directory by
+//! `every_file_of_the_module_is_listed`, so a file added to the module cannot
+//! be missed by a scan that would then agree with anything.
+
+/// Every production file of `script/`, by its path under `src/script/`.
+pub(crate) const FILES: &[(&str, &str)] = &[
+    ("command.rs", include_str!("command.rs")),
+    ("doc.rs", include_str!("doc.rs")),
+    ("mod.rs", include_str!("mod.rs")),
+    ("reference.rs", include_str!("reference.rs")),
+    ("settings/focus.rs", include_str!("settings/focus.rs")),
+    ("settings/frames.rs", include_str!("settings/frames.rs")),
+    ("settings/idle.rs", include_str!("settings/idle.rs")),
+    ("settings/input.rs", include_str!("settings/input.rs")),
+    ("settings/lock.rs", include_str!("settings/lock.rs")),
+    ("settings/reload.rs", include_str!("settings/reload.rs")),
+    (
+        "settings/layer_shell.rs",
+        include_str!("settings/layer_shell.rs"),
+    ),
+    (
+        "settings/toplevels.rs",
+        include_str!("settings/toplevels.rs"),
+    ),
+    ("settings/x11.rs", include_str!("settings/x11.rs")),
+    ("settings/session.rs", include_str!("settings/session.rs")),
+    ("settings/files.rs", include_str!("settings/files.rs")),
+    (
+        "settings/client_sizes.rs",
+        include_str!("settings/client_sizes.rs"),
+    ),
+    ("settings/resize.rs", include_str!("settings/resize.rs")),
+    ("settings/cursor.rs", include_str!("settings/cursor.rs")),
+    ("settings/qml.rs", include_str!("settings/qml.rs")),
+    ("settings/pane.rs", include_str!("settings/pane.rs")),
+    (
+        "settings/fullscreen.rs",
+        include_str!("settings/fullscreen.rs"),
+    ),
+    ("settings/services.rs", include_str!("settings/services.rs")),
+    ("settings/keyboard.rs", include_str!("settings/keyboard.rs")),
+    ("settings/monitors.rs", include_str!("settings/monitors.rs")),
+    ("settings/effects.rs", include_str!("settings/effects.rs")),
+    ("settings/mod.rs", include_str!("settings/mod.rs")),
+    ("settings/read.rs", include_str!("settings/read.rs")),
+    ("settings/wm.rs", include_str!("settings/wm.rs")),
+    (
+        "settings/workspaces.rs",
+        include_str!("settings/workspaces.rs"),
+    ),
+    ("source.rs", include_str!("source.rs")),
+    ("types.rs", include_str!("types.rs")),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::FILES;
+
+    /// Every `.rs` under `src/script/`, outside `tests/`, is in [`FILES`].
+    #[test]
+    fn every_file_of_the_module_is_listed() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found = Vec::new();
+        for (root, prefix) in [(manifest.join("src/script"), "")] {
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).expect("the directory reads") {
+                    let path = entry.expect("an entry").path();
+                    if path.is_dir() {
+                        if path.file_name().is_some_and(|name| name != "tests") {
+                            stack.push(path);
+                        }
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
+                        let relative = path.strip_prefix(&root).expect("under the root");
+                        found.push(format!("{prefix}{}", relative.to_string_lossy()));
+                    }
+                }
+            }
+        }
+        found.sort();
+        let mut listed: Vec<String> = FILES.iter().map(|(path, _)| (*path).to_owned()).collect();
+        listed.sort();
+        assert_eq!(found, listed, "the sources and source::FILES disagree");
+    }
+
+    /// No `mlua` in `script/`: it is what a window manager in any language
+    /// talks to, and the Lua window manager is a program of its own.
+    #[test]
+    fn mlua_appears_nowhere_in_script() {
+        let outside: Vec<&str> = FILES
+            .iter()
+            .filter(|(path, _)| *path != "reference.rs" && *path != "source.rs")
+            .filter(|(_, text)| {
+                text.split("#[cfg(test)]")
+                    .next()
+                    .unwrap_or_default()
+                    .contains("mlua")
+            })
+            .map(|(path, _)| *path)
+            .collect();
+        assert!(outside.is_empty(), "mlua in script/: {outside:?}");
+    }
+}

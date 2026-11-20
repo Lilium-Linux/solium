@@ -4,7 +4,7 @@
 //!
 //! **Asked of geometry, because the compositor knows no layouts.** "The window
 //! that takes its place" is a question about a tiling tree or a scrolling
-//! strip, and neither lives on this side: they are Lua. What every layout
+//! strip, and neither lives on this side: they are the window manager's. What every layout
 //! leaves behind is the same, though -- where each window is going -- so the
 //! answer is read from that. Of the windows still on the monitor the closed
 //! one was on, one going into the rectangle it stood in: in tiling the

@@ -287,7 +287,7 @@ impl Drawn {
 pub(crate) struct Prepared {
     warps: Vec<Warped>,
     overs: Vec<Warped>,
-    /// Panes a refused `sol.present` geometry hides this pass
+    /// Panes a refused `present` geometry hides this pass
     /// (`effects.present.failed = "hide"`): nothing of them is drawn.
     /// `tests::a_refused_present_follows_its_failed_policy`.
     hidden: Vec<crate::pane::PaneId>,
@@ -306,13 +306,58 @@ pub(crate) struct Prepared {
     /// measured (amended 2026-10-14, live under motion and warps).
     /// `tests::the_walk_draws_at_the_passs_instant`.
     pub(crate) now: Option<std::time::Duration>,
+    /// Every scene a group poses in three dimensions this pass, captured to
+    /// be drawn through its frame's matrix ([`Posed`]).
+    scenes: Vec<Posed>,
+}
+
+/// A scene a group poses in three dimensions, as this pass draws it on one
+/// monitor: where its group puts it, and the capture of it drawn through
+/// that, with its program and the id and commit its element carries; no
+/// capture when it faces away, and then nothing of it is drawn.
+#[derive(Clone, Debug)]
+pub(crate) struct Posed {
+    surface: crate::scripted::SurfaceId,
+    monitor: String,
+    frame: present::Frame,
+    drawn: Option<(GlesTexture, crate::warp::Program, Id, CommitCounter)>,
+}
+
+impl Posed {
+    /// What it draws on `screen`, at `scale`: its capture through its
+    /// frame's matrix, cut where it reaches behind the viewer; nothing when
+    /// it faces away or is wholly behind them.
+    /// `tests::a_posed_scene_is_drawn_through_its_frame_and_not_at_its_rectangle`.
+    fn element(&self, screen: Rectangle<i32, Logical>, scale: f64) -> Option<Element> {
+        let (texture, program, id, commit) = self.drawn.as_ref()?;
+        let mesh = posed_mesh(screen, &self.frame, scale)?;
+        Some(Element::Warped(crate::warp::Warp::new(
+            id.clone(),
+            *commit,
+            texture.clone(),
+            mesh,
+            self.frame.opacity,
+            *program,
+        )))
+    }
+}
+
+/// A posed scene's mesh on `screen`: its whole rectangle through its frame,
+/// or nothing when none of it is in front of the viewer.
+fn posed_mesh(
+    screen: Rectangle<i32, Logical>,
+    frame: &present::Frame,
+    scale: f64,
+) -> Option<crate::warp::Mesh> {
+    warp_mesh_on(screen, frame, None, crate::warp::UnitRect::WHOLE, scale)
+        .filter(|mesh| !mesh.is_empty())
 }
 
 /// One warp `prepare` made: the capture drawn through it, the program, the id
 /// and commit its element carries, the part of the pane's unit square the
 /// capture covers, and the grid a geometry effect placed over that part this
 /// pass (`None`: the part where it is, as a tilt draws it).
-/// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+/// `warp::tests::a_genie_grid_lands_where_the_rust_genie_put_it`.
 #[derive(Clone, Debug)]
 pub(crate) struct Warped {
     /// Its pane, which a window still loading is too
@@ -511,7 +556,7 @@ pub(crate) enum Route {
     /// The flat path, its client rounded where it is if its style says so
     /// (`tests::a_style_with_a_radius_is_drawn_inline`).
     Flat,
-    /// Nothing of it: a refused `sol.present` geometry under
+    /// Nothing of it: a refused `present` geometry under
     /// `failed = "hide"`, no capture job, no warp, no element
     /// (`tests::a_refused_present_follows_its_failed_policy`).
     Hidden,
@@ -720,16 +765,27 @@ pub(crate) enum Planned {
     },
 }
 
+/// What runs a geometry's mesh program: the GPU in a pass
+/// (`effect::GlCompiler`), a test's compiler in the tests.
+pub(crate) trait Mesher:
+    crate::effect::host::Compiler<Program = crate::effect::gl::Program>
+{
+}
+
+impl<C: crate::effect::host::Compiler<Program = crate::effect::gl::Program>> Mesher for C {}
+
 /// [`warp_of`], and a present geometry's grid built once a pass: refused,
 /// the window follows its `failed` (undeformed, as an unresolved anchor is,
 /// still tilted if it is; or nothing of it), and with its folder reloaded
 /// under `on_reload = "flat"` it is undeformed. The grid is over the
-/// pane's [`warp_part`], its layers' bleed and all. Asked with no renderer.
+/// pane's [`warp_part`], its layers' bleed and all, its points run on the
+/// GPU by `mesher`.
 /// `tests::a_refused_present_follows_its_failed_policy`,
 /// `state::tests::real_client::a_present_deform_is_a_file`,
 /// `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
 pub(crate) fn plan_warp(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     outer: Rectangle<i32, Logical>,
     scale: f64,
@@ -748,7 +804,15 @@ pub(crate) fn plan_warp(
     // Over the pane grown by its layers' bleed, the part its capture holds
     // (#312), as its popups' grid is over theirs.
     let part = warp_part(state, pane);
-    let gridded = present_grid(state, pane, &frame, aimed, (WarpPiece::Pane, part), scale);
+    let gridded = present_grid(
+        state,
+        mesher,
+        pane,
+        &frame,
+        aimed,
+        (WarpPiece::Pane, part),
+        scale,
+    );
     let route = match gridded {
         Gridded::Grid(grid) => {
             return Planned::Warp {
@@ -795,13 +859,14 @@ enum Gridded {
 /// folder with; a release build has neither the branch nor the oracle.
 fn present_grid(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     frame: &present::Frame,
     aimed: present::Aimed,
     (piece, part): (WarpPiece, crate::warp::UnitRect),
     scale: f64,
 ) -> Gridded {
-    use crate::effect::geometry::{Ask, MeshKey, mesh, turned, unpacked};
+    use crate::effect::geometry::{Ask, MeshKey, run, turned, unpacked};
     let geometry = aimed.effect;
     if geometry.effect == crate::effect::host::EffectId::NONE {
         return Gridded::Refused;
@@ -859,7 +924,7 @@ fn present_grid(
             .unwrap_or(solium_effects::spec::GridSpec::Fixed { cols: 1, rows: 1 }),
         geometry.axis,
     );
-    // A `sol.present` geometry measures how far the window is pulled into
+    // A `present` geometry measures how far the window is pulled into
     // its target: a leaving's progress, so `t.direction` is -1.
     let ask = Ask {
         progress: geometry.progress,
@@ -875,6 +940,12 @@ fn present_grid(
         params: &[],
     };
     let key = MeshKey::new(geometry.effect, geometry.params, &ask, cols, rows);
+    // Its `.vert`, compiled: a version runs only once it has.
+    let program = loaded
+        .mesh
+        .as_ref()
+        .and_then(|mesh| state.effects.program(mesh.key))
+        .cloned();
     let Some(held) = state.panes.get_mut(pane) else {
         return Gridded::Undeformed;
     };
@@ -886,7 +957,12 @@ fn present_grid(
                 params: &params,
                 ..ask
             };
-            mesh(loaded.sandbox(), &ask, cols, rows).map(|points| crate::warp::Grid {
+            let Some(program) = program.as_ref() else {
+                return Err(crate::effect::geometry::Refusal::Error {
+                    message: "its mesh has no program".to_owned(),
+                });
+            };
+            run(mesher, program, &ask, cols, rows).map(|points| crate::warp::Grid {
                 cols,
                 rows,
                 part,
@@ -922,13 +998,22 @@ fn present_grid(
 /// `state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`.
 pub(crate) fn over_grid(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     frame: &present::Frame,
     aimed: present::Aimed,
     part: crate::warp::UnitRect,
     scale: f64,
 ) -> Option<Option<crate::warp::Grid>> {
-    match present_grid(state, pane, frame, aimed, (WarpPiece::Over, part), scale) {
+    match present_grid(
+        state,
+        mesher,
+        pane,
+        frame,
+        aimed,
+        (WarpPiece::Over, part),
+        scale,
+    ) {
         Gridded::Grid(grid) => Some(Some(grid)),
         Gridded::Undeformed => Some(None),
         Gridded::Refused => match present_route(aimed.effect, true) {
@@ -996,7 +1081,7 @@ pub(crate) fn wants_warp(state: &Solium, pane: crate::pane::PaneId) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct Presented {
     planned: std::collections::HashMap<crate::pane::PaneId, Planned>,
-    /// The pass's one instant, read once at the top of [`plan_warps`]: what
+    /// The pass's one instant, the QML tick's, handed to [`plan_warps`]: what
     /// the warps, the T2 places and the walk are all measured at (amended
     /// 2026-10-14, live under motion and warps).
     /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
@@ -1020,7 +1105,7 @@ impl Presented {
     }
 }
 
-/// The instant this pass is measured at: the one [`plan_warps`] read, or
+/// The instant this pass is measured at: the one [`plan_warps`] was given, or
 /// the clock for a caller before any pass (a test calling a phase alone).
 pub(crate) fn pass_now(state: &Solium) -> std::time::Duration {
     state.presented.at().unwrap_or_else(|| state.clock.now())
@@ -1075,13 +1160,12 @@ pub(crate) fn captured(
 /// Plan every warp of the pass, as `warps` planned them: the same panes
 /// (on screen, with what to capture and an outer rectangle, [`captured`],
 /// `shown`), the same
-/// rectangle and scale, the same `plan_warp`, once each, all at the one
-/// instant read here. A refusal is still said once and counted once a pass
+/// rectangle and scale, the same `plan_warp`, once each, all at `now`, the
+/// pass's one instant, the QML tick's ([`frame_tick`]). A refusal is still said once and counted once a pass
 /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
 /// `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`,
 /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
-pub(crate) fn plan_warps(state: &mut Solium) {
-    let now = state.clock.now();
+pub(crate) fn plan_warps(state: &mut Solium, mesher: &mut impl Mesher, now: std::time::Duration) {
     let mut planned = std::collections::HashMap::new();
     for (pane, window) in state.on_screen() {
         let Some((_, outer)) = captured(state, pane, window.as_ref()) else {
@@ -1091,7 +1175,7 @@ pub(crate) fn plan_warps(state: &mut Solium) {
             continue;
         }
         let scale = state.scale_of(outer);
-        planned.insert(pane, plan_warp(state, pane, outer, scale, now));
+        planned.insert(pane, plan_warp(state, mesher, pane, outer, scale, now));
     }
     state.presented = Presented {
         planned,
@@ -1119,6 +1203,14 @@ impl Prepared {
         self.overs.iter().find(|each| each.pane == pane)
     }
 
+    /// The scene `id`'s instance on `monitor`, posed this pass, if a group
+    /// poses it: drawn through its capture and not as a rectangle.
+    fn scene(&self, id: crate::scripted::SurfaceId, monitor: &str) -> Option<&Posed> {
+        self.scenes
+            .iter()
+            .find(|each| each.surface == id && each.monitor == monitor)
+    }
+
     /// Whether nothing of `pane` is drawn this pass: a refused present
     /// geometry under `failed = "hide"`.
     /// `tests::a_refused_present_follows_its_failed_policy`.
@@ -1142,8 +1234,9 @@ pub(crate) fn note_formats(state: &mut Solium, found: crate::pool::Formats) {
 /// (`tests::a_style_with_a_radius_is_drawn_inline`).
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
-/// Note on the clock: the pass reads it **once**, at the top of `resolve`
-/// ([`plan_warps`]), and everything of the pass is measured at that instant:
+/// Note on the clock: the pass reads it **once**, at the QML tick
+/// ([`frame_tick`]), and everything of the pass is measured at that instant:
+/// the scenes' animations and what they read of the groups,
 /// the warps' plans, the T2 places ([`measured`]) and the walk, which
 /// `elements` makes at [`Prepared::now`] however much later it runs
 /// (amended 2026-10-14, live under motion and warps). A T2 place measured
@@ -1176,10 +1269,10 @@ pub(crate) fn prepare(
     // Once per *frame* and not once per output: with two monitors, ticking in
     // `elements` would advance every animation twice as fast as the clock, and
     // on monitors of different refresh rates by different amounts.
-    {
+    let instant = {
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
-        frame_tick(state);
-    }
+        frame_tick(state)
+    };
 
     // Twice the largest monitor's bytes may wait on the pool's free list
     // (Ruling 10): `pool::tests::a_target_given_back_over_budget_is_dropped`.
@@ -1202,8 +1295,10 @@ pub(crate) fn prepare(
         warps: Vec::new(),
         overs: Vec::new(),
         hidden: Vec::new(),
+        scenes: Vec::new(),
         pass: 0,
         drawing,
+        instant,
     };
     // What the pool makes in the effect phases, for the pass record: a
     // capture or an effect step at a size it had no target of, which a drag
@@ -1218,6 +1313,7 @@ pub(crate) fn prepare(
         warps,
         overs,
         hidden,
+        scenes,
         ..
     } = gpu;
     // Once a pass, after the sweep, whatever the number of monitors: the
@@ -1231,6 +1327,7 @@ pub(crate) fn prepare(
         slots,
         held,
         now: state.presented.at(),
+        scenes,
     }
 }
 
@@ -1259,16 +1356,26 @@ pub(crate) fn prepare(
 /// from here on sees the frame at that size: `Solium::follow_growth`. And
 /// their client radii (#454), so a client is cut to the corners its style
 /// gives it this frame: `Solium::follow_corners`.
-pub(crate) fn frame_tick(state: &mut Solium) {
+///
+/// Returns that instant, which the pass is drawn at ([`plan_warps`]): the
+/// windows and the scenes' animations at one moment, and a scene that reads
+/// `Solium.groups` in step with the windows the groups carry.
+pub(crate) fn frame_tick(state: &mut Solium) -> std::time::Duration {
     state.publish_models();
     let now = state.clock.now();
     if state.lock_scenes.exit_frame(now) {
         tracing::debug!("the lock's exit is drawn from this frame");
     }
+    // Where every group is at this instant, for `Solium.groups`, before the
+    // tick runs the scenes' bindings: a scene's camera read from the window
+    // manager's camera groups is where the windows those groups carry are
+    // drawn, since the pass is drawn at this same instant (`prepare`).
+    state.publish_groups(now);
     crate::qml::tick(now);
     state.follow_growth(now);
     state.follow_corners();
     state.build_frames(now);
+    now
 }
 
 /// The first desktop frame's gate (`warm::Warm`, spec C14), asked once a
@@ -1361,11 +1468,14 @@ struct Gpu<'a> {
     warps: Vec<Warped>,
     overs: Vec<Warped>,
     hidden: Vec<crate::pane::PaneId>,
+    scenes: Vec<Posed>,
     /// The store's pass, set by `resolve`.
     pass: u64,
     /// The monitors this pass draws: a cut of another is kept as it is
     /// (`drawing.rs`).
     drawing: crate::drawing::Drawing,
+    /// The pass's one instant, the QML tick's ([`frame_tick`]).
+    instant: std::time::Duration,
 }
 
 impl std::fmt::Debug for Gpu<'_> {
@@ -1374,6 +1484,7 @@ impl std::fmt::Debug for Gpu<'_> {
             .field("warps", &self.warps.len())
             .field("overs", &self.overs.len())
             .field("hidden", &self.hidden.len())
+            .field("scenes", &self.scenes.len())
             .field("pass", &self.pass)
             .finish_non_exhaustive()
     }
@@ -1421,7 +1532,11 @@ impl Phases for Gpu<'_> {
         // pass (Ruling F31, amended 2026-10-14). With no effects it is the
         // plan `warps` made before, made earlier.
         // `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`.
-        plan_warps(state);
+        plan_warps(
+            state,
+            &mut crate::effect::GlCompiler(self.renderer),
+            self.instant,
+        );
         // Every rule resolved once, after the effects compiled and before any
         // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
         // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
@@ -1767,7 +1882,14 @@ impl Phases for Gpu<'_> {
             let now = pass_now(state);
             let planned = match state.presented.take(pane) {
                 Some(planned) => planned,
-                None => plan_warp(state, pane, outer, scale, now),
+                None => plan_warp(
+                    state,
+                    &mut crate::effect::GlCompiler(renderer),
+                    pane,
+                    outer,
+                    scale,
+                    now,
+                ),
             };
             let (warp, grid) = match planned {
                 Planned::Hidden => {
@@ -1872,17 +1994,20 @@ impl Phases for Gpu<'_> {
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
-                        over_grid(state, pane, &frame, aimed, part, scale).map(|grid| {
-                            // Their capture whole is their subject.
-                            let pixels = present_pixels(
-                                state,
-                                pane,
-                                aimed.effect,
-                                (part, [0.0, 0.0, 1.0, 1.0]),
-                                whole_size(job.size, fraction),
-                            );
-                            (job, part, grid, pixels)
-                        })
+                        let mut mesher = crate::effect::GlCompiler(renderer);
+                        over_grid(state, &mut mesher, pane, &frame, aimed, part, scale).map(
+                            |grid| {
+                                // Their capture whole is their subject.
+                                let pixels = present_pixels(
+                                    state,
+                                    pane,
+                                    aimed.effect,
+                                    (part, [0.0, 0.0, 1.0, 1.0]),
+                                    whole_size(job.size, fraction),
+                                );
+                                (job, part, grid, pixels)
+                            },
+                        )
                     }
                     (over, _) => over.map(|(job, part)| (job, part, None, None)),
                 };
@@ -1951,11 +2076,25 @@ impl Phases for Gpu<'_> {
             release(state);
         }
 
+        // Every scene a group poses, captured as a window is and drawn
+        // through its frame by the walk.
+        self.scenes.extend(scene_jobs(state, renderer, &mut jobs));
+
         // Every list is built, from the slots as the chains left them: draw
         // them all, on one carrier, and place what they made
         // (`tests::prepare_compiles_first_and_builds_the_warps_after_the_chains`).
         for (then, texture, id, _commit) in crate::offscreen::draw(state, renderer, jobs) {
             match then {
+                Then::Scene(program, mut posed, shape) => {
+                    let commit = state.scene_captures.warp_commit(
+                        posed.surface,
+                        &posed.monitor,
+                        shape,
+                        true,
+                    );
+                    posed.drawn = Some((texture, program, id, commit));
+                    self.scenes.push(*posed);
+                }
                 Then::Warp(program, pane, shape, part, grid, (holes, scale), pixels) => {
                     let commit = warp_commit(state, pane, crate::keyed::Kind::Pane, shape, true);
                     let under = unders(state, slots, &holes, scale, commit);
@@ -2014,6 +2153,109 @@ impl Phases for Gpu<'_> {
     }
 }
 
+/// Every scene a group poses in three dimensions this pass, on each monitor
+/// it has an instance on, for [`Gpu::warps`]: those whose capture is kept as
+/// it was, ready, and a job pushed onto `jobs` for each one that must be
+/// drawn again, which `warps` places once drawn. One facing away is listed
+/// with no capture, so nothing of it is drawn, and one posed no longer gives
+/// its target back. With no warp program none is listed, and the walk draws
+/// a posed scene flat, as it draws a window it cannot bend.
+fn scene_jobs(
+    state: &mut Solium,
+    renderer: &mut GlesRenderer,
+    jobs: &mut Vec<(crate::offscreen::Job, Then)>,
+) -> Vec<Posed> {
+    let now = pass_now(state);
+    let mut wanted = Vec::new();
+    if !state.groups.is_empty() {
+        let outputs: Vec<smithay::output::Output> = state.space.outputs().cloned().collect();
+        for surface in state.surfaces.iter() {
+            for output in &outputs {
+                let id = surface.id();
+                let (Some(area), Some(screen)) = (
+                    instance_area(state, id, output),
+                    state.space.output_geometry(output),
+                ) else {
+                    continue;
+                };
+                let shift = state.groups.on_surface(id, &output.name(), now);
+                if shift.bends() {
+                    let frame = shift.apply(present::Frame::real(area));
+                    let scale = scene_capture_scale(
+                        output.current_scale().fractional_scale(),
+                        shift.grow,
+                        area.size,
+                        screen.size,
+                    );
+                    wanted.push((id, output.clone(), frame, scale));
+                }
+            }
+        }
+    }
+    let posed: Vec<(crate::scripted::SurfaceId, String)> = wanted
+        .iter()
+        .map(|(id, output, ..)| (*id, output.name()))
+        .collect();
+    state.scene_captures.keep(&posed, &mut state.pool);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let Some(program) = state.programs.warp(renderer) else {
+        return Vec::new();
+    };
+    let mut ready = Vec::new();
+    for (id, output, frame, scale) in wanted {
+        let mut each = Posed {
+            surface: id,
+            monitor: output.name(),
+            frame,
+            drawn: None,
+        };
+        // Facing away, or nothing of it drawn yet: listed with no capture,
+        // so the walk draws nothing of it rather than its flat rectangle.
+        let job = if frame.shows() {
+            crate::offscreen::scene_job(state, renderer, id, &output, scale)
+        } else {
+            None
+        };
+        let Some(job) = job else {
+            tracing::debug!(surface = ?id, shows = frame.shows(), "a posed scene has nothing to draw this pass");
+            ready.push(each);
+            continue;
+        };
+        let shape = Shape::of(&frame, None, scale);
+        match crate::offscreen::kept(state, &job) {
+            Some((texture, gl, _commit)) => {
+                let commit = state
+                    .scene_captures
+                    .warp_commit(id, &each.monitor, shape, false);
+                each.drawn = Some((texture, program, gl, commit));
+                ready.push(each);
+            }
+            None => jobs.push((job, Then::Scene(program, Box::new(each), shape))),
+        }
+    }
+    ready
+}
+
+/// The scale a posed scene is captured at: its monitor's, times how many
+/// times its own size its poses draw it (`group::Shift::grow`), so a wall
+/// posed at twice its scene's size is as sharp as a scene made at that size.
+/// Never below the monitor's, and never past four times the monitor's pixels
+/// in all, which is the most a full-screen scene posed at twice its size
+/// takes: a scene blown up further is drawn from that many pixels, magnified.
+/// `tests::a_posed_scene_is_captured_at_its_posed_size_within_four_monitors`.
+fn scene_capture_scale(
+    monitor_scale: f64,
+    grow: f64,
+    scene: Size<i32, Logical>,
+    monitor: Size<i32, Logical>,
+) -> f64 {
+    let pixels = |size: Size<i32, Logical>| f64::from(size.w.max(1)) * f64::from(size.h.max(1));
+    let most = (4.0 * pixels(monitor) / pixels(scene)).sqrt();
+    monitor_scale * grow.min(most).max(1.0)
+}
+
 /// Whether any monitor shows a pane, asked of the rectangle `elements` asks
 /// it of: `prepare`'s cull, which [`build_slots`] makes too. A minimized
 /// window put away is shown on none, so it is neither captured nor given a
@@ -2058,6 +2300,9 @@ enum Then {
         Option<crate::warp::Grid>,
         Option<crate::warp::Pixels>,
     ),
+    /// A posed scene's, its capture still to be placed in it: boxed, as it
+    /// holds a whole frame.
+    Scene(crate::warp::Program, Box<Posed>, Shape),
 }
 
 /// The commit `pane`'s `kind` of warp carries this pass, its own or its
@@ -3866,7 +4111,7 @@ fn t2_places(
 pub(crate) enum Measured {
     /// Where the walk draws a pane part away from its rest without a mesh,
     /// and the zoom its picture is drawn at: through a glide, a drag, an
-    /// open, a `sol.present` rectangle.
+    /// open, a `present` rectangle.
     Drawn(Rectangle<f64, Logical>, f64),
     /// Where it rests ([`part_rect`], from `pane_outer`), today's place: a
     /// part that is not a pane's, a pane drawn at rest, a warped pane's
@@ -5718,7 +5963,7 @@ pub(crate) fn elements(
     // bound is met even by a scene that does nothing.
     // `tests::the_lock_s_exit_is_drawn_over_the_session_and_under_the_pointer`.
     //
-    // The same over a peek (`sol.lock_peek`): the scene pulled down over the
+    // The same over a peek (`lock-peek`): the scene pulled down over the
     // desktop by the configuration's own gesture, while the session is
     // unlocked and its input the session's. Frames are asked for as the
     // scene animates and as the peek moves, not every frame, so a peek left
@@ -5967,9 +6212,15 @@ pub(crate) fn stacked_elements(
         }
         Stacked::Surface(id, area, alpha) => {
             if let Some(output) = output {
-                elements.extend(scripted(
-                    state, renderer, output, id, area, alpha, screen, now, raster,
-                ));
+                // Posed by a group: its capture through its frame, or
+                // nothing where it faces away or is behind the viewer, and
+                // never the flat rectangle it would be at rest.
+                match prepared.scene(id, &output.name()) {
+                    Some(posed) => elements.extend(posed.element(screen, scale)),
+                    None => elements.extend(scripted(
+                        state, renderer, output, id, area, alpha, screen, now, raster,
+                    )),
+                }
             }
         }
         Stacked::Panes(nodes) => panes(
@@ -6265,14 +6516,19 @@ fn push_warp(
             scale,
         )
     {
+        // Wholly behind the viewer: nothing of it, or of its popups, is in
+        // front to draw, and it is not drawn flat instead.
+        if pane_mesh.is_empty() {
+            return true;
+        }
         let (texture, program, id, commit) = (
             warped.texture.clone(),
             warped.program,
             warped.id.clone(),
             warped.commit,
         );
-        // The pane's own mesh first: it can fail (a vertex behind the
-        // viewer), and then nothing of the warp is pushed and the pane
+        // The pane's own mesh first: it can fail (a grid short of its
+        // points), and then nothing of the warp is pushed and the pane
         // falls through to the flat path below, as before. A popups' mesh
         // that fails alone drops the popups for that frame and keeps the
         // pane. Popups first, nearer the front:
@@ -6293,6 +6549,7 @@ fn push_warp(
                             over.part,
                             scale,
                         )
+                        && !mesh.is_empty()
                     {
                         elements.push(Element::Warped(
                             crate::warp::Warp::new(
@@ -7063,7 +7320,10 @@ fn wanted(
                 &output,
                 surface.area_on(&output, geometry, primary.as_ref())?,
             );
-            area.overlaps(screen)
+            // A scene a group poses is drawn wherever its pose puts it, which
+            // its rectangle does not say: kept, and its mesh says what of it
+            // this screen shows.
+            (state.surface_bends(id, &output) || area.overlaps(screen))
                 .then(|| Stacked::Surface(id, area, state.carried_alpha(id, &output)))
         })
         .collect()
@@ -7658,7 +7918,7 @@ fn flat_pane(
                 // taken off, so a client with client-side shadows (its window
                 // geometry has a non-zero offset) had its picture shifted away
                 // from its frame in every captured draw: warps, genies, close
-                // fades (`pane_job`), and tilted `sol.present` presentations.
+                // fades (`pane_job`), and tilted `present` presentations.
                 // The same `window_surface_origin` the flat path (`elements`)
                 // already used, so the two cannot drift apart again.
                 // `state::tests::window_surface_origin_matches_a_csd_clients_shadow_offset`.
@@ -9128,7 +9388,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "tint",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -9144,7 +9404,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "tint" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::effect::tree::Tree::from_lua(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)
@@ -9222,7 +9482,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "glow",
-            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"shape\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
@@ -9238,7 +9498,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "behind", effect = "glow" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::effect::tree::Tree::from_lua(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)
@@ -9510,7 +9770,7 @@ pub(crate) mod tests {
     /// The Rust genie's grid at progress 1 from `frame` toward `to`, global:
     /// what these tests build their grid with since a geometry is a folder
     /// (its Lua is held to this grid by
-    /// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`).
+    /// `warp::tests::a_genie_grid_lands_where_the_rust_genie_put_it`).
     fn genie_to(
         frame: &crate::present::Frame,
         to: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
@@ -9529,6 +9789,73 @@ pub(crate) mod tests {
 
     /// **A genie on the second monitor lands on its target**: at progress 1 the
     /// whole window is inside the target, moved onto the screen with it.
+    /// **A posed scene is captured at its posed size, within four
+    /// monitors**: a wall posed at twice its scene's size is captured at
+    /// twice its monitor's scale; a floor posed at 4.4 times a 720 by 900
+    /// scene on a 1600 by 900 monitor at the most four of that monitor's
+    /// pixels buy; and one posed smaller at the monitor's own scale.
+    #[test]
+    fn a_posed_scene_is_captured_at_its_posed_size_within_four_monitors() {
+        let monitor = smithay::utils::Size::from((1600, 900));
+        let wall = super::scene_capture_scale(1.0, 2.0, (1600, 650).into(), monitor);
+        assert!((wall - 2.0).abs() < 1e-9, "{wall}");
+        let floor = super::scene_capture_scale(1.0, 4.44, (720, 900).into(), monitor);
+        let most = (4.0_f64 * 1600.0 * 900.0 / (720.0 * 900.0)).sqrt();
+        assert!((floor - most).abs() < 1e-9, "{floor}");
+        let small = super::scene_capture_scale(1.5, 0.5, (400, 300).into(), monitor);
+        assert!((small - 1.5).abs() < 1e-9, "{small}");
+    }
+
+    /// **A posed scene is drawn through its frame and not at its
+    /// rectangle**: a scene laid flat below the eye, as a floor is, by a
+    /// pose, has its mesh where the pose puts it, its far edge narrower than
+    /// its near one and nothing of it nearer the viewer than the cut; moved
+    /// wholly behind the viewer, it has none, and nothing is drawn.
+    #[test]
+    fn a_posed_scene_is_drawn_through_its_frame_and_not_at_its_rectangle() {
+        use crate::group::{Pose, Shift};
+        let screen = smithay::utils::Rectangle::new((0, 0).into(), (1600, 900).into());
+        let area = smithay::utils::Rectangle::new((400, 0).into(), (800, 900).into());
+        let floor = |z: f64| {
+            Shift {
+                backface: true,
+                ..Shift::NONE.posed(Pose {
+                    // Laid flat about its middle, its top edge away from the
+                    // viewer, 300 below the eye, which is 800 in front of
+                    // the screen's middle.
+                    rotate: [90.0, 0.0, 0.0],
+                    origin: [800.0, 450.0, 0.0],
+                    translate: [0.0, 300.0, z],
+                    perspective: 800.0,
+                    ..Pose::NONE
+                })
+            }
+            .apply(crate::present::Frame::real(area))
+        };
+        let frame = floor(-400.0);
+        assert!(frame.shows(), "a floor below faces the eye above it");
+        let mesh = super::posed_mesh(screen, &frame, 1.0).expect("a floor in front");
+        let width = |v: f32| {
+            let xs: Vec<f32> = mesh
+                .vertices()
+                .iter()
+                .filter(|corner| (corner.v - v).abs() < 1e-6)
+                .map(|corner| corner.x)
+                .collect();
+            xs.iter().copied().fold(f32::MIN, f32::max)
+                - xs.iter().copied().fold(f32::MAX, f32::min)
+        };
+        // Its far edge (v = 0) is 850 into the screen and its near edge
+        // (v = 1) 50 out of it, both in front of the viewer.
+        assert!(width(0.0) < width(1.0), "{} {}", width(0.0), width(1.0));
+        assert!(width(0.0) < 800.0 && width(1.0) > 800.0);
+        assert!(
+            mesh.vertices().iter().all(|corner| corner.y > 450.0),
+            "every point of a floor is drawn below the eye"
+        );
+        assert!(super::posed_mesh(screen, &floor(3000.0), 1.0).is_none());
+    }
+
     #[test]
     fn a_genie_on_the_second_monitor_lands_on_its_target() {
         let screen = smithay::utils::Rectangle::new((1920, 0).into(), (1920, 1080).into());
@@ -12235,7 +12562,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "tint",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -12251,7 +12578,7 @@ pub(crate) mod tests {
             .load(r#"{ { match = "*", part = "client", slot = "replace", effect = "tint" } }"#)
             .eval()
             .expect("the test's Lua");
-        let tree = crate::effect::tree::Tree::from_lua(&value)
+        let tree = crate::effect::lua_doc::doc_of_plain(&value)
             .expect("readable")
             .expect("a value");
         let rule = crate::effect::rules::parse(&tree)

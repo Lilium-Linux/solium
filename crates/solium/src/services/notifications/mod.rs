@@ -1,13 +1,13 @@
 //! Notifications (03 §3.2.11): Solium as the session's notification server,
-//! and what it received, for scenes (`Notifications`) and for Lua
-//! (`sol.notifications`, `sol.on("notification")`, `sol.on("notifications")`).
+//! and what it received, for scenes (`Notifications`) and for the window manager
+//! (`notifications`, `notification`, `notifications`).
 //!
 //! * [`content`] makes what a sender sent safe to show;
 //! * [`model`] is the state machine: ids' lifetimes, banners, the history;
 //! * [`server`] is the bus, on threads of its own;
 //! * this module holds them together for the event loop: it starts the
 //!   server when the configuration asks and the session allows, takes what
-//!   the server heard, asks Lua what to do with each arrival, and tells the
+//!   the server heard, asks the window manager what to do with each arrival, and tells the
 //!   server what to say back. `crate::services::settle` drives it.
 
 pub(crate) mod content;
@@ -26,7 +26,7 @@ use crate::{json::Json, session::Place};
 use model::{Decision, Effect, Incoming, Item, Notifications, Shown, Urgency};
 use server::{Owner, Registry, Server, Signal};
 
-/// What the configuration says: `sol.notifications{ ... }`.
+/// What the configuration says: `notifications{ ... }`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Config {
     /// Own `org.freedesktop.Notifications`.
@@ -51,7 +51,7 @@ pub(crate) enum Origin {
     External,
     /// A scene's own direct call (`n.dismiss()`).
     Scene,
-    /// Lua (`sol.act`, `sol.notify`).
+    /// Lua (`act`, `notify`).
     Script,
     /// The service itself: a timeout, a full history.
     Service,
@@ -94,7 +94,7 @@ pub(crate) struct View {
     pub(crate) history: Vec<BTreeMap<&'static str, Json>>,
 }
 
-/// One event for `sol.on("notifications")`.
+/// One event for `notifications`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Event {
     pub(crate) what: &'static str,
@@ -168,17 +168,17 @@ pub(crate) struct Service {
     images: BTreeMap<u32, (u32, usize)>,
     view: Rc<View>,
     dirty: bool,
-    /// For `sol.on("notifications")`, in order, drained each settle.
+    /// For `notifications`, in order, drained each settle.
     pub(crate) events: Vec<Event>,
-    /// Lua functions behind the actions of `sol.notify`'s own notifications,
+    /// Lua functions behind the actions of `notify`'s own notifications,
     /// by id: the Lua-side token their table is kept under.
     pub(crate) own: BTreeMap<u32, u64>,
-    /// Own actions invoked, `(token, key)`, for `sol.notify`'s functions to
+    /// Own actions invoked, `(token, key)`, for `notify`'s functions to
     /// run; and the tokens of own notifications closed without one, for Lua
     /// to let go of. Both drained each settle.
     pub(crate) run_own: Vec<(u64, String)>,
     pub(crate) forget_own: Vec<u64>,
-    /// `sol.notify` calls waiting to arrive: taken each settle, never from
+    /// `notify` calls waiting to arrive: taken each settle, never from
     /// inside a hook, so a hook that posts one cannot recurse.
     pub(crate) pending_own: Vec<Own>,
 }
@@ -290,7 +290,7 @@ impl Service {
         self.start_or_stop();
     }
 
-    /// `sol.notifications{ ... }`, at load and on every reload.
+    /// `notifications{ ... }`, at load and on every reload.
     pub(crate) fn configure(&mut self, config: Config) {
         let effects = self.model.configure(config.settings.clone());
         self.config = config;
@@ -655,7 +655,7 @@ pub(crate) fn decision_from(table: &Json, fallback: Decision) -> Decision {
     }
 }
 
-/// `sol.notify{ ... }`: one of the shell's own, with no bus behind it.
+/// `notify{ ... }`: one of the shell's own, with no bus behind it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Own {
     pub(crate) summary: String,

@@ -88,6 +88,7 @@ pub(crate) fn all(renderer: &mut GlesRenderer) -> Result<()> {
     a_crossfade_mixes_two_results_in_one_draw(renderer)?;
     a_warp_drawn_through_a_folders_frag(renderer)?;
     a_chain_with_room_draws_what_exact_targets_draw(renderer)?;
+    the_genie_vert_lands_where_the_rust_genie_puts_it(renderer)?;
     Ok(())
 }
 
@@ -255,7 +256,7 @@ fn read_float(renderer: &mut GlesRenderer, fbo: u32) -> Result<[f32; 4]> {
 }
 
 /// A test effect folder of `crates/solium/tests/fixtures/effects/`, as its
-/// `effect.lua` binds at the params given: its inputs, its stages and its
+/// description binds at the params given: its inputs, its stages and its
 /// params, and its frags by file name.
 pub(crate) struct Fixture {
     inputs: &'static [&'static str],
@@ -340,7 +341,7 @@ pub(crate) fn shipped_blur(passes: u32, offset: f64) -> Fixture {
 }
 
 /// The shipped `shade/` with `params` (the glass style's are its defaults),
-/// as its `effect.lua` makes it (no Lua here): its one pass, its input the
+/// as its description makes it (no Lua here): its one pass, its input the
 /// part's shape alone. FX3's case 13j draws it.
 pub(crate) fn shipped_shade(params: Vec<(String, Value)>) -> Fixture {
     Fixture {
@@ -2158,5 +2159,109 @@ fn a_warp_drawn_through_a_folders_frag(renderer: &mut GlesRenderer) -> Result<()
         "  half of the plain warp's white, within 1; 255 with direction -1; a float, an int \
          and a vec4 param each set from its own slots"
     );
+    Ok(())
+}
+
+/// **Case 12s: the genie's `.vert` lands where the Rust genie puts it.** The
+/// shipped `genie/genie.vert`, compiled as the compositor compiles a mesh
+/// (`gl::Program::compile_mesh`, the mesh prelude from
+/// `solium_effects::mesh`) and run through `gl::Program::run_mesh`, whose
+/// points come back through transform feedback: every point within 0.01 px
+/// of `Deform::Genie`'s, on all four axes, at four spreads and six
+/// progresses, over the window and over a part reaching past it, as a
+/// window's shadow and menus do, with no framebuffer bound around it. The
+/// bound the folder is held to (the spec's S3), and the proof that what the
+/// GPU places is what the CPU reads.
+fn the_genie_vert_lands_where_the_rust_genie_puts_it(renderer: &mut GlesRenderer) -> Result<()> {
+    use solium_effects::{Axis, Deform, Rect};
+    println!("\n=== FX2: the genie's .vert lands where the Rust genie puts it ===");
+    let vert = include_str!("../../../crates/solium/effects/genie/genie.vert");
+    let sources =
+        solium_effects::mesh::assemble(&[("spread".to_owned(), ParamKind::Float)], vert);
+    // SAFETY: `with_context` makes the context current for the compile.
+    let program = renderer
+        .with_context(|context| unsafe { gl::Program::compile_mesh(context, sources.strings()) })
+        .map_err(|err| anyhow!("{err}"))?
+        .map_err(|log| anyhow!("genie.vert did not compile ({}): {}", log.stage, log.text))?;
+    // No framebuffer bound, as on a compile with nothing drawn yet, or in
+    // `solium --check`: a run draws into its own, or GL refuses the draw
+    // and the points come back as zeros.
+    // SAFETY: `with_context` makes the context current.
+    renderer
+        .with_context(|context| unsafe { context.BindFramebuffer(ffi::FRAMEBUFFER, 0) })
+        .map_err(|err| anyhow!("{err}"))?;
+    let from = Rect::new(320.0, 180.0, 800.0, 600.0);
+    let to = Rect::new(1400.0, 1040.0, 64.0, 32.0);
+    let rect = |r: Rect| [r.x as f32, r.y as f32, r.w as f32, r.h as f32];
+    let names = ["p_spread".to_owned()];
+    let (mut worst, mut points_read) = (0.0_f64, 0_usize);
+    for (name, axis) in Axis::all() {
+        let (cols, rows) = Deform::Genie {
+            progress: 0.0,
+            spread: 1.0,
+            axis,
+        }
+        .segments();
+        for spread in [0.0_f32, 0.7, 1.4, 3.0] {
+            for progress in [0.0_f32, 0.1, 0.37, 0.5, 0.83, 1.0] {
+                for part in [[0.0_f32, 0.0, 1.0, 1.0], [-0.1, -0.25, 1.2, 1.5]] {
+                    let uniforms = gl::MeshUniforms {
+                        from: rect(from),
+                        to: rect(to),
+                        monitor: [0.0, 0.0, 1920.0, 1080.0],
+                        part,
+                        grid: [cols as f32, rows as f32],
+                        progress,
+                        clamped: progress,
+                        direction: -1.0,
+                        seed: 0.0,
+                        scale: 1.0,
+                        axis: solium_effects::mesh::axis_index(axis),
+                    };
+                    // SAFETY: the program was made in this context.
+                    let placed = renderer
+                        .with_context(|context| unsafe {
+                            program.run_mesh(context, &uniforms, (&[spread], &names), (cols, rows))
+                        })
+                        .map_err(|err| anyhow!("{err}"))?
+                        .map_err(|err| anyhow!("genie.vert did not run: {err}"))?;
+                    let genie = Deform::Genie {
+                        progress,
+                        spread,
+                        axis,
+                    };
+                    let mut at = placed.chunks_exact(2);
+                    for r in 0..=rows {
+                        for c in 0..=cols {
+                            let u = f64::from(part[0])
+                                + f64::from(part[2] - part[0]) * (f64::from(c) / f64::from(cols));
+                            let v = f64::from(part[1])
+                                + f64::from(part[3] - part[1]) * (f64::from(r) / f64::from(rows));
+                            let (x, y) = genie.place(from, to, u, v);
+                            let Some([px, py]) = at.next().map(|pair| [pair[0], pair[1]]) else {
+                                return Err(anyhow!(
+                                    "{name}, spread {spread}, progress {progress}: {} points, too few",
+                                    placed.len() / 2
+                                ));
+                            };
+                            let off = (f64::from(px) - x).abs().max((f64::from(py) - y).abs());
+                            if !(off <= 0.01) {
+                                return Err(anyhow!(
+                                    "{name}, spread {spread}, progress {progress}, part {part:?}, point ({c}, {r}): the GPU put it at ({px}, {py}), the Rust genie at ({x}, {y})"
+                                ));
+                            }
+                            worst = worst.max(off);
+                            points_read += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // SAFETY: the program was made in this context.
+    renderer
+        .with_context(|context| unsafe { program.delete(context) })
+        .map_err(|err| anyhow!("{err}"))?;
+    println!("  {points_read} points, the furthest {worst:.5} px from the Rust genie's");
     Ok(())
 }

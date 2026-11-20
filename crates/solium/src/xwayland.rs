@@ -336,7 +336,7 @@ fn asks_maximized(window: &X11Surface) -> Option<&AtomicBool> {
 }
 
 /// `config.x11.hidden`, handed over by the shipped `init.lua`'s
-/// `sol.x11(config.x11)`: the `WM_CLASS` names [`asks_not_to_be_shown`] hides
+/// The `x11` section: the `WM_CLASS` names [`asks_not_to_be_shown`] hides
 /// outright, the same way a menu or a `Dialog` is handled generically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -359,7 +359,7 @@ impl Default for Settings {
 }
 
 /// Whether `hidden` names this window by its `WM_CLASS`: not tiled, not
-/// decorated, and left out of `sol.windows()` — hidden from the bar and the
+/// decorated, and left out of the `window` rows — hidden from the bar and the
 /// window list, the same treatment `places_itself` already gives a menu or a
 /// tooltip, for a different reason.
 ///
@@ -428,7 +428,7 @@ pub(crate) fn is_hidden(
 }
 
 /// The name a script is given for an X11 window's `_NET_WM_WINDOW_TYPE`, for
-/// `sol.windows()`'s `x11_type` — the raw material a window rule (#56) needs
+/// the `window` rows' `x11_type` — the raw material a window rule (#56) needs
 /// to act on a case this file's own policy does not cover, such as a `Dialog`
 /// or a `Utility` palette a layout wants to treat differently.
 ///
@@ -809,6 +809,19 @@ impl XwmHandler for Solium {
     /// wrong place and nothing in the log at all.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
         self.refresh_inhibitors();
+        // An X11 window's title and its class are properties too: told as
+        // an xdg window's are, to a window manager that listens.
+        if matches!(property, WmWindowProperty::Title | WmWindowProperty::Class) {
+            let element = self
+                .space
+                .elements()
+                .find(|element| element.x11_surface() == Some(&window))
+                .cloned();
+            if let Some(element) = element {
+                self.tell_renamed(&element);
+            }
+            return;
+        }
         // A third, since #115: `WM_NORMAL_HINTS` is where an X11 client says
         // how small and how large it can be, and it says so with a property
         // rather than a commit. Told to the layouts as an xdg client's commit
@@ -1013,7 +1026,7 @@ impl XwmHandler for Solium {
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
 
     /// An X11 client iconifying itself (`WM_CHANGE_STATE` to iconic), and
-    /// asking to be shown again: done as `sol.minimize` and `sol.unminimize`
+    /// asking to be shown again: done as `minimize` and `unminimize`
     /// do it (#30). The window is told through `_NET_WM_STATE_HIDDEN`
     /// (`state::minimize`'s `tell_minimized`), and never unmapped. No test
     /// can make an X11 window -- an `X11Surface` needs a live Xwayland, as

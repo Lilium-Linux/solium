@@ -1,9 +1,14 @@
 # Architecture
 
 Solium is a standalone Wayland compositor. Rust provides window state,
-protocols and rendering primitives; Lua provides policy; QML provides window
-frames and hosted desktop scenes. Effects are user-editable Lua and GLSL
-folders. A separate desktop environment is not required.
+protocols and rendering primitives; a window manager, which is a separate
+program, provides policy; QML provides window frames and hosted desktop
+scenes. Effects are user-editable folders of a TOML description and GLSL. A separate desktop
+environment is not required.
+
+The window manager Solium ships runs the Lua configuration. Another one, in
+any language, takes its place by being named in `wm.toml`:
+[Writing a window manager](window-managers.md).
 
 This page describes the current implementation. [Known limitations](gaps.md)
 covers incomplete behavior; the [roadmap](roadmap.md) covers future work.
@@ -14,20 +19,24 @@ A window's layout geometry and its presentation are separate. Overview,
 layout transitions and a genie transform all place a window's texture somewhere
 other than its layout rectangle and animate between the two.
 
-Lua composes these primitives into modes. **If a new mode needs new Rust, the
-transform layer is missing something:** extend the generic primitive rather
-than hardcoding the mode. Floating, tiling, scrolling and overview ship as Lua
-modules; their geometry calculations use the layout crate.
+The window manager composes these primitives into modes. **If a new mode
+needs new Rust, the transform layer is missing something:** extend the generic
+primitive rather than hardcoding the mode. Floating, tiling, scrolling and
+overview ship as Lua modules of the shipped window manager, and so does their
+geometry: the dwindle tree, the scrolling strip and the overview grid are
+`lua/layouts/`, configuration like the modes that use them.
 
 ## Layers
 
 | Layer | Responsibility | Main sources |
 |---|---|---|
-| Configuration | Bindings, modes, workspaces, shell policy | `crates/solium/lua/` |
+| Configuration | Bindings, modes, workspaces, shell policy | `crates/solium-lua/lua/` |
+| Window manager | Runs the configuration, in a process of its own | `crates/solium-lua/`, or the program `wm.toml` names |
+| Protocol | What the compositor and a window manager say to each other | `crates/wm-protocol/` |
 | Desktop UI | Frames, wallpaper, reusable QML types | `crates/solium/qml/` |
 | Effect definitions | Geometry and fragment effects | `crates/solium/effects/` |
-| Compositor | Protocols, state, input, script API, scene hosting, frame scheduling | `crates/solium/src/` |
-| Reusable calculations | Animation, layout, deformation and effect formats | `crates/animation/`, `crates/layout/`, `crates/effects/` |
+| Compositor | Protocols, state, input, the window manager's connection, scene hosting, frame scheduling | `crates/solium/src/` |
+| Reusable calculations | Animation, deformation and effect formats | `crates/animation/`, `crates/effects/` |
 | External probes | Protocol checks from a separate Wayland client, and window-manager checks from a separate X11 one | `crates/wl-probe/`, `crates/x11-probe/`, `dev/` |
 
 The animation, layout and effects crates keep calculations independent of the
@@ -60,19 +69,57 @@ Smithay's `Space` retains mapped-client stacking and damage bookkeeping.
 
 ## Configuration and scripting
 
-The shipped `lua/init.lua` loads configuration and modes.
-`~/.config/solium/user.lua` supplies overrides; `config.lua` documents defaults.
-Lua reads compositor snapshots and issues commands through `script.rs`.
-Commands request changes; subsequent state and events report the result.
+The compositor and the window manager are two processes, joined by one Unix
+socket. The compositor tells the window manager what changed on the desktop
+and what happened, in batches; the window manager answers each with commands.
+Commands request changes; subsequent state and events report the result. No
+state of the compositor's is ever borrowed by a window manager, so its idea of
+a window's geometry cannot drift from the compositor's, and a window manager
+that is slow, hangs or crashes never holds a frame: the compositor waits one
+frame for an answer, applies a late one when it comes, and starts a window
+manager that stopped again with the state it kept.
+
+The protocol is defined once, in WIT, in `crates/wm-protocol/wit/`. What is
+on the wire is protobuf. That crate's Rust types and their encoding are
+generated from the WIT, and so is `proto/solium_wm.proto`, which says the same
+in protobuf's own language for a window manager in any other; the
+[protocol reference](generated/reference/protocol.md) is the WIT's comments. In
+the compositor, `wm/` holds the connection (`link.rs`), who is waited for and
+for how long (`scripts.rs`), what a window manager is told (`events.rs`,
+`diff.rs`) and what `wm.toml` chose (`chosen.rs`); `script/` holds the
+commands and the settings sections as the compositor's own types. The
+compositor links no window manager's code and names none of its files: it
+starts the program `wm.toml` names, or `solium-lua`, with no arguments; a
+window manager finds its own configuration and says in `hello-answer` where it
+is. The compositor runs no Lua at all: `mlua` is a dependency of its tests
+alone, and the test `the_compositor_names_nothing_of_the_lua_window_manager`
+refuses it, the Lua API's names, the Lua window manager's files and its
+variables anywhere in the compositor's production source.
+
+The shipped window manager is `solium-lua` (`crates/solium-lua/`): the `sol`
+API, the Lua runtime, and its configuration in `crates/solium-lua/lua/`. Its
+`init.lua` loads configuration and modes; `~/.config/solium/user.lua`
+supplies overrides; `config.lua` sends every setting of the compositor's with
+its default and documentation. Both programs find their shipped files the same
+way (`crates/paths`): a packager's `SOLIUM_DATADIR`, the build tree, then
+`share/solium` beside the binary.
 
 Presentation commands work on stable window IDs and selections. Arrangements
-come from `crates/layout`; Lua decides when to apply them. Configuration reload
+are configuration too: the dwindle tree, the scrolling strip and the overview
+grid are Lua in `lua/layouts/`, and the modes decide when to apply them. No
+arrangement is written in Rust, in the compositor or in the window manager's
+runtime. What the compositor gives an arrangement is generic and runs every
+frame without asking the window manager: a tree of boxes it solves into
+rectangles with each application's own least and largest size, and whose
+seams it moves while an edge is dragged (`arrange`, solved by
+`crates/wm-protocol/src/space.rs`). A dwindle tree is told to it as nested
+two-way splits. Configuration reload
 keeps existing layout state where supported, and a failed load keeps the
 previous configuration. `solium --check` validates loading and declared QML
 scenes without starting a session.
 
-The [configuration guide](ricing.md) covers usage. The API's source reference
-is [meta/sol.lua](../crates/solium/lua/meta/sol.lua).
+The [configuration guide](ricing.md) covers usage. The Lua API's source
+reference is [meta/sol.lua](../crates/solium-lua/lua/meta/sol.lua).
 
 ## Presentation, animation and input
 
@@ -116,8 +163,9 @@ separate captures so they can extend beyond the window while following its
 transform. `render.rs`, `clip.rs`, `warp/`, `capture.rs` and `pool.rs` contain
 these paths.
 
-User effects load from folders in two phases: Lua definitions at configuration
-load, then GL programs when a render context is available. Shipped effects
+User effects load from folders in two phases: their `effect.toml`
+descriptions at configuration load, then GL programs when a render context is
+available, a geometry's `.vert` among them, run on the GPU. Shipped effects
 include blur, glass, shade and genie. Backdrop effects and capture-based effects
 have different costs; [the effects reference](../crates/solium/effects/README.md)
 documents the stages, sources, caching, budgets and fallback behavior.
@@ -205,7 +253,7 @@ in [session integration](shell-boundary.md#how-the-rest-of-the-desktop-starts).
   updated copies of a scene's geometry.
 - **Commands are not state.** A request is followed by the resulting state/event.
 - **Generic primitives, editable policy.** Modes belong in Lua, window frames
-  in QML and effects in Lua/GLSL. Rust supplies the mechanism.
+  in QML and effects in TOML and GLSL. Rust supplies the mechanism.
 - **A protocol has one concern.** A difficult interface name often signals
   unrelated responsibilities.
 - **Window-coupled UI is hosted.** Decorations share the compositor's state and

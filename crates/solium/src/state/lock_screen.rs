@@ -88,7 +88,7 @@ impl Solium {
             .sync(&outputs, native || exiting || peeking);
     }
 
-    /// `sol.lock_peek`: pull Solium's own lock scenes `progress` of the way
+    /// `lock-peek`: pull Solium's own lock scenes `progress` of the way
     /// down over the unlocked desktop (0 to 1), or, with `None`, let them go
     /// back up. A picture and nothing more: nothing is locked, `LockedHint`
     /// is left alone, input stays the session's and no field takes keys,
@@ -97,7 +97,7 @@ impl Solium {
     /// Nothing while the session is locked, by Solium or a client, or while
     /// `lock.native` is off. A peek takes over from an exit still playing,
     /// from where its scenes are; ended, it goes back up through the exit,
-    /// for `lock.exit_ms` at most. `sol.lock_now()` during it takes the lock
+    /// for `lock.exit_ms` at most. `lock-now` during it takes the lock
     /// from it (`take_lock`). `lock_scene.rs`, "The peek".
     /// `real_client::lock_focus::native::peek`,
     /// `lock_auth::tests::lock_state_and_progress_follow_sol_lock_peek`.
@@ -113,7 +113,7 @@ impl Solium {
                     return;
                 }
                 if !progress.is_finite() {
-                    tracing::warn!("sol.lock_peek takes a number from 0 to 1; ignoring {progress}");
+                    tracing::warn!("lock-peek takes a number from 0 to 1; ignoring {progress}");
                     return;
                 }
                 let begins = self.lock_scenes.peeking().is_none();

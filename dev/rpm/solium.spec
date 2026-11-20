@@ -58,6 +58,7 @@ Source0:        solium-%{version}.tar.gz
 %if %{with prebuilt}
 Source1:        solium
 Source2:        solium-auth
+Source4:        solium-lua
 %endif
 %if %{with vendored}
 # Every crate Cargo.lock names, from `cargo vendor`, with the configuration
@@ -146,13 +147,14 @@ cat vendor-config.toml >> .cargo/config.toml
 %if %{with prebuilt}
 install -Dm755 %{SOURCE1} target/install/release/solium
 install -Dm755 %{SOURCE2} target/install/release/solium-auth
+install -Dm755 %{SOURCE4} target/install/release/solium-lua
 %endif
 
 %build
 %if %{without prebuilt}
 export SOLIUM_DATADIR=%{_datadir}/solium
 export CARGO_TARGET_DIR=target/install
-cargo build --locked %{?with_vendored:--offline} --release -p solium -p solium-auth
+cargo build --locked %{?with_vendored:--offline} --release -p solium -p solium-auth -p solium-lua
 %endif
 
 %install
@@ -174,6 +176,7 @@ XDG_CONFIG_HOME="$PWD/check-config" target/install/release/solium --check
 %{_bindir}/solium
 %{_bindir}/solium-session
 %{_libexecdir}/solium-auth
+%{_libexecdir}/solium-lua
 %config(noreplace) %{_sysconfdir}/pam.d/solium
 %{_datadir}/solium/
 %{_datadir}/wayland-sessions/solium.desktop

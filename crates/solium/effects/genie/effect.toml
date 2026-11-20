@@ -1,0 +1,14 @@
+# The genie: the window pulled into its target like a sheet through a
+# letterbox, the edge nearest the target first. A geometry effect: its
+# `genie.vert` places every point of its grid, and the window's pixels are
+# drawn across them as they are.
+api = 2
+duration = 520
+easing = "inOutCubic"
+# 48 steps along the way the window is pulled, 8 across: the grid turns
+# with the axis.
+grid = { along = 48, across = 8 }
+mesh = "genie.vert"
+
+[params]
+spread = { default = 1.4, min = 0 }   # how much of the window moves at once; 0 pulls it in rigidly

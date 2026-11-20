@@ -58,14 +58,14 @@
 //!
 //! **The peek.** While the session is unlocked, the configuration can pull
 //! the lock's scenes down over the desktop with a finger, as an iPhone's lock
-//! follows the finger pulled down from the top: `sol.lock_peek(progress)`
+//! follows the finger pulled down from the top: `lock-peek(progress)`
 //! makes them live and draws them over the desktop, reading `Lock.state` as
 //! `"peeking"` and `Lock.progress` as how far down, from 0 to 1. It is a
 //! picture and nothing more: nothing is locked, input stays the session's
 //! (the configuration's own gesture holds the finger), and the scenes read
-//! the redacted models they always do. `sol.lock_peek(false)` ends it with
+//! the redacted models they always do. `lock-peek(false)` ends it with
 //! the exit, reading `"unlocking"` for `lock.exit_ms` at most, and
-//! `sol.lock_now()` takes the lock from it, its entry going on from the
+//! `lock-now` takes the lock from it, its entry going on from the
 //! peek's progress for what is left of `lock.enter_ms`. Only scenes that are
 //! not the fallback are drawn in a peek, as in an entry: the fallback does
 //! not move, and would cover the desktop at the finger's first pixel
@@ -139,7 +139,7 @@ fn fallback_path() -> PathBuf {
     crate::assets::root().join("qml/lock/Fallback.qml")
 }
 
-/// `lock.*` for what Solium's own lock shows. Handed over by `sol.lock`,
+/// `lock.*` for what Solium's own lock shows. Handed over by `lock`,
 /// beside the password settings `lock_auth.rs` reads and the locker settings
 /// `logind.rs` reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,7 +203,7 @@ impl PromptOn {
 /// Where the lock scene `name` is: a path, absolute or `~/`, as given; or a
 /// name, with `.qml` added when it has none, looked for in `user` (the
 /// user's `qml/lock/`) and then in `shipped` (Solium's), the way a pane style
-/// or a `sol.surface` scene is. `None` for a name in neither.
+/// or a `surface` scene is. `None` for a name in neither.
 /// `tests::a_bare_name_is_looked_for_in_the_users_directory_first`.
 pub(crate) fn find_scene(name: &str, user: Option<&Path>, shipped: &Path) -> Option<PathBuf> {
     if name.is_empty() {
@@ -304,7 +304,7 @@ pub(crate) struct LockScenes {
     /// fallback, which a peek never draws, is not drawn through it either.
     exit_after_peek: bool,
     /// The peek under way: how far down the configuration has pulled the
-    /// scenes over the unlocked desktop, from 0 to 1 (`sol.lock_peek`).
+    /// scenes over the unlocked desktop, from 0 to 1 (`lock-peek`).
     peek: Option<f64>,
     /// Where the pointer is, as the scenes have been told it.
     pub(crate) pointer: LockPointer,

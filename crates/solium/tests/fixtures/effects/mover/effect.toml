@@ -1,0 +1,6 @@
+# A genie-shaped geometry that moves the window at rest: every x one pixel
+# to the right, at any progress, so it is refused once it compiled.
+# `effect::host::tests::a_geometry_that_moves_the_window_at_rest_is_a_problem_at_its_vert`.
+api = 2
+grid = { along = 4, across = 2 }
+mesh = "mover.vert"

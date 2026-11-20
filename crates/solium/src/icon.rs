@@ -9,7 +9,7 @@
 //! SVG icon, and falls through to the fallback icon the same as a theme with
 //! no PNGs at all. There is no LRU cache yet (03 §3.2.14 asks for one): every
 //! request re-walks the theme chain, which is a handful of `stat` calls, not
-//! worth a cache until a profile says otherwise. `sol.icons{ theme = ... }`
+//! worth a cache until a profile says otherwise. `icons{ theme = ... }`
 //! is not wired either; the theme is always the default chain the design
 //! notes name -- GTK's `settings.ini`, then Adwaita, then hicolor -- so
 //! overriding it is the natural next P1. An absolute `Icon=` path (AppImages,

@@ -1,0 +1,12 @@
+[package]
+name = "solium-paths"
+description = "Where Solium's programs find what they ship and what the user wrote: one answer for the compositor and the shipped window manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
