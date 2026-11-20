@@ -28,7 +28,7 @@ file is out of date.
 | `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `wm/` is the connection to the window manager, and `script/` its commands and settings as the compositor's own types; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
 | `crates/solium/src/river/`, `crates/solium/protocols/` | River's window management protocol as a second way in for a window manager: the interface files, the server code generated from them, and the bridge that speaks Solium's protocol for a window manager written for river |
 | `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
-| `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
+| `crates/solium/effects/` | The shipped effects, each a folder of an `effect.toml` and GLSL (`.frag`, and a geometry's `.vert`): `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
 | `crates/animation/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the effect format, and where a program of Solium's finds its shipped files and the user's |
 | `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); the arithmetic of a tree of boxes (`src/space.rs`), which the compositor solves an `arrange` with and a window manager in Rust may call; a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
@@ -107,7 +107,7 @@ Most review findings are one of these.
 - **A feature is configuration.** Rust and C++ provide protocols, data (the
   window manager protocol, QML models and properties, events) and generic
   primitives. What a user sees, such as a bar, an indicator, a frame or an
-  effect, is shipped Lua, QML or GLSL that a user can copy and change. A
+  effect, is shipped Lua, QML, TOML or GLSL that a user can copy and change. A
   search for the feature's name in `crates/solium/src` should find nothing.
 - **The window manager is another process.** The compositor runs none of its
   code and links none: what the two say to each other is the protocol in
@@ -121,8 +121,9 @@ Most review findings are one of these.
 - **Window frames are QML, always.** Never drawn in Rust, not even as a fast
   path for the default style.
 - **Effects are files.** Blur, glass and genie are folders in
-  `crates/solium/effects/`, written against the public API. The engine gets
-  generic primitives, never a built-in effect.
+  `crates/solium/effects/`, written against the public API: an
+  `effect.toml` and shaders, no code the compositor runs on the CPU. The
+  engine gets generic primitives, never a built-in effect.
 - **Every number is a setting.** A threshold, a timeout or a cap gets a key in
   `config.lua`, with a default, its documentation, and a test that changing it
   changes the behaviour.

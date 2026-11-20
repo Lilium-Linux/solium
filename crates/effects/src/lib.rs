@@ -48,6 +48,7 @@ pub mod expr;
 pub mod ffi;
 pub mod fragment;
 pub mod glsl;
+pub mod mesh;
 pub mod spec;
 pub mod stage;
 

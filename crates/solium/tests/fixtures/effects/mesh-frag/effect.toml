@@ -1,0 +1,8 @@
+# A geometry with a frag beside its mesh: the mesh draws the window where it
+# is, and the frag makes its version wait for the next compile.
+# `state::tests::real_client::a_geometry_with_a_frag_presents_before_it_compiled`.
+api = 2
+inputs = ["self"]
+frag = "effect.frag"
+grid = [1, 1]
+mesh = "flat.vert"

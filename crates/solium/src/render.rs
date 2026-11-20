@@ -357,7 +357,7 @@ fn posed_mesh(
 /// and commit its element carries, the part of the pane's unit square the
 /// capture covers, and the grid a geometry effect placed over that part this
 /// pass (`None`: the part where it is, as a tilt draws it).
-/// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+/// `warp::tests::a_genie_grid_lands_where_the_rust_genie_put_it`.
 #[derive(Clone, Debug)]
 pub(crate) struct Warped {
     /// Its pane, which a window still loading is too
@@ -765,16 +765,27 @@ pub(crate) enum Planned {
     },
 }
 
+/// What runs a geometry's mesh program: the GPU in a pass
+/// (`effect::GlCompiler`), a test's compiler in the tests.
+pub(crate) trait Mesher:
+    crate::effect::host::Compiler<Program = crate::effect::gl::Program>
+{
+}
+
+impl<C: crate::effect::host::Compiler<Program = crate::effect::gl::Program>> Mesher for C {}
+
 /// [`warp_of`], and a present geometry's grid built once a pass: refused,
 /// the window follows its `failed` (undeformed, as an unresolved anchor is,
 /// still tilted if it is; or nothing of it), and with its folder reloaded
 /// under `on_reload = "flat"` it is undeformed. The grid is over the
-/// pane's [`warp_part`], its layers' bleed and all. Asked with no renderer.
+/// pane's [`warp_part`], its layers' bleed and all, its points run on the
+/// GPU by `mesher`.
 /// `tests::a_refused_present_follows_its_failed_policy`,
 /// `state::tests::real_client::a_present_deform_is_a_file`,
 /// `state::tests::real_client::effects_present_is_the_default_a_deform_overrides`.
 pub(crate) fn plan_warp(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     outer: Rectangle<i32, Logical>,
     scale: f64,
@@ -793,7 +804,15 @@ pub(crate) fn plan_warp(
     // Over the pane grown by its layers' bleed, the part its capture holds
     // (#312), as its popups' grid is over theirs.
     let part = warp_part(state, pane);
-    let gridded = present_grid(state, pane, &frame, aimed, (WarpPiece::Pane, part), scale);
+    let gridded = present_grid(
+        state,
+        mesher,
+        pane,
+        &frame,
+        aimed,
+        (WarpPiece::Pane, part),
+        scale,
+    );
     let route = match gridded {
         Gridded::Grid(grid) => {
             return Planned::Warp {
@@ -840,13 +859,14 @@ enum Gridded {
 /// folder with; a release build has neither the branch nor the oracle.
 fn present_grid(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     frame: &present::Frame,
     aimed: present::Aimed,
     (piece, part): (WarpPiece, crate::warp::UnitRect),
     scale: f64,
 ) -> Gridded {
-    use crate::effect::geometry::{Ask, MeshKey, mesh, turned, unpacked};
+    use crate::effect::geometry::{Ask, MeshKey, run, turned, unpacked};
     let geometry = aimed.effect;
     if geometry.effect == crate::effect::host::EffectId::NONE {
         return Gridded::Refused;
@@ -920,6 +940,12 @@ fn present_grid(
         params: &[],
     };
     let key = MeshKey::new(geometry.effect, geometry.params, &ask, cols, rows);
+    // Its `.vert`, compiled: a version runs only once it has.
+    let program = loaded
+        .mesh
+        .as_ref()
+        .and_then(|mesh| state.effects.program(mesh.key))
+        .cloned();
     let Some(held) = state.panes.get_mut(pane) else {
         return Gridded::Undeformed;
     };
@@ -931,15 +957,12 @@ fn present_grid(
                 params: &params,
                 ..ask
             };
-            // Only an `effect.lua` has a mesh; a description that reached
-            // here is refused rather than drawn flat.
-            let Some(sandbox) = loaded.sandbox() else {
+            let Some(program) = program.as_ref() else {
                 return Err(crate::effect::geometry::Refusal::Error {
-                    line: None,
-                    message: "it has no mesh".to_owned(),
+                    message: "its mesh has no program".to_owned(),
                 });
             };
-            mesh(sandbox, &ask, cols, rows).map(|points| crate::warp::Grid {
+            run(mesher, program, &ask, cols, rows).map(|points| crate::warp::Grid {
                 cols,
                 rows,
                 part,
@@ -975,13 +998,22 @@ fn present_grid(
 /// `state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`.
 pub(crate) fn over_grid(
     state: &mut Solium,
+    mesher: &mut impl Mesher,
     pane: crate::pane::PaneId,
     frame: &present::Frame,
     aimed: present::Aimed,
     part: crate::warp::UnitRect,
     scale: f64,
 ) -> Option<Option<crate::warp::Grid>> {
-    match present_grid(state, pane, frame, aimed, (WarpPiece::Over, part), scale) {
+    match present_grid(
+        state,
+        mesher,
+        pane,
+        frame,
+        aimed,
+        (WarpPiece::Over, part),
+        scale,
+    ) {
         Gridded::Grid(grid) => Some(Some(grid)),
         Gridded::Undeformed => Some(None),
         Gridded::Refused => match present_route(aimed.effect, true) {
@@ -1133,7 +1165,7 @@ pub(crate) fn captured(
 /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
 /// `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`,
 /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
-pub(crate) fn plan_warps(state: &mut Solium, now: std::time::Duration) {
+pub(crate) fn plan_warps(state: &mut Solium, mesher: &mut impl Mesher, now: std::time::Duration) {
     let mut planned = std::collections::HashMap::new();
     for (pane, window) in state.on_screen() {
         let Some((_, outer)) = captured(state, pane, window.as_ref()) else {
@@ -1143,7 +1175,7 @@ pub(crate) fn plan_warps(state: &mut Solium, now: std::time::Duration) {
             continue;
         }
         let scale = state.scale_of(outer);
-        planned.insert(pane, plan_warp(state, pane, outer, scale, now));
+        planned.insert(pane, plan_warp(state, mesher, pane, outer, scale, now));
     }
     state.presented = Presented {
         planned,
@@ -1500,7 +1532,11 @@ impl Phases for Gpu<'_> {
         // pass (Ruling F31, amended 2026-10-14). With no effects it is the
         // plan `warps` made before, made earlier.
         // `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`.
-        plan_warps(state, self.instant);
+        plan_warps(
+            state,
+            &mut crate::effect::GlCompiler(self.renderer),
+            self.instant,
+        );
         // Every rule resolved once, after the effects compiled and before any
         // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
         // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).
@@ -1846,7 +1882,14 @@ impl Phases for Gpu<'_> {
             let now = pass_now(state);
             let planned = match state.presented.take(pane) {
                 Some(planned) => planned,
-                None => plan_warp(state, pane, outer, scale, now),
+                None => plan_warp(
+                    state,
+                    &mut crate::effect::GlCompiler(renderer),
+                    pane,
+                    outer,
+                    scale,
+                    now,
+                ),
             };
             let (warp, grid) = match planned {
                 Planned::Hidden => {
@@ -1951,17 +1994,20 @@ impl Phases for Gpu<'_> {
                 };
                 let over = match (over, aimed) {
                     (Some((job, part)), Some(aimed)) => {
-                        over_grid(state, pane, &frame, aimed, part, scale).map(|grid| {
-                            // Their capture whole is their subject.
-                            let pixels = present_pixels(
-                                state,
-                                pane,
-                                aimed.effect,
-                                (part, [0.0, 0.0, 1.0, 1.0]),
-                                whole_size(job.size, fraction),
-                            );
-                            (job, part, grid, pixels)
-                        })
+                        let mut mesher = crate::effect::GlCompiler(renderer);
+                        over_grid(state, &mut mesher, pane, &frame, aimed, part, scale).map(
+                            |grid| {
+                                // Their capture whole is their subject.
+                                let pixels = present_pixels(
+                                    state,
+                                    pane,
+                                    aimed.effect,
+                                    (part, [0.0, 0.0, 1.0, 1.0]),
+                                    whole_size(job.size, fraction),
+                                );
+                                (job, part, grid, pixels)
+                            },
+                        )
                     }
                     (over, _) => over.map(|(job, part)| (job, part, None, None)),
                 };
@@ -9342,7 +9388,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "tint",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -9436,7 +9482,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "glow",
-            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"shape\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
@@ -9724,7 +9770,7 @@ pub(crate) mod tests {
     /// The Rust genie's grid at progress 1 from `frame` toward `to`, global:
     /// what these tests build their grid with since a geometry is a folder
     /// (its Lua is held to this grid by
-    /// `warp::tests::a_lua_grid_lands_where_the_rust_genie_put_it`).
+    /// `warp::tests::a_genie_grid_lands_where_the_rust_genie_put_it`).
     fn genie_to(
         frame: &crate::present::Frame,
         to: smithay::utils::Rectangle<f64, smithay::utils::Logical>,
@@ -12516,7 +12562,7 @@ pub(crate) mod tests {
         crate::effect::host::tests::folder(
             &place,
             "tint",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",

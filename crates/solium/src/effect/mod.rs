@@ -1,15 +1,12 @@
 #![expect(unsafe_code, reason = "the calls into effect::gl")]
-#![expect(
-    clippy::disallowed_types,
-    reason = "an effect's Lua runs here, in its sandbox, and nowhere else in the compositor: \
-              `clippy.toml` denies it everywhere but this module"
-)]
 
-//! Effects as user folders: the host, the sandbox, the programs, the
+//! Effects as user folders: the host, the descriptions, the programs, the
 //! executor, the rules and the transitions. \[16\] §2; the spec §6.
 //!
 //! Singular, apart from the `solium_effects` crate, which holds what is data
-//! and text; this module holds Lua, GL and everything per frame (Ruling 2).
+//! and text; this module holds GL and everything per frame (Ruling 2). No
+//! effect runs code of its own on the CPU: an effect is data
+//! (`effect.toml`) and shaders.
 
 pub(crate) mod beneath;
 pub(crate) mod crossfade;
@@ -30,11 +27,9 @@ pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod rules;
 pub(crate) mod run;
-pub(crate) mod sandbox;
 pub(crate) mod settings;
 pub(crate) mod store;
 pub(crate) use param::param_value;
-pub(crate) mod watch;
 pub(crate) mod xray;
 
 /// So `super::pool` resolves the same in `effect/run.rs` here and in
@@ -80,6 +75,35 @@ impl host::Compiler for GlCompiler<'_> {
             }
             None => Ok(program),
         }
+    }
+
+    fn compile_mesh(
+        &mut self,
+        sources: &solium_effects::glsl::Sources,
+    ) -> Result<gl::Program, String> {
+        // SAFETY: `with_context` makes the renderer's context current.
+        let compiled = self.0.with_context(|context| unsafe {
+            gl::Program::compile_mesh(context, sources.strings())
+        });
+        match compiled {
+            Err(err) => Err(format!("{err}")),
+            Ok(Err(log)) => Err(log.text),
+            Ok(Ok(program)) => Ok(program),
+        }
+    }
+
+    fn run_mesh(
+        &mut self,
+        program: &gl::Program,
+        uniforms: &gl::MeshUniforms,
+        params: (&[f32], &[String]),
+        grid: (u32, u32),
+    ) -> Result<Vec<f32>, String> {
+        // SAFETY: `with_context` makes the renderer's context current, the
+        // one the program was made in.
+        self.0
+            .with_context(|context| unsafe { program.run_mesh(context, uniforms, params, grid) })
+            .map_err(|err| format!("{err}"))?
     }
 
     fn delete(&mut self, program: gl::Program) {

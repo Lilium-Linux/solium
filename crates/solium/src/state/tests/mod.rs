@@ -82,7 +82,7 @@ fn a_reload_reads_the_effect_folders_again() {
     let dir = crate::effect::host::tests::folder(
         &effects,
         "a",
-        "return { api = 1, frag = 'effect.frag' }",
+        "api = 2\nfrag = \"effect.frag\"\n",
         &[("effect.frag", frag)],
     );
     let display = smithay::reexports::wayland_server::Display::<Solium>::new()
@@ -125,33 +125,22 @@ fn apply_effects_lua(state: &mut Solium, lua: &str) {
     state.apply_effects_set(rules, settings);
 }
 
-/// **`effects.sandbox` reaches the host**: the caps one `sol.effects` gives
-/// are what every effect's Lua is made with, and what it gives is kept.
+/// **`effects.limits` reaches the settings** the engine reads, and the
+/// next `sol.effects` without it puts the default back.
 #[test]
-fn effects_sandbox_reaches_the_host() {
+fn effects_limits_reach_the_settings() {
     let display = smithay::reexports::wayland_server::Display::<Solium>::new()
         .expect("creating a test wayland display");
     let mut state = Solium::new(display.handle());
-    apply_effects_lua(
-        &mut state,
-        "{ sandbox = { load_ms = 300, memory_mib = 32 }, limits = { params = 12 } }",
-    );
-    let caps = crate::effect::settings::Caps {
-        load: std::time::Duration::from_millis(300),
-        memory: 32 << 20,
-    };
-    assert_eq!(state.effects.caps(), caps);
+    apply_effects_lua(&mut state, "{ limits = { params = 12 } }");
     assert_eq!(state.effect_settings.limits.params, 12);
     apply_effects_lua(&mut state, "{}");
-    assert_eq!(
-        state.effects.caps(),
-        crate::effect::settings::Caps::default()
-    );
+    assert_eq!(state.effect_settings.limits.params, 8);
 }
 
 /// **A refused setting keeps everything as it was**: a key out of its bounds
-/// is a problem under `settings`, and neither the caps nor the rules of the
-/// same `sol.effects` are taken; a set that parses clears it.
+/// is a problem under `settings`, and neither the settings nor the rules of
+/// the same `sol.effects` are taken; a set that parses clears it.
 #[test]
 fn a_refused_effects_setting_keeps_everything_as_it_was() {
     let place = crate::effect::host::tests::scratch("state-refused-setting");
@@ -160,16 +149,13 @@ fn a_refused_effects_setting_keeps_everything_as_it_was() {
     let rule = "{ { match = '*', part = 'client', slot = 'behind', effect = 'tint' } }";
     apply_effects_lua(
         &mut state,
-        &format!("{{ rules = {rule}, sandbox = {{ load_ms = 1 }} }}"),
+        &format!("{{ rules = {rule}, limits = {{ params = 65 }} }}"),
     );
     assert!(
         state.rules.is_empty(),
         "the rules of a refused set were taken"
     );
-    assert_eq!(
-        state.effects.caps(),
-        crate::effect::settings::Caps::default()
-    );
+    assert_eq!(state.effect_settings.limits.params, 8);
     let said = |state: &Solium| {
         state
             .effects
@@ -182,7 +168,7 @@ fn a_refused_effects_setting_keeps_everything_as_it_was() {
     assert!(
         said(&state)
             .iter()
-            .any(|message| message.contains("effects.sandbox.load_ms")),
+            .any(|message| message.contains("effects.limits.params")),
         "{:?}",
         state.effects.problems()
     );
@@ -211,7 +197,7 @@ fn a_reload_drops_a_refused_settings_problem() {
             .filter(|problem| problem.effect == "settings")
             .count()
     };
-    apply_effects_lua(&mut state, "{ sandbox = { load_ms = 1 } }");
+    apply_effects_lua(&mut state, "{ limits = { params = 0 } }");
     assert_eq!(settings(&state), 1, "the premise: the set was refused");
     state.reload_from(&entry);
     let _ = std::fs::remove_dir_all(directory);
@@ -359,7 +345,7 @@ fn a_refused_set_with_broken_rules_says_both() {
     let mut state = Solium::new(display.handle());
     apply_effects_lua(
         &mut state,
-        "{ rules = { { match = '*', part = 'regoin:titlebar', slot = 'behind', effect = false } }, sandbox = { load_ms = 1 } }",
+        "{ rules = { { match = '*', part = 'regoin:titlebar', slot = 'behind', effect = false } }, limits = { params = 0 } }",
     );
     let said = |effect: &str| {
         state
@@ -656,8 +642,7 @@ fn state_with_effects_in(place: &std::path::Path) -> (TestDisplay, Solium) {
     (display, state)
 }
 
-const TINT: &str =
-    "return { api = 1, inputs = { 'self' }, params = { amount = { 0.1 } }, frag = 'effect.frag' }";
+const TINT: &str = "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n[params]\namount = 0.1\n";
 const TINT_FRAG: &str = "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * p_amount; }\n";
 
 /// The user's newest bound plan's first step, as a test reads it.
@@ -988,7 +973,7 @@ fn a_rule_whose_effect_is_broken_is_named_at_the_frags_line_until_mended() {
     crate::effect::host::tests::folder(
         &place,
         "typo",
-        "return { api = 1, inputs = { 'self' }, params = { offset = { 1 } }, frag = 'down.frag' }",
+        "api = 2\ninputs = [\"self\"]\nfrag = \"down.frag\"\n[params]\noffset = 1\n",
         &[(
             "down.frag",
             "vec4 sol_effect(vec2 uv) {\n    return sol_tex(uv) * p_ofset;\n}\n",
@@ -1031,7 +1016,7 @@ fn a_blur_rule_binds_from_xray_or_live() {
     crate::effect::host::tests::folder(
         &place,
         "soft",
-        "return { api = 1, inputs = { 'backdrop' }, frag = 'effect.frag' }",
+        "api = 2\ninputs = [\"backdrop\"]\nfrag = \"effect.frag\"\n",
         &[(
             "effect.frag",
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1061,8 +1046,7 @@ fn the_formats_probe_rebinds_the_rules_after_the_frame() {
     crate::effect::host::tests::folder(
         &place,
         "fine",
-        "return { api = 1, inputs = { 'self' }, params = { field = { 1, int = true } }, fallback = { { field = 0 } },
-        stages = function(p) if p.field == 1 then return { { 'pass', 'a.frag', format = 'rgba16f' } } end return { { 'pass', 'a.frag' } } end }",
+        "api = 2\ninputs = [\"self\"]\nfallback = [{ field = 0 }]\n[params]\nfield = { default = 1, int = true }\n[[stages]]\npass = \"a.frag\"\nformat = \"rgba16f\"\nwhen = \"field == 1\"\n[[stages]]\npass = \"a.frag\"\nwhen = \"field ~= 1\"\n",
         &[("a.frag", frag)],
     );
     let (_display, mut state) = state_with_effects_in(&place);
@@ -1088,36 +1072,6 @@ fn the_formats_probe_rebinds_the_rules_after_the_frame() {
     let _ = std::fs::remove_dir_all(place);
 }
 
-/// **`settle` rebuilds an effect its budget stopped, after the frame**
-/// (Ruling 4), so the next pane's `mesh` call runs on a fresh state.
-#[test]
-fn settle_rebuilds_an_effect_its_budget_stopped() {
-    let place = crate::effect::host::tests::scratch("state-revive");
-    crate::effect::host::tests::folder(&place, "spin", crate::effect::geometry::tests::SPIN, &[]);
-    let (_display, mut state) = state_with_effects_in(&place);
-    state.effects.want("present", ["spin".to_owned()]);
-    let stopped = state.effects.effect("spin").expect("current");
-    stopped
-        .sandbox()
-        .expect("an effect.lua")
-        .lua()
-        .globals()
-        .set("spin", true)
-        .expect("set");
-    let ask = crate::effect::geometry::tests::ask();
-    assert!(
-        crate::effect::geometry::mesh(stopped.sandbox().expect("an effect.lua"), &ask, 1, 1)
-            .is_err()
-    );
-    let _ = state.settle(state.clock.now());
-    let fresh = state.effects.effect("spin").expect("still current");
-    assert!(
-        !fresh.poisoned(),
-        "settle did not rebuild the stopped effect"
-    );
-    let _ = std::fs::remove_dir_all(place);
-}
-
 /// **A reload binds the rules against the folders it read**, so an effect
 /// changed on disk is the version its rule runs: here a param's default.
 #[test]
@@ -1136,7 +1090,7 @@ fn a_reload_binds_the_rules_against_the_folders_it_read() {
     let uniforms = |state: &Solium| first_step(state).map(|step| step.uniforms.clone());
     state.reload_from(&entry);
     let before = uniforms(&state).expect("the premise: the rule is bound");
-    std::fs::write(dir.join("effect.lua"), TINT.replace("0.1", "0.3")).expect("v2");
+    std::fs::write(dir.join("effect.toml"), TINT.replace("0.1", "0.3")).expect("v2");
     state.reload_from(&entry);
     assert_ne!(
         uniforms(&state),
@@ -1155,7 +1109,7 @@ fn a_replaced_rule_set_holds_only_its_own_programs() {
     crate::effect::host::tests::folder(
         &place,
         "plain",
-        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
         &[(
             "effect.frag",
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1252,11 +1206,16 @@ fn a_param_that_picks_other_passes_starts_the_slots_afresh() {
     crate::effect::host::tests::folder(
         &place,
         "pick",
-        "return { api = 1, inputs = { 'self' }, params = { which = { 0, int = true } },
-            stages = function(p) if p.which == 1 then return { { 'pass', 'b.frag' } } end return { { 'pass', 'a.frag' } } end }",
+        "api = 2\ninputs = [\"self\"]\n[params]\nwhich = { default = 0, int = true }\n[[stages]]\npass = \"b.frag\"\nwhen = \"which == 1\"\n[[stages]]\npass = \"a.frag\"\nwhen = \"which ~= 1\"\n",
         &[
-            ("a.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n"),
-            ("b.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n"),
+            (
+                "a.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            ),
+            (
+                "b.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n",
+            ),
         ],
     );
     crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
@@ -1294,11 +1253,16 @@ fn a_refused_rule_set_leaves_no_compile_asked_for() {
     crate::effect::host::tests::folder(
         &place,
         "pick",
-        "return { api = 1, inputs = { 'self' }, params = { which = { 0, int = true } },
-            stages = function(p) if p.which == 1 then return { { 'pass', 'b.frag' } } end return { { 'pass', 'a.frag' } } end }",
+        "api = 2\ninputs = [\"self\"]\n[params]\nwhich = { default = 0, int = true }\n[[stages]]\npass = \"b.frag\"\nwhen = \"which == 1\"\n[[stages]]\npass = \"a.frag\"\nwhen = \"which ~= 1\"\n",
         &[
-            ("a.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n"),
-            ("b.frag", "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n"),
+            (
+                "a.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
+            ),
+            (
+                "b.frag",
+                "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * 0.5; }\n",
+            ),
         ],
     );
     crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
@@ -1564,7 +1528,7 @@ fn a_replaced_style_holds_only_its_own_programs() {
     crate::effect::host::tests::folder(
         &place,
         "plain",
-        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
         &[(
             "effect.frag",
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1613,7 +1577,7 @@ fn sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again() {
     crate::effect::host::tests::folder(
         &effects,
         "plain",
-        "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+        "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
         &[(
             "effect.frag",
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1654,7 +1618,7 @@ fn the_formats_probe_rebinds_the_styles_rules_too() {
     crate::effect::host::tests::folder(
         &place,
         "wide",
-        "return { api = 1, inputs = { 'self' }, stages = { { 'pass', 'a.frag', format = 'rgba16f' } } }",
+        "api = 2\ninputs = [\"self\"]\n[[stages]]\npass = \"a.frag\"\nformat = \"rgba16f\"\n",
         &[(
             "a.frag",
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",

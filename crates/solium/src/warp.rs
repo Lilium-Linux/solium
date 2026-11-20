@@ -276,9 +276,9 @@ impl UnitRect {
 
 /// A grid of points over `part` of a pane's unit square, in global logical
 /// pixels: `(cols + 1) × (rows + 1)` of them, x and y each, row by row from
-/// the top-left, as a geometry effect's `mesh` writes them
-/// (`effect::geometry::mesh`). What [`mesh_grid`] projects.
-/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+/// the top-left, as a geometry effect's `.vert` places them
+/// (`effect::geometry::run`). What [`mesh_grid`] projects.
+/// `tests::a_genie_grid_lands_where_the_rust_genie_put_it`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Grid {
     pub(crate) cols: u32,
@@ -373,7 +373,7 @@ pub(crate) fn mesh_part(
 /// then places that in 3D. They compose, which is what lets a genie happen
 /// to a window that is also tilted. Each point's texture coordinate is where
 /// it is in the grid, `(c / cols, r / rows)`, across the part's capture.
-/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+/// `tests::a_genie_grid_lands_where_the_rust_genie_put_it`.
 ///
 /// Returns `None` when the grid has not as many points as its size says.
 /// What reaches nearer the viewer than [`NEAR`] is cut away there, triangle by
@@ -389,7 +389,7 @@ pub(crate) fn mesh_grid(
     scale: f64,
 ) -> Option<Mesh> {
     let (columns, rows) = (grid.cols.max(1), grid.rows.max(1));
-    if grid.points.len() != crate::effect::sandbox::numbers(columns, rows) {
+    if grid.points.len() != crate::effect::geometry::numbers(columns, rows) {
         return None;
     }
     // The point the matrix turns about, and the point the projection is
@@ -548,7 +548,7 @@ fn in_front(triangle: [Unseen; 3], place: Place, vertices: &mut Vec<Corner>) {
 /// logical. The oracle the `genie` folder is held to, in the tests and,
 /// through `SOLIUM_GEOMETRY_ORACLE`, in a debug build only (Rulings 19, 23):
 /// a release build has no code that draws an effect from Rust.
-/// `tests::a_lua_grid_lands_where_the_rust_genie_put_it`.
+/// `tests::a_genie_grid_lands_where_the_rust_genie_put_it`.
 #[cfg(any(test, debug_assertions))]
 pub(crate) fn oracle_grid(
     from: Rectangle<f64, smithay::utils::Logical>,
@@ -561,7 +561,7 @@ pub(crate) fn oracle_grid(
         crate::present::for_effects(to),
     );
     let (cols, rows) = deform.segments();
-    let mut points = Vec::with_capacity(crate::effect::sandbox::numbers(cols, rows));
+    let mut points = Vec::with_capacity(crate::effect::geometry::numbers(cols, rows));
     for row in 0..=rows {
         let v = part.v0 + (part.v1 - part.v0) * (f64::from(row) / f64::from(rows));
         for column in 0..=cols {
@@ -881,13 +881,15 @@ mod tests {
         );
     }
 
-    /// **A Lua grid lands where the Rust genie put it**: the folder's grid
-    /// through `mesh_grid`, against the Rust genie's grid through the same,
+    /// **A genie grid lands where the Rust genie put it**: a grid of points,
+    /// as a geometry's `.vert` places them (the genie's, which wirecheck
+    /// holds to the Rust genie on a GPU), through `mesh_grid`, against the
+    /// Rust genie's own grid through the same,
     /// through `rotate_y(0.3)` about a pivot of (1, 0), on a screen at
     /// x = 1920, which the shift moves both onto: every vertex within 1e-3
     /// physical px.
     #[test]
-    fn a_lua_grid_lands_where_the_rust_genie_put_it() {
+    fn a_genie_grid_lands_where_the_rust_genie_put_it() {
         let rect = Rectangle::new((2020.0, 100.0).into(), (800.0, 600.0).into());
         let to = Rectangle::new((2520.0, 1040.0).into(), (64.0, 32.0).into());
         let shift = (-1920.0, 0.0).into();

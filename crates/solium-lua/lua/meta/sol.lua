@@ -290,7 +290,7 @@
 ---@field progress? number How far into `to`, the mesh's `t.progress`: 1, all the way, when it is left out, which is what one animates towards; 0 is the window where it is. `t.direction` is -1 for a present.
 ---@field seed? number A number in [0, 1) for the mesh's `t.seed`; 0 when it is left out.
 ---@field failed? "flat"|"hide" This present's own: what it draws when its mesh is refused or its folder is missing, the window undeformed or nothing of it; `effects.present.failed`'s when it is left out.
----@field on_reload? "flat"|"keep" This present's own: when a reload finds its folder changed while it plays, drawn flat for the rest of the move, or on the version it began with; a reload that leaves the folder as it was changes nothing, even one that changes `effects.sandbox`. `effects.present.on_reload`'s when it is left out.
+---@field on_reload? "flat"|"keep" This present's own: when a reload finds its folder changed while it plays, drawn flat for the rest of the move, or on the version it began with; a reload that leaves the folder as it was changes nothing. `effects.present.on_reload`'s when it is left out.
 ---@field spread? number The genie's param: how much of the window is in motion at once. 0 is rigid.
 
 ---Where `sol.place` puts a window.
@@ -756,7 +756,7 @@ function sol.problems() end
 
 ---What `sol.effects` takes: the rules, and the engine's own numbers and
 ---policies beside them, each with its default. A key it does not know,
----`sandbox`, `limits`, `present`, `xray` or `memo` given anything but a
+---`limits`, `present`, `xray` or `memo` given anything but a
 ---table, a number outside its bounds (`1/0` and `0/0` included) or a word
 ---outside its words refuses the whole set, its rules too, named by
 ---`sol.problems()` under `"settings"`, and what ran stays; `solium --check`
@@ -764,9 +764,8 @@ function sol.problems() end
 ---@class sol.EffectsOptions
 ---@field rules? sol.Rule[] The rules; left out, none.
 ---@field load? string[] Effect folders to load with the configuration, before anything plays them: what your `sol.present` deforms will name, which nothing else names up front, so the first one finds its folder compiled rather than drawing the window flat. Each a folder's name; a bad one refuses the set.
----@field sandbox? { load_ms?: number, memory_mib?: integer } What an effect's own Lua may spend as it loads: `load_ms` for each call, shared by the checks a `mesh` is put through at load (100 by default, 10 to 5000), and `memory_mib` of memory (16 by default, 1 to 512). A folder past either is named by `sol.problems()` and not loaded; changing either loads every effect again.
 ---@field limits? { params?: integer } How many numbers a geometry or a pixels effect's params may be once packed (8 by default, 1 to 64); one with more is named by `sol.problems()`, never cut.
----@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing, even one that changes `sandbox`). A deform may say either for itself.
+---@field present? { failed?: "flat"|"hide", on_reload?: "flat"|"keep" } What a `sol.present` deform draws when its mesh is refused or its folder is missing (`failed`: `"flat"`, the default, the window undeformed; `"hide"`, nothing of it), and when a reload finds its folder changed while it plays (`on_reload`: `"flat"`, the default, or `"keep"`, the version it began with; a reload that leaves the folder as it was changes nothing). A deform may say either for itself.
 ---@field xray? sol.XrayOptions What T2 effects read as the backdrop.
 ---@field memo? sol.MemoOptions How a chain's backdrop-only part is shared per monitor.
 ---@field motion_hz? number How many times a second, at most, an effect's own steps for a part run again while only the part's place or size moves (a glide, a drag, a resize): a T2 effect's (the glass's refraction) as it moves, a T0 effect's (the shade) as it changes size. 0, the default, runs them on every pass the part moved on, so what shows through is where the part is on every frame. 10 to 1000 is a cap for a weak GPU: between runs the last result is drawn where the part is, stretched to its size, so what shows through lags the part by up to `1 / motion_hz` of its motion and is right again within that once it stops. A backdrop redrawn or new params run it at once.

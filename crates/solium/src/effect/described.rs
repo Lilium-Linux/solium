@@ -211,12 +211,7 @@ fn read_text(text: &str) -> Result<(EffectSpec, Described), Refused> {
                 spec.easing = Some(name);
             }
             "grid" => spec.grid = Some(grid(item)?),
-            "mesh" => {
-                return Err(at(
-                    item,
-                    "`mesh`: a geometry effect's mesh is still written in an effect.lua",
-                ));
-            }
+            "mesh" => spec.mesh = Some(word(item, "mesh")?),
             other => {
                 let meant = spec::nearest(other, &spec::KEYS)
                     .map(|meant| format!("; did you mean `{meant}`?"))

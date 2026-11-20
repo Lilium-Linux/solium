@@ -1467,7 +1467,7 @@ fn sol_effects_reaches_the_compositor_with_its_settings() {
     let config = directory.join("init.lua");
     std::fs::write(
         &config,
-        "sol.effects({ rules = {}, sandbox = { load_ms = 250 }, present = { failed = 'hide' } })\n\
+        "sol.effects({ rules = {}, limits = { params = 12 }, present = { failed = 'hide' } })\n\
          sol.effects({ limits = { params = 99 } })\nsol.effects()\n",
     )
     .expect("writing");
@@ -1485,7 +1485,7 @@ fn sol_effects_reaches_the_compositor_with_its_settings() {
         panic!("three sets: {sets:?}");
     };
     let set = set.as_ref().expect("parsed");
-    assert_eq!(set.sandbox.load, std::time::Duration::from_millis(250));
+    assert_eq!(set.limits.params, 12);
     assert_eq!(
         set.present.failed,
         crate::effect::settings::PresentFailed::Hide

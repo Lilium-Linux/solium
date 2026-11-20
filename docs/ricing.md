@@ -343,7 +343,7 @@ rows, which in a terminal is the top half of the first line.
 
 ### Effects
 
-An effect is a folder of Lua and GLSL, yours in `~/.config/solium/effects/`
+An effect is a folder of a TOML description and GLSL, yours in `~/.config/solium/effects/`
 or one Solium ships, and a rule puts it in a slot of a part of a window. To
 blur what mpv itself draws, in its own place:
 

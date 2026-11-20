@@ -1,22 +1,17 @@
 //! The engine's own numbers and policies, each a key under `effects` with
-//! today's value as its default (Ruling 28): what an effect's Lua may spend
-//! as it loads, how many params an effect may pack, and what a `present`
-//! geometry draws when it cannot be drawn.
+//! today's value as its default (Ruling 28): how many params an effect may
+//! pack, and what a `present` geometry draws when it cannot be drawn.
 //! `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
-
-use std::time::Duration;
 
 use crate::script::{Doc, DocTable};
 
 /// What `effects` reads: an unknown key is refused by name, so a typo
-/// never means "the default". Task 30 adds `timing`, Task 27b `geometry` (and
-/// `mesh_ms` and `revive` to `sandbox`'s list in [`parse`]), Task 31 `on`;
-/// FX3's Task 43 adds `xray` and `memo` ([`OWN_TABLES`]).
+/// never means "the default". FX3's Task 43 adds `xray` and `memo`
+/// ([`OWN_TABLES`]).
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 pub(crate) const KEYS: &[&str] = &[
     "rules",
     "client_blur",
-    "sandbox",
     "limits",
     "present",
     "xray",
@@ -28,7 +23,6 @@ pub(crate) const KEYS: &[&str] = &[
 /// Everything under `effects` that is not a rule or a transition.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Settings {
-    pub(crate) sandbox: Caps,
     pub(crate) limits: Limits,
     pub(crate) present: Present,
     /// `effects.load`: folders loaded with the configuration, before anything
@@ -112,7 +106,6 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            sandbox: Caps::default(),
             limits: Limits::default(),
             present: Present::default(),
             load: Vec::new(),
@@ -142,32 +135,6 @@ const MOTION_HZ_DEFAULT: f64 = 0.0;
 /// 1000 it runs on every pass of any monitor anyway.
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`.
 const MOTION_HZ: std::ops::RangeInclusive<f64> = 10.0..=1000.0;
-
-/// `effects.sandbox`: what one effect's Lua may spend as it loads.
-/// `sandbox::tests::the_load_budget_is_configurable`,
-/// `sandbox::tests::the_memory_cap_is_configurable`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Caps {
-    /// A load-time call's budget in an `effect.lua` (its table, `stages`,
-    /// `reach`, `bleed`), and the one the checks at load share.
-    pub(crate) load: Duration,
-    /// The bytes a state may hold.
-    pub(crate) memory: usize,
-}
-
-impl Caps {
-    /// 100 ms and 16 MiB: the defaults.
-    pub(crate) const DEFAULT: Self = Self {
-        load: Duration::from_millis(100),
-        memory: 16 << 20,
-    };
-}
-
-impl Default for Caps {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
 
 /// `effects.limits`: how much an effect may ask of the engine.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,7 +209,7 @@ impl PresentReload {
     }
 }
 
-/// What is at `path` (`"sandbox.load_ms"`) inside `options`.
+/// What is at `path` (`"limits.params"`) inside `options`.
 fn at<'a>(options: &'a Doc, path: &str) -> Option<&'a Doc> {
     let mut at = Some(options);
     for key in path.split('.') {
@@ -321,10 +288,8 @@ fn known(options: &Doc, path: &str, keys: &[&str]) -> Result<(), String> {
 }
 
 /// The tables under `effects` whose keys [`parse`] reads, each with its
-/// keys. Task 27b adds `mesh_ms` and `revive` to `sandbox`'s, and
-/// `geometry` with its own.
-const TABLES: [(&str, &[&str]); 3] = [
-    ("sandbox", &["load_ms", "memory_mib"]),
+/// keys.
+const TABLES: [(&str, &[&str]); 2] = [
     ("limits", &["params"]),
     ("present", &["failed", "on_reload"]),
 ];
@@ -365,6 +330,14 @@ pub(crate) fn tree_of(options: &Doc) -> Doc {
 /// `tests::the_engines_keys_read_with_their_defaults_and_bounds`,
 /// `script::tests::sol_effects_reads_xray_and_memo`.
 pub(crate) fn parse(options: &Doc) -> Result<Settings, String> {
+    // An effect's own Lua and its budget went with effects described as
+    // data (`tests::effects_sandbox_is_refused_as_gone`).
+    if options.field("sandbox").is_some() {
+        return Err(
+            "`effects.sandbox` is gone: an effect runs no Lua now, only its effect.toml and its shaders; delete the key"
+                .to_owned(),
+        );
+    }
     known(options, "", KEYS)?;
     for (table, keys) in TABLES {
         match options.field(table) {
@@ -380,8 +353,6 @@ pub(crate) fn parse(options: &Doc) -> Result<Settings, String> {
             }
         }
     }
-    let load = bounded(options, "sandbox.load_ms", 100.0, 10.0, 5000.0)?;
-    let memory = bounded(options, "sandbox.memory_mib", 16.0, 1.0, 512.0)?;
     // At most `geometry::PARAMS_MAX`, the inline array's length: a
     // representation's size, not a behaviour (Ruling 28).
     #[expect(clippy::cast_precision_loss, reason = "64")]
@@ -399,7 +370,7 @@ pub(crate) fn parse(options: &Doc) -> Result<Settings, String> {
         clippy::cast_sign_loss,
         reason = "validated above: within bounds, and a fraction is cut"
     )]
-    let (memory, params) = ((memory as usize) << 20, params as usize);
+    let params = params as usize;
     let xray = options
         .field("xray")
         .map_or_else(|| Ok(Default::default()), crate::effect::xray::parse)?;
@@ -444,10 +415,6 @@ pub(crate) fn parse(options: &Doc) -> Result<Settings, String> {
         }
     }
     Ok(Settings {
-        sandbox: Caps {
-            load: Duration::from_secs_f64(load / 1000.0),
-            memory,
-        },
         limits: Limits { params },
         present: Present { failed, on_reload },
         load: wanted,
@@ -549,11 +516,7 @@ mod tests {
     fn the_engines_keys_read_with_their_defaults_and_bounds() {
         let none = super::parse(&tree("{ rules = {} }")).expect("parses");
         assert_eq!(none, super::Settings::default());
-        assert_eq!(
-            (none.sandbox.load, none.sandbox.memory, none.limits.params),
-            (std::time::Duration::from_millis(100), 16 << 20, 8),
-            "today's numbers"
-        );
+        assert_eq!(none.limits.params, 8, "today's number");
         assert_eq!(
             (none.present.failed, none.present.on_reload),
             (super::PresentFailed::Flat, super::PresentReload::Flat)
@@ -570,26 +533,15 @@ mod tests {
             assert!((read - hz).abs() < f64::EPSILON, "{lua}: {read}");
         }
         let set = super::parse(&tree(
-            "{ sandbox = { load_ms = 500, memory_mib = 64 }, limits = { params = 16 }, present = { failed = 'hide', on_reload = 'keep' } }",
+            "{ limits = { params = 16 }, present = { failed = 'hide', on_reload = 'keep' } }",
         ))
         .expect("parses");
-        assert_eq!(
-            (set.sandbox.load, set.sandbox.memory, set.limits.params),
-            (std::time::Duration::from_millis(500), 64 << 20, 16)
-        );
+        assert_eq!(set.limits.params, 16);
         assert_eq!(
             (set.present.failed, set.present.on_reload),
             (super::PresentFailed::Hide, super::PresentReload::Keep)
         );
         for (lua, says) in [
-            (
-                "{ sandbox = { load_ms = 5 } }",
-                "`effects.sandbox.load_ms` is a number from 10 to 5000",
-            ),
-            (
-                "{ sandbox = { memory_mib = 1024 } }",
-                "`effects.sandbox.memory_mib` is a number from 1 to 512",
-            ),
             (
                 "{ limits = { params = 65 } }",
                 "`effects.limits.params` is a number from 1 to 64",
@@ -622,24 +574,19 @@ mod tests {
                 "{ motion_hz = 1/0 }",
                 "`effects.motion_hz` is 0, or a number from 10 to 1000",
             ),
-            // No "did you mean": `load` is 3 edits from `load_ms`, past
+            // No "did you mean": `pram` is 3 edits from `params`, past
             // `nearest`'s 2.
             (
-                "{ sandbox = { load = 500 } }",
-                "`effects.sandbox` has no key `load`",
+                "{ limits = { pram = 5 } }",
+                "`effects.limits` has no key `pram`",
             ),
-            ("{ sandbx = {} }", "sandbox"),
+            ("{ limtis = {} }", "limits"),
             // Not a table: refused, not read as the defaults.
             ("{ present = 'hide' }", "`effects.present` is a table"),
-            ("{ sandbox = 5 }", "`effects.sandbox` is a table"),
             ("{ limits = true }", "`effects.limits` is a table"),
-            ("{ sandbox = 1/0 }", "`effects.sandbox` is a table"),
+            ("{ limits = 1/0 }", "`effects.limits` is a table"),
             // Not finite: refused for its bounds, not dropped for the
             // default.
-            (
-                "{ sandbox = { load_ms = 1/0 } }",
-                "`effects.sandbox.load_ms` is a number from 10 to 5000",
-            ),
             (
                 "{ limits = { params = 0/0 } }",
                 "`effects.limits.params` is a number from 1 to 64",
@@ -652,6 +599,14 @@ mod tests {
             let refused = super::parse(&tree(lua)).expect_err(lua);
             assert!(refused.contains(says), "{lua}: {refused}");
         }
+    }
+
+    /// **`effects.sandbox` is refused as gone**, naming why: it was what an
+    /// effect's Lua could spend, and no effect runs Lua.
+    #[test]
+    fn effects_sandbox_is_refused_as_gone() {
+        let refused = super::parse(&tree("{ sandbox = { load_ms = 100 } }")).expect_err("gone");
+        assert!(refused.contains("`effects.sandbox` is gone"), "{refused}");
     }
 
     /// **`effects.load` is a list of names** (#300): read in order, empty

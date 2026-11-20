@@ -9062,11 +9062,32 @@ fn geometry_of(fixture: &Fixture, pane: crate::pane::PaneId) -> Option<crate::pr
         .map(|deform| deform.effect)
 }
 
-/// What `prepare` would do with a pane this pass.
+/// What is waiting compiled, as at the top of the next `prepare`: a
+/// geometry's mesh program among it.
+fn compile_waiting(fixture: &mut Fixture) {
+    fixture
+        .state
+        .effects
+        .compile_pending(&mut crate::effect::host::tests::Refusing);
+}
+
+/// What `prepare` would do with a pane this pass: what is waiting is
+/// compiled first, as there, a geometry's mesh program included.
 fn planned(fixture: &mut Fixture, pane: crate::pane::PaneId) -> crate::render::Planned {
+    fixture
+        .state
+        .effects
+        .compile_pending(&mut crate::effect::host::tests::Refusing);
     let outer = fixture.state.pane_outer_of(pane).expect("a pane on screen");
     let now = fixture.state.clock.now();
-    crate::render::plan_warp(&mut fixture.state, pane, outer, 1.0, now)
+    crate::render::plan_warp(
+        &mut fixture.state,
+        &mut crate::effect::host::tests::Refusing,
+        pane,
+        outer,
+        1.0,
+        now,
+    )
 }
 
 /// `{ x = .., y = .., w = 64, h = 32 }` well below a pane's middle, as
@@ -9098,7 +9119,10 @@ fn a_present_deform_is_a_file() {
     );
     let geometry = geometry_of(&fixture, pane).expect("a geometry");
     assert_eq!(geometry.axis, solium_effects::Axis::Down);
-    assert_eq!(Some(geometry.effect), fixture.state.effects.id("genie"));
+    assert_eq!(
+        Some(geometry.effect),
+        fixture.state.effects.upcoming("genie")
+    );
     match planned(&mut fixture, pane) {
         crate::render::Planned::Warp {
             grid: Some(grid), ..
@@ -9310,6 +9334,7 @@ fn a_reload_that_leaves_a_presents_folder_unchanged_keeps_it() {
         &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'flat', to = {to} }}"),
     );
     let id = geometry_of(&fixture, pane).map(|geometry| geometry.effect);
+    compile_waiting(&mut fixture);
     assert_eq!(id, fixture.state.effects.id("genie"), "the premise");
     reload(&mut fixture);
     assert!(
@@ -9400,7 +9425,7 @@ fn effects_load_loads_a_folder_before_a_present_names_it() {
         "sol.effects({ rules = {}, load = { 'genie' } })\n",
     );
     assert!(
-        fixture.state.effects.effect("genie").is_some(),
+        fixture.state.effects.latest("genie").is_some(),
         "named in effects.load, the genie is not loaded"
     );
     assert!(
@@ -9415,13 +9440,12 @@ fn effects_load_loads_a_folder_before_a_present_names_it() {
     );
 }
 
-/// **A reload that changes only `effects.sandbox` keeps a present**: the
-/// new caps load the genie's unchanged folder again, under them, and
-/// it keeps its id, so a window held at progress 0.5 under the default
-/// `on_reload = "flat"` is still drawn through its grid; only an edit
-/// makes it follow `on_reload` (`a_reload_mid_present_follows_on_reload`).
+/// **A reload that leaves the genie's folder as it was keeps a present**:
+/// the genie keeps its id, so a window held at progress 0.5 under the
+/// default `on_reload = "flat"` is still drawn through its grid; only an
+/// edit makes it follow `on_reload` (`a_reload_mid_present_follows_on_reload`).
 #[test]
-fn a_reload_that_changes_only_the_sandbox_keeps_a_present() {
+fn a_reload_that_leaves_the_genie_as_it_was_keeps_a_present() {
     fx2_fixture!(fixture, "present-caps");
     let (pane, _) = one_window(&mut fixture);
     let _ = scratch_genie(&mut fixture);
@@ -9432,11 +9456,11 @@ fn a_reload_that_changes_only_the_sandbox_keeps_a_present() {
         &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'flat', to = {to} }}"),
     );
     let id = geometry_of(&fixture, pane).map(|geometry| geometry.effect);
+    compile_waiting(&mut fixture);
     assert_eq!(id, fixture.state.effects.id("genie"), "the premise");
-    let before = fixture.state.effects.caps();
     reload_with(
         &mut fixture,
-        "sol.effects({ rules = {}, sandbox = { memory_mib = 32 } })\n",
+        "sol.effects({ rules = {}, limits = { params = 12 } })\n",
     );
     assert!(
         fixture.state.effects.problems().is_empty(),
@@ -9444,26 +9468,13 @@ fn a_reload_that_changes_only_the_sandbox_keeps_a_present() {
         fixture.state.effects.problems()
     );
     assert!(
-        fixture.state.effects.caps() != before && fixture.state.effects.caps().memory == 32 << 20,
-        "the premise: the reload changed the caps"
-    );
-    assert_eq!(
-        fixture
-            .state
-            .effects
-            .effect("genie")
-            .map(|loaded| loaded.sandbox().expect("an effect.lua").caps()),
-        Some(fixture.state.effects.caps()),
-        "the genie that runs is not the one loaded under the new caps"
-    );
-    assert!(
         crate::render::present_source(&fixture.state, pane).is_some(),
-        "a reload that changed only the caps ended the present"
+        "a reload that left the genie as it was ended the present"
     );
     assert_eq!(
         fixture.state.effects.id("genie"),
         id,
-        "the unchanged folder lost its id to new caps"
+        "the unchanged folder lost its id"
     );
     assert!(
         matches!(
@@ -9492,14 +9503,17 @@ fn a_reload_mid_present_follows_on_reload() {
                 "{{ effect = 'genie', progress = 0.5, on_reload = '{on_reload}', to = {to} }}"
             ),
         );
+        // Its first pass compiles the genie, and pins it under `keep`.
+        let _ = planned(&mut fixture, pane);
         assert!(
             crate::render::present_source(&fixture.state, pane).is_some(),
             "the premise: the present draws from its folder"
         );
-        let file = folder.join("effect.lua");
-        let edited = std::fs::read_to_string(&file).expect("read") + "-- edited\n";
+        let file = folder.join("effect.toml");
+        let edited = std::fs::read_to_string(&file).expect("read") + "# edited\n";
         std::fs::write(&file, edited).expect("edited");
         reload(&mut fixture);
+        compile_waiting(&mut fixture);
         assert_eq!(
             crate::render::present_source(&fixture.state, pane).is_some(),
             kept,
@@ -9528,8 +9542,8 @@ fn pinned(fixture: &Fixture, pane: crate::pane::PaneId) -> bool {
 /// **A pinned version is let go when its present lands**: a present
 /// under `on_reload = "keep"` pins the version it began with, kept while
 /// the window is held at its progress, and a present with no deform
-/// that lands lets it go, so no pane holds a stale Lua state to the end
-/// of its life.
+/// that lands lets it go, so no pane holds a stale version to the end of
+/// its life.
 #[test]
 fn a_pinned_version_is_let_go_when_its_present_lands() {
     fx2_fixture!(fixture, "present-unpinned");
@@ -9541,6 +9555,8 @@ fn a_pinned_version_is_let_go_when_its_present_lands() {
         pane,
         &format!("{{ effect = 'genie', progress = 0.5, on_reload = 'keep', to = {to} }}"),
     );
+    // Its first pass compiles the genie, and pins it.
+    let _ = planned(&mut fixture, pane);
     let now = fixture.state.clock.now();
     let _ = fixture.state.settle(now);
     assert!(
@@ -9756,7 +9772,10 @@ fn a_loading_pane_under_a_present_is_planned_through_the_warp() {
         );
         {
             let now = state.clock.now();
-            crate::render::plan_warps(&mut state, now);
+            state
+                .effects
+                .compile_pending(&mut crate::effect::host::tests::Refusing);
+            crate::render::plan_warps(&mut state, &mut crate::effect::host::tests::Refusing, now);
         }
         assert!(
             matches!(
@@ -9786,7 +9805,10 @@ fn a_loading_pane_at_rest_builds_no_capture() {
         let (mut state, pane) = loading_with_its_scene("loading-rest");
         {
             let now = state.clock.now();
-            crate::render::plan_warps(&mut state, now);
+            state
+                .effects
+                .compile_pending(&mut crate::effect::host::tests::Refusing);
+            crate::render::plan_warps(&mut state, &mut crate::effect::host::tests::Refusing, now);
         }
         let planned = state.presented.take(pane);
         assert!(
@@ -9836,7 +9858,15 @@ fn a_present_on_a_loading_pane_survives_its_applications_arrival() {
     );
     {
         let now = fixture.state.clock.now();
-        crate::render::plan_warps(&mut fixture.state, now);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        crate::render::plan_warps(
+            &mut fixture.state,
+            &mut crate::effect::host::tests::Refusing,
+            now,
+        );
     }
     assert!(
         matches!(
@@ -9973,8 +10003,8 @@ fn a_kept_present_begun_while_its_version_compiles_keeps_it() {
         planned(&mut fixture, pane),
         crate::render::Planned::Warp { grid: Some(_), .. }
     ));
-    let file = folder.join("effect.lua");
-    let edited = std::fs::read_to_string(&file).expect("read") + "-- edited\n";
+    let file = folder.join("effect.toml");
+    let edited = std::fs::read_to_string(&file).expect("read") + "# edited\n";
     std::fs::write(&file, edited).expect("edited");
     fixture
         .state
@@ -10042,6 +10072,7 @@ fn a_present_refused_for_its_popups_alone_is_said_once() {
             let aimed = aimed.expect("aimed");
             let over = crate::render::over_grid(
                 &mut fixture.state,
+                &mut crate::effect::host::tests::Refusing,
                 pane,
                 &frame,
                 aimed,
@@ -10658,7 +10689,7 @@ fn every_failure_leaves_the_part_drawn() {
     // compile and a GPU that fails every run are each tried and fail; a
     // self effect with no capture is never run.
     for (effect, parts, refused, run) in [
-        (r#""fail-lua""#, &all[..], true, false),
+        (r#""fail-toml""#, &all[..], true, false),
         (r#""fail-lint""#, &all[..], true, false),
         (r#""fail-compile""#, &all[..], false, true),
         (r#""ring""#, &all[..], false, true),
@@ -11177,7 +11208,15 @@ fn resolved(fixture: &mut Fixture) -> crate::effect::plan::Slots {
     let pass = fixture.state.store.next_pass();
     {
         let now = fixture.state.clock.now();
-        crate::render::plan_warps(&mut fixture.state, now);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        crate::render::plan_warps(
+            &mut fixture.state,
+            &mut crate::effect::host::tests::Refusing,
+            now,
+        );
     }
     let mut slots = crate::render::build_slots(&mut fixture.state);
     crate::render::record_boxes(&fixture.state, &mut slots);
@@ -11912,7 +11951,15 @@ fn a_gliding_windows_t2_place_is_measured_at_the_passs_instant() {
     let _ = fixture.state.store.next_pass();
     {
         let now = fixture.state.clock.now();
-        crate::render::plan_warps(&mut fixture.state, now);
+        fixture
+            .state
+            .effects
+            .compile_pending(&mut crate::effect::host::tests::Refusing);
+        crate::render::plan_warps(
+            &mut fixture.state,
+            &mut crate::effect::host::tests::Refusing,
+            now,
+        );
     }
     let at = fixture.state.presented.at().expect("the pass's instant");
     fixture.state.clock.advance(Duration::from_millis(4));
@@ -12077,9 +12124,9 @@ fn a_self_effect_is_kept_while_moved_and_reruns_on_every_commit() {
 
 /// **A warped pane's behind slot is drawn beneath its warp, live**
 /// (Ruling F37, amended 2026-10-14, live under motion and warps): held
-/// half way through a genie, its client's behind slot is beneath, and
-/// its place is the bounds of the client's cells of the genie's mesh,
-/// reaching below the pane, not the pane at rest; its front slot stays
+/// half way through a geometry that drops it, its client's behind slot is
+/// beneath, and its place is the bounds of the client's cells of the
+/// mesh, reaching below the pane, not the pane at rest; its front slot stays
 /// in the capture at rest; and with `effects.xray.warped = "rest"`
 /// nothing is beneath and the place is at rest, the first draft's
 /// behaviour ([16] decision 3).
@@ -12088,6 +12135,7 @@ fn a_warped_panes_behind_slot_is_drawn_beneath_its_warp() {
     use crate::effect::plan::{Owner, PaneSlot};
     use crate::effect::rules::Slot;
     fx2_fixture!(fixture, "warp-beneath");
+    fixture_effects(&mut fixture.state);
     let (pane, _window) = translucent_window(&mut fixture);
     apply_rules(
         &mut fixture,
@@ -12099,15 +12147,20 @@ fn a_warped_panes_behind_slot_is_drawn_beneath_its_warp() {
     let owner = Owner::Pane(pane, PaneSlot::Client);
     let flat_behind = places_of(&mut fixture, owner.clone(), Slot::Behind)[0].screen;
     let flat_front = places_of(&mut fixture, owner.clone(), Slot::Front)[0].screen;
-    let genie = genie_half(&fixture, pane);
-    present_deform(&mut fixture, pane, &genie);
+    // A geometry that drops the window half its height at progress 0.5,
+    // which a GPU-free test runs as it reads (`effects/drop`).
+    let drop = format!(
+        r#"{{ effect = "drop", progress = 0.5, to = {} }}"#,
+        below(&fixture, pane)
+    );
+    present_deform(&mut fixture, pane, &drop);
     let slots = resolved(&mut fixture);
     assert!(
         matches!(
             fixture.state.presented.get(pane),
             Some(crate::render::Planned::Warp { .. })
         ),
-        "the genie is not planned, so nothing was tested"
+        "the geometry is not planned, so nothing was tested"
     );
     assert!(
         slots.is_beneath(&owner, Slot::Behind),
@@ -12485,7 +12538,7 @@ fn only_a_chain_reading_its_part_asks_for_a_capture() {
     crate::effect::host::tests::folder(
         &place,
         "ring",
-        "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+        "api = 2\ninputs = [\"shape\"]\nfrag = \"effect.frag\"\n",
         &[(
             "effect.frag",
             "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",

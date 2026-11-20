@@ -15,7 +15,7 @@ for current daily-use priorities.
 - Floating, dwindle tiling, scrolling and overview; workspaces and layouts per
   monitor, with animated presentation and XWayland support.
 - Reloadable Lua configuration, QML frames and hosted desktop scenes, plus
-  effect folders written in Lua and GLSL.
+  effect folders written in TOML and GLSL.
 - A default configuration that is a whole desktop: taskbar, floating
   titlebar with quick settings, snapping, a stage-manager strip, quick search,
   Alt+Tab cards and a 3D workspace stack. It is copied on install and can be changed.

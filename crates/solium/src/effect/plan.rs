@@ -912,7 +912,7 @@ mod tests {
         folder(
             &place,
             "wide",
-            "return { api = 1, inputs = { 'self' }, params = { amount = { 1 } }, reach = 6, bleed = 2, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nreach = 6\nbleed = 2\nfrag = \"effect.frag\"\n[params]\namount = 1\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv) * p_amount; }\n",
@@ -921,7 +921,7 @@ mod tests {
         folder(
             &place,
             "ring",
-            "return { api = 1, inputs = { 'shape' }, bleed = 5, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"shape\"]\nbleed = 5\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",
@@ -994,7 +994,7 @@ mod tests {
         folder(
             &place,
             "tint",
-            "return { api = 1, inputs = { 'self' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"self\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
@@ -1003,7 +1003,7 @@ mod tests {
         folder(
             &place,
             "ring",
-            "return { api = 1, inputs = { 'shape' }, frag = 'effect.frag' }",
+            "api = 2\ninputs = [\"shape\"]\nfrag = \"effect.frag\"\n",
             &[(
                 "effect.frag",
                 "vec4 sol_effect(vec2 uv) { return vec4(sol_shape(uv)); }\n",

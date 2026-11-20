@@ -3,7 +3,7 @@
 Solium is a standalone Wayland compositor. Rust provides window state,
 protocols and rendering primitives; a window manager, which is a separate
 program, provides policy; QML provides window frames and hosted desktop
-scenes. Effects are user-editable Lua and GLSL folders. A separate desktop
+scenes. Effects are user-editable folders of a TOML description and GLSL. A separate desktop
 environment is not required.
 
 The window manager Solium ships runs the Lua configuration. Another one, in
@@ -91,10 +91,10 @@ commands and the settings sections as the compositor's own types. The
 compositor links no window manager's code and names none of its files: it
 starts the program `wm.toml` names, or `solium-lua`, with no arguments; a
 window manager finds its own configuration and says in `hello-answer` where it
-is. `clippy.toml` denies Lua's types everywhere but the effect sandbox, and
-the test `the_compositor_names_nothing_of_the_lua_window_manager` refuses the
-Lua API's names, the Lua window manager's files and its variables anywhere in
-the compositor's production source.
+is. The compositor runs no Lua at all: `mlua` is a dependency of its tests
+alone, and the test `the_compositor_names_nothing_of_the_lua_window_manager`
+refuses it, the Lua API's names, the Lua window manager's files and its
+variables anywhere in the compositor's production source.
 
 The shipped window manager is `solium-lua` (`crates/solium-lua/`): the `sol`
 API, the Lua runtime, and its configuration in `crates/solium-lua/lua/`. Its
@@ -163,8 +163,9 @@ separate captures so they can extend beyond the window while following its
 transform. `render.rs`, `clip.rs`, `warp/`, `capture.rs` and `pool.rs` contain
 these paths.
 
-User effects load from folders in two phases: Lua definitions at configuration
-load, then GL programs when a render context is available. Shipped effects
+User effects load from folders in two phases: their `effect.toml`
+descriptions at configuration load, then GL programs when a render context is
+available, a geometry's `.vert` among them, run on the GPU. Shipped effects
 include blur, glass, shade and genie. Backdrop effects and capture-based effects
 have different costs; [the effects reference](../crates/solium/effects/README.md)
 documents the stages, sources, caching, budgets and fallback behavior.
@@ -252,7 +253,7 @@ in [session integration](shell-boundary.md#how-the-rest-of-the-desktop-starts).
   updated copies of a scene's geometry.
 - **Commands are not state.** A request is followed by the resulting state/event.
 - **Generic primitives, editable policy.** Modes belong in Lua, window frames
-  in QML and effects in Lua/GLSL. Rust supplies the mechanism.
+  in QML and effects in TOML and GLSL. Rust supplies the mechanism.
 - **A protocol has one concern.** A difficult interface name often signals
   unrelated responsibilities.
 - **Window-coupled UI is hosted.** Decorations share the compositor's state and

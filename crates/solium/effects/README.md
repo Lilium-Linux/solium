@@ -12,8 +12,8 @@ shadows the shipped one of the same name, name by name, as a pane style's
 does: copy a shipped folder there, change it, and everything that names it
 uses your copy. A folder with no `effect.toml` in it is skipped, so an empty
 one made and not filled yet does not cost you the shipped effect of that
-name. A geometry effect, one with a `mesh`, is still described in Lua, as an
-`effect.lua` ([below](#writing-a-mesh)), which is read where a folder has no
+name. Effects were once described in Lua, in an `effect.lua`: a folder of
+yours with only that is skipped too, and named on the overlay as needing an
 `effect.toml`.
 
 A name is lower-case letters, digits, `-` and `_`: `blur`, `soft-glow`,
@@ -246,7 +246,7 @@ in Solium's log. `SOLIUM_XRAY_REBUILD=always` draws xray and runs every shared
 result on every pass, for measuring; the PACING line and the trace count both
 (`xray_builds`, `memo_runs`).
 
-Whatever the tier, an effect that fails, in its Lua, its checks, its compile
+Whatever the tier, an effect that fails, in its description, its checks, its compile
 or on the GPU, leaves its part drawn as if no rule named it: a `replace` draws
 the part and a `behind` or `front` draws nothing. With no rules, nothing is
 resolved, captured or run, and a window is drawn exactly as it would be
@@ -268,8 +268,9 @@ its file changes, or until a reload, which tries every failure once more.
 
 What is broken is named with its file and line in the top-right corner of
 your primary monitor, for as long as it is broken: a mistake in an
-`effect.toml` (or a Lua error in an `effect.lua`), a check of a shader that
-fails, a compile the GPU refused, a rule that cannot be applied (above), a
+`effect.toml`, a check of a shader that fails, a compile the GPU refused, a
+mesh that does not rest where the window is ([below](#writing-a-vert)), a
+rule that cannot be applied (above), a
 pane style's `effects.toml` that does not read or a rule of it that cannot
 be bound, a key of `effects` outside its
 bounds (which keeps the rules and keys that ran). A
@@ -295,10 +296,7 @@ it, the checks of its shaders below, and the effects it
 names in turn (`pixels`, a `fallback` naming an effect, a `use` stage),
 looked for beside it
 first and then among the shipped folders, as when it runs, so a copy of a
-shipped effect that names another shipped one passes. An `effect.lua` runs
-under your configuration's `effects.sandbox`
-([below](#an-effectluas-lua)), as the session loads it, or the defaults if
-your configuration does not load.
+shipped effect that names another shipped one passes.
 Errors are printed at their file and line and exit 1; warnings are printed
 and pass. `solium --check .` inside the folder does the same.
 
@@ -316,11 +314,10 @@ Plain `solium --check` checks every folder in your `effects/` this way,
 named or not, and every effect your configuration's rules name, and then
 binds each rule as the compositor would, so a rule it would refuse fails
 there too. Rules that do not parse fail by their number and key, and are not
-bound; nor are the rules of a `sol.effects` whose own keys (`sandbox`,
-`limits`, `present`, `xray`, `memo`) are refused, which fails naming the
+bound; nor are the rules of a `sol.effects` whose own keys (`limits`, `present`, `xray`, `memo`) are refused, which fails naming the
 key, since the session refuses that whole call: it says `rules not checked:
 they did not parse, or their sol.effects was refused`. A folder with no
-`effect.toml` (nor `effect.lua`) fails, and so does one whose name cannot
+`effect.toml` fails (one with only an old `effect.lua` says so), and so does one whose name cannot
 name an effect, such as `Blur`, since nothing could use it. The
 `effects.toml` of each pane style of your own is read too, and fails on what
 the overlay would name.
@@ -361,6 +358,7 @@ scale = 2
 | `frag` | a one-pass effect's shader, a file in the folder |
 | `stages` | a many-pass effect's passes, `[[stages]]` tables, below |
 | `pixels` | another effect's name, whose `frag` draws this one's pixels |
+| `mesh` | a geometry effect's `.vert`, a file in the folder, [below](#writing-a-vert) |
 | `grid` | a geometry effect's grid: `{ along = 48, across = 8 }`, which turns with the direction the window moves in, or a fixed `[cols, rows]` |
 | `reach` | how far beyond its part the effect reads, in pixels: a number, or an [expression](#expressions) of the params |
 | `bleed` | how far beyond its part the effect draws, likewise |
@@ -369,7 +367,7 @@ scale = 2
 | `easing` | its curve, by name: `outBack`, `inOutQuad` and the rest of Solium's curves |
 
 An effect draws something, and says how once: `frag` or `stages`, not both,
-or `pixels`. `motion` is refused until motion tokens exist; give `duration`
+or a `mesh`, or `pixels`. `motion` is refused until motion tokens exist; give `duration`
 and `easing`. `image:` inputs are not read yet, and are refused.
 
 ### Fallbacks
@@ -483,43 +481,6 @@ param, with the one you probably meant. A value that is not a number of
 pixels, or a `repeat` that is not a whole number of times, is refused
 where the effect is bound, naming the stage.
 
-## An `effect.lua`'s Lua
-
-A geometry effect is described in Lua for now, by an `effect.lua` that
-returns a table of the keys above (`api = 1`, a param written
-`{ default, min =, max =, int = }`, `stages` a list of `{ "pass", "<file>" }`
-tables or a function of the params) and its `mesh`. Each runs in a Lua of its own, apart from your configuration and from
-every other effect, with `math`, `table` and `string` and the base functions
-that reach nothing outside it. There is no `sol`, `io`, `os`, `require`,
-`load`, `loadfile` or `dofile`, no `pcall` or `xpcall`, no `collectgarbage`
-and no `string.dump`, and no patterns: `string.find`, `string.match`,
-`string.gmatch` and `string.gsub` are not there, because matching one runs
-inside a single call that nothing can stop, and some patterns take longer
-than any frame. `print` writes a debug line to Solium's log, naming the
-effect. A metatable may not have a `__gc` finaliser, because a finaliser runs
-where nothing can stop it. Two functions of Solium's are there before your
-file runs: `sol_phase(u, v, axis)`, how far through a sweep along `axis`
-(`"down"`, `"up"`, `"left"` or `"right"`) the point at `(u, v)` of the
-window is, 0 leading and 1 following; and `sol_grid(t, c, r)`, the window's
-`(u, v)` at point `(c, r)` of a `mesh`'s grid ([below](#writing-a-mesh)).
-
-Every call into an effect, running `effect.lua` or a function of its params,
-has `effects.sandbox.load_ms` (100 ms unless you change it), a `mesh` call
-in a frame 2 ms, and the checks a `mesh` is put through when it loads
-([below](#writing-a-mesh)) `load_ms` between them; its Lua has
-`effects.sandbox.memory_mib` (16 MiB unless you change it). Both are keys
-of `effects` in your configuration, `sandbox = { load_ms = 100, memory_mib =
-16 }`, from 10 to 5000 ms and from 1 to 512 MiB; changing either loads every
-`effect.lua` again. A
-problem the budget or the memory caused names the key. A call runs at full
-speed, with nothing counting its
-instructions. One that runs longer is stopped at its next Lua instruction,
-so a call into the `string` or `table` library runs to its end first; one
-that asks for more memory is stopped there. An effect stopped by the clock
-runs nothing more in that Lua: after the frame Solium loads it again from
-its folder, if the folder has not changed since it was loaded, and
-otherwise at the next reload. A Lua error is reported at its file and line.
-
 ## Writing a `.frag`
 
 A shader file is GLSL ES 1.00 (`#version 100`), the language every program in
@@ -563,66 +524,66 @@ these, are errors at their line, with the param you probably meant; reading a
 texture the pass does not list in its `uses` is a warning, since it reads
 transparent. Comments are skipped.
 
-## Writing a `mesh`
+## Writing a `.vert`
 
 A geometry effect moves the window's picture rather than its pixels: its
 `mesh` places a grid of points, and the window is drawn stretched across
-them. This one leaves the window where it is:
+them. The `mesh` is a `.vert`, one GLSL function the GPU runs once for every
+point of the grid, giving the point's place in global logical pixels. This
+one leaves the window where it is:
 
-```lua
-return {
-  api = 1,
-  grid = { along = 48, across = 8 },
-  mesh = function(t, cols, rows, out)
-    local n = 0
-    for r = 0, rows do
-      for c = 0, cols do
-        local u, v = sol_grid(t, c, r)
-        out[n + 1] = t.from.x + u * t.from.w
-        out[n + 2] = t.from.y + v * t.from.h
-        n = n + 2
-      end
-    end
-  end,
+```toml
+api = 2
+grid = { along = 48, across = 8 }
+mesh = "flat.vert"
+```
+
+```glsl
+vec2 sol_mesh(vec2 uv) {
+    return sol_at(sol_from, uv);
 }
 ```
 
-`mesh(t, cols, rows, out)` writes the whole grid into `out`: x and y for
-each of its `(cols + 1) × (rows + 1)` points, row by row from the top-left,
-in global logical pixels. `cols` and `rows` are the grid's, from `grid`: one
-given as `along` and `across` runs `along` the way the window is pulled.
-`t` says the rest:
+`sol_mesh(uv)` is told the point's `uv`, where it is in the window's unit
+square, `(0, 0)` its top-left corner; a grid over a window's shadow or its
+menus reaches past 0 and 1. `grid` says how many cells, from `grid`: one
+given as `along` and `across` runs `along` the way the window is pulled,
+and a fixed one is `[cols, rows]`. The file is GLSL ES 3.00 (`#version
+300 es`, `highp`), which Solium runs it in so the points can be read
+back; a GPU with GLES 2 alone runs no mesh. Everything else it reads is
+the engine's to declare:
 
-| Field | What it is |
+| Name | What it is |
 |---|---|
-| `t.progress`, `t.clamped` | how far the effect has gone: 0 where the window rests, 1 at the far end, which a spring may carry past; the same clamped to 0..1 |
-| `t.direction` | +1 arriving, −1 leaving, 0 resizing |
-| `t.axis` | which way the window is pulled: `"down"`, `"up"`, `"left"` or `"right"` |
-| `t.from`, `t.to` | the window's rectangle, and the one it is pulled toward (its own when there is none), each `{ x, y, w, h }` |
-| `t.monitor` | the window's monitor's rectangle |
-| `t.part` | the part of the window's unit square the grid covers, `{ u0, v0, u1, v1 }`, which can reach past it for a shadow or a popup; `sol_grid` reads it |
-| `t.seed`, `t.scale` | a number in [0, 1) fixed for one transition; the monitor's scale |
-| `t.cols`, `t.rows` | the grid's size, as the call is given it |
-| `t.<param>` | each param: a number, a boolean, a table of four numbers, or a word as a string |
+| `sol_from`, `sol_to` | the window's rectangle, and the one it is pulled toward (its own when there is none), each `vec4(x, y, w, h)` |
+| `sol_monitor` | the window's monitor's rectangle |
+| `sol_part` | the part of the window's unit square the grid covers, `vec4(u0, v0, u1, v1)` |
+| `sol_grid` | the grid's columns and rows |
+| `sol_progress`, `sol_clamped` | how far the effect has gone: 0 where the window rests, 1 at the far end, which a spring may carry past; the same clamped to 0..1 |
+| `sol_direction` | +1 arriving, −1 leaving, 0 resizing |
+| `sol_axis` | which way the window is pulled: 0 down, 1 up, 2 left, 3 right |
+| `sol_seed`, `sol_scale` | a number in [0, 1) fixed for one transition; the monitor's scale |
+| `p_<param>` | each param, as a frag reads it: a `float`, an `int` (a boolean is 0 or 1), or a `vec4` |
+| `sol_phase(uv)` | how far through the sweep along `sol_axis` the point at `uv` is, 0 leading and 1 following |
+| `sol_at(rect, uv)` | the point at `uv` of a rectangle: `rect.xy + uv * rect.zw` |
 
-`t` and `out` are the same two tables at every call, so a frame makes no
-garbage, and `out` is emptied before each. What `mesh` wrote is checked
-before a point of it is drawn: the right count of numbers, every one
-finite, and every point inside a box four monitors wide and four high,
-centred on the window's monitor (one and a half monitors beyond each of its
-edges). A grid that fails, a Lua error, or a call its 2 ms stopped is
-refused, and the window is not drawn through it.
+A `p_` name that is not a param, or a `sol_` name that is none of these, is
+an error at its line, with the one you probably meant, as in a `.frag`.
 
-When the effect loads, `mesh` is called at progress 0 and 1, on all four
-axes, arriving, leaving and resizing, and at progress 0 it must put every
-point exactly where the window is, within 10⁻⁹ of a pixel, over the window
-and over a `t.part` inside it: an effect starts and ends with the window at
-rest, and a grid that ignores `t.part` (placing point `(c, r)` at `c / cols`
-rather than `sol_grid`'s) would squeeze a popup past the window's edge onto
-it. These 36 calls have `load_ms` between them,
-and the fastest must take no more than the 2 ms a frame gives, or every
-frame would stop it. One that fails any of this is refused, and named on
-the overlay and by `solium --check` at the line its `mesh` is on.
+What the GPU placed is read back and checked before a point of it is drawn:
+every number finite, and every point inside a box four monitors wide and
+four high, centred on the window's monitor (one and a half monitors beyond
+each of its edges). A grid that fails is refused, and the window is not
+drawn through it. Once the `.vert` compiled, before its version runs, it is
+run at progress 0 and 1, on all four axes, arriving, leaving and resizing,
+and at progress 0 it must put every point where the window is, within a
+hundredth of a pixel, over the window and over a part inside it: an effect
+starts and ends with the window at rest, and a mesh that ignores its `uv`
+(placing points from the cell it is in rather than where the window is)
+would squeeze a menu past the window's edge onto it. One that fails is not
+run, and is named on the overlay at its `.vert`. Nothing of it runs on the
+CPU: Solium waits for no effect's code, and a `.vert` that loops forever is
+the GPU's to stop, as a `.frag`'s is.
 
 `sol.present` plays one: `deform = { effect = "genie", to = …, progress =
 0.5 }` names the folder, its params beside it, and how far the window is
@@ -639,8 +600,7 @@ undeformed; or `"hide"`), and so does a refused grid of its open menus,
 which reach past the window: each is said once a present in Solium's log.
 A folder a reload finds changed while a present plays draws it flat for
 the rest of the move, or on the version it began with under `on_reload =
-"keep"`; a reload that leaves the folder as it was changes nothing, even
-one that changes `effects.sandbox`.
+"keep"`; a reload that leaves the folder as it was changes nothing.
 
 A geometry's pixels are drawn in the same warp, one pass: a folder with a
 `frag` beside its `mesh` draws the window's picture through it, and one
@@ -660,11 +620,11 @@ blend from one present to the next. The frag compiles with the effect, which
 runs once it has; until then, and if it never compiles, the effect is not
 the one drawn, and a present follows its `failed`.
 
-The shipped [`genie`](genie/README.md) is a whole one in a page of Lua: it
-works out how far each row has gone, once (each column, when the window is
-pulled sideways), then places every point from the window's own `(u, v)`,
-so a `t.part` reaching past the window bends whatever lies beyond it with
-the window.
+The shipped [`genie`](genie/README.md) is a whole one in four lines: how
+far the point's row (its column, when the window is pulled sideways) has
+gone, smoothstepped, and the point that far from where it is toward where
+it goes. It places every point from the window's own `uv`, so a part
+reaching past the window bends whatever lies beyond it with the window.
 
 ## The shipped folders
 

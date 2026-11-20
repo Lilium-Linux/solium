@@ -378,9 +378,10 @@ fn test_only_module(path: &Path) -> bool {
 /// does not name the Lua API (`sol.place` is the `place` command), and its
 /// code does not name the Lua window manager's files, crate or variables:
 /// that one finds its own configuration and says in `hello-answer` where it
-/// is. `mlua` is the effect engine's, under `src/effect/`, and nobody
-/// else's. The one Lua program the compositor names is the window manager
-/// it starts when `wm.toml` names none.
+/// is. `mlua` is nobody's: the compositor runs no Lua, an effect is data
+/// and shaders, and only the tests link it. The one Lua program the
+/// compositor names is the window manager it starts when `wm.toml` names
+/// none.
 #[test]
 fn the_compositor_names_nothing_of_the_lua_window_manager() {
     let mut found = Vec::new();
@@ -409,8 +410,8 @@ fn the_compositor_names_nothing_of_the_lua_window_manager() {
                     found.push(at(&format!("names `{word}`")));
                 }
             }
-            if code.contains("mlua") && !shown.starts_with("src/effect/") {
-                found.push(at("uses mlua outside the effect engine"));
+            if code.contains("mlua") {
+                found.push(at("uses mlua, which only the tests link"));
             }
         }
     }

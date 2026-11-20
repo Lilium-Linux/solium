@@ -1,0 +1,8 @@
+# A geometry that draws the window where it is over its own unit square, and
+# places NaN for any point past its bottom edge (v > 1): it passes the checks
+# once it compiled, which draw only parts inside the window, and its grid is
+# refused for a menu that opens below the window.
+# `state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`.
+api = 2
+grid = [1, 1]
+mesh = "nan.vert"

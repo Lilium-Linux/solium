@@ -34,7 +34,7 @@ Use this guide by task:
 | Rendering, frame timing, every frame of every animation | How a motion moves: its duration and easing, or a spring |
 | Keyboard, pointer and touch devices; which window has the keyboard | Which keys are its own (`declare`), and what each does |
 | QML scenes: it loads and draws them | Which scenes are on the desktop (`surface`), and their properties |
-| Effects, run in their sandbox | Which effect applies to what (the `effects` settings) |
+| Effects: their descriptions read, their shaders run on the GPU | Which effect applies to what (the `effects` settings) |
 | Starting programs, timers, reading and writing files | Asking for each (`spawn`, `run`, `timer`, `file-read`) |
 | Notifications, audio, the tray, media players | Showing them, and deciding a notification's fate |
 

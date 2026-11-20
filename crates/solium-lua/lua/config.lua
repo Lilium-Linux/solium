@@ -2222,7 +2222,7 @@ local defaults = {
         scale = 0.88,
     },
 
-    -- Effects: folders of Lua and GLSL in ~/.config/solium/effects/ (yours)
+    -- Effects: folders of TOML and GLSL in ~/.config/solium/effects/ (yours)
     -- or shipped with Solium, put in a slot of a part of a window by a rule.
     -- See crates/solium/effects/README.md for the folders and docs/ricing.md
     -- for rules. With no rules nothing changes, and costs nothing. The
@@ -2264,11 +2264,6 @@ local defaults = {
         -- is refused whole, named on the overlay, and the rules that ran stay.
         -- A pane style's own rules, in its effects.toml, come first: yours win.
         rules = {},
-        -- What an effect's own Lua may spend as it loads: `load_ms` of time
-        -- for each call (10 to 5000), shared by the checks a geometry
-        -- effect's `mesh` is put through, and `memory_mib` of memory (1 to
-        -- 512). A folder past either is named on the overlay and not loaded.
-        sandbox = { load_ms = 100, memory_mib = 16 },
         -- How many numbers an effect's params may be when a geometry or a
         -- pixels effect packs them (1 to 64); one with more is named on the
         -- overlay, never cut.
@@ -2277,8 +2272,8 @@ local defaults = {
         -- folder is missing (`failed`: "flat", the window undeformed, or
         -- "hide"), and when a reload finds its folder changed mid-flight
         -- (`on_reload`: "flat", or "keep", the version it began with); a
-        -- reload that leaves the folder as it was changes nothing, even one
-        -- that changes `sandbox`. A deform may say either for itself.
+        -- reload that leaves the folder as it was changes nothing. A deform
+        -- may say either for itself.
         present = { failed = "flat", on_reload = "flat" },
         -- What T2 effects read as the backdrop: a sharp picture of these
         -- layers, per monitor, rebuilt only when it changes. It always holds

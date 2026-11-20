@@ -35,6 +35,14 @@ pub(crate) struct Program {
     /// The vertex attributes a warp program reads, where they are:
     /// `position` and `uvq` (`glGetAttribLocation`; wirecheck case 12j).
     attributes: [(&'static str, Option<ffi::types::GLuint>); 2],
+    /// A mesh program's own 1×1 framebuffer and its renderbuffer, which it
+    /// draws into (nothing, its rasteriser off) so a run needs no complete
+    /// framebuffer bound around it; 0 for any other program.
+    target: [ffi::types::GLuint; 2],
+    /// A test program's `.vert`, which `host::tests::Refusing` runs as
+    /// `host::tests::test_mesh` reads it.
+    #[cfg(test)]
+    pub(crate) source: Option<Rc<str>>,
 }
 
 /// What a pixel program in the warp reads, beside the capture. `Copy` and
@@ -64,6 +72,29 @@ pub(crate) struct PixelUniforms {
     /// 2026-10-08, configurable).
     pub(crate) params: super::params::Params,
 }
+
+/// What a mesh program reads besides its params: the engine's uniforms, as
+/// GL takes them. Rectangles are x, y, w and h in global logical pixels;
+/// `part` is u0, v0, u1 and v1; `grid` is the columns and rows; `axis` is
+/// `solium_effects::mesh::axis_index`'s.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MeshUniforms {
+    pub(crate) from: [f32; 4],
+    pub(crate) to: [f32; 4],
+    pub(crate) monitor: [f32; 4],
+    pub(crate) part: [f32; 4],
+    pub(crate) grid: [f32; 2],
+    pub(crate) progress: f32,
+    pub(crate) clamped: f32,
+    pub(crate) direction: f32,
+    pub(crate) seed: f32,
+    pub(crate) scale: f32,
+    pub(crate) axis: i32,
+}
+
+/// The most points one mesh run places: far past any effect's grid (the
+/// genie's is 441), and short of a buffer a mistyped grid could make huge.
+pub(crate) const MOST_POINTS: usize = 1 << 16;
 
 /// Why a program did not build: which stage, and the driver's own words.
 #[derive(Debug)]
@@ -131,7 +162,238 @@ impl Program {
                 buffer,
                 uniforms,
                 attributes,
+                target: [0, 0],
+                #[cfg(test)]
+                source: None,
             })
+        }
+    }
+
+    /// Compile a geometry's mesh program: `vertex`, its three strings (the
+    /// mesh prelude, its `.vert`, the epilogue), linked with
+    /// `solium_effects::mesh::MESH_FRAGMENT` and its `sol_point` captured by
+    /// transform feedback; the grid point's `position` at location 0. A
+    /// context without transform feedback (GLES 2) is refused as a link
+    /// failure, with why.
+    ///
+    /// # Safety
+    /// A GL context is current: inside `with_context`.
+    pub(crate) unsafe fn compile_mesh(gl: &ffi::Gles2, vertex: [&str; 3]) -> Result<Self, Log> {
+        if !(gl.TransformFeedbackVaryings.is_loaded()
+            && gl.BeginTransformFeedback.is_loaded()
+            && gl.MapBufferRange.is_loaded())
+        {
+            return Err(Log {
+                stage: "link",
+                text: "a mesh is read back through transform feedback, which this GL context does not have (it needs GLES 3)".to_owned(),
+            });
+        }
+        // SAFETY: the caller's contract.
+        unsafe {
+            let vs = stage(gl, ffi::VERTEX_SHADER, &vertex).map_err(|text| Log {
+                stage: "vertex",
+                text,
+            })?;
+            let fs = match stage(
+                gl,
+                ffi::FRAGMENT_SHADER,
+                &[solium_effects::mesh::MESH_FRAGMENT],
+            ) {
+                Ok(fs) => fs,
+                Err(text) => {
+                    gl.DeleteShader(vs);
+                    return Err(Log {
+                        stage: "fragment",
+                        text,
+                    });
+                }
+            };
+            let id = gl.CreateProgram();
+            gl.AttachShader(id, vs);
+            gl.AttachShader(id, fs);
+            gl.BindAttribLocation(id, 0, c"position".as_ptr().cast());
+            let varyings = [c"sol_point".as_ptr()];
+            gl.TransformFeedbackVaryings(id, 1, varyings.as_ptr().cast(), ffi::INTERLEAVED_ATTRIBS);
+            gl.LinkProgram(id);
+            gl.DeleteShader(vs);
+            gl.DeleteShader(fs);
+            let mut linked = 0;
+            gl.GetProgramiv(id, ffi::LINK_STATUS, &raw mut linked);
+            if linked == 0 {
+                let text = program_log(gl, id);
+                gl.DeleteProgram(id);
+                return Err(Log {
+                    stage: "link",
+                    text,
+                });
+            }
+            let uniforms = active_uniforms(gl, id).into();
+            let position =
+                u32::try_from(gl.GetAttribLocation(id, c"position".as_ptr().cast())).ok();
+            let mut buffer = 0;
+            gl.GenBuffers(1, &raw mut buffer);
+            // A complete framebuffer of its own: a draw with no complete one
+            // bound is refused, rasteriser off or not, and a compile or a
+            // `--check` may have none.
+            let (mut framebuffer, mut renderbuffer) = (0, 0);
+            let (mut was_draw, mut was_read) = (0, 0);
+            gl.GetIntegerv(ffi::DRAW_FRAMEBUFFER_BINDING, &raw mut was_draw);
+            gl.GetIntegerv(ffi::READ_FRAMEBUFFER_BINDING, &raw mut was_read);
+            gl.GenRenderbuffers(1, &raw mut renderbuffer);
+            gl.BindRenderbuffer(ffi::RENDERBUFFER, renderbuffer);
+            gl.RenderbufferStorage(ffi::RENDERBUFFER, ffi::RGBA8, 1, 1);
+            gl.BindRenderbuffer(ffi::RENDERBUFFER, 0);
+            gl.GenFramebuffers(1, &raw mut framebuffer);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, framebuffer);
+            gl.FramebufferRenderbuffer(
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::RENDERBUFFER,
+                renderbuffer,
+            );
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, u32::try_from(was_draw).unwrap_or(0));
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, u32::try_from(was_read).unwrap_or(0));
+            Ok(Self {
+                id,
+                buffer,
+                uniforms,
+                attributes: [("position", position), ("uvq", None)],
+                target: [framebuffer, renderbuffer],
+                #[cfg(test)]
+                source: None,
+            })
+        }
+    }
+
+    /// Run this mesh program over a grid of `cols` by `rows` cells: the
+    /// engine's `uniforms`, the params `values` by `names` (as
+    /// [`Self::draw_warp`] sets them), one point for each of the grid's
+    /// `(cols + 1) × (rows + 1)` corners, row by row from the top-left, with
+    /// nothing drawn; and read back, x and y for each. What smithay expects
+    /// is put back.
+    ///
+    /// # Safety
+    /// The context the program was made in is current.
+    pub(crate) unsafe fn run_mesh(
+        &self,
+        gl: &ffi::Gles2,
+        uniforms: &MeshUniforms,
+        (values, names): (&[f32], &[String]),
+        (cols, rows): (u32, u32),
+    ) -> Result<Vec<f32>, String> {
+        let Some(position) = self.attribute("position") else {
+            return Err("the mesh program reads no grid point".to_owned());
+        };
+        let points = (cols as usize + 1).saturating_mul(rows as usize + 1);
+        if points > MOST_POINTS {
+            return Err(format!(
+                "its grid has {points} points, more than the {MOST_POINTS} a mesh may place"
+            ));
+        }
+        let mut cells = Vec::with_capacity(points * 2);
+        for r in 0..=rows {
+            for c in 0..=cols {
+                #[expect(clippy::cast_precision_loss, reason = "a grid of at most 2^16 points")]
+                cells.extend([c as f32, r as f32]);
+            }
+        }
+        let bytes = isize::try_from(points * 2 * std::mem::size_of::<f32>()).unwrap_or(0);
+        let count = i32::try_from(points).unwrap_or(0);
+        // SAFETY: the caller's contract; every name is made and given back
+        // here, but the program's own.
+        unsafe {
+            gl.UseProgram(self.id);
+            let at = |name: &str| self.location(name);
+            let vec4 = |name: &str, v: [f32; 4]| {
+                if let Some(location) = at(name) {
+                    gl.Uniform4f(location, v[0], v[1], v[2], v[3]);
+                }
+            };
+            let float = |name: &str, v: f32| {
+                if let Some(location) = at(name) {
+                    gl.Uniform1f(location, v);
+                }
+            };
+            vec4("sol_from", uniforms.from);
+            vec4("sol_to", uniforms.to);
+            vec4("sol_monitor", uniforms.monitor);
+            vec4("sol_part", uniforms.part);
+            if let Some(location) = at("sol_grid") {
+                gl.Uniform2f(location, uniforms.grid[0], uniforms.grid[1]);
+            }
+            float("sol_progress", uniforms.progress);
+            float("sol_clamped", uniforms.clamped);
+            float("sol_direction", uniforms.direction);
+            float("sol_seed", uniforms.seed);
+            float("sol_scale", uniforms.scale);
+            if let Some(location) = at("sol_axis") {
+                gl.Uniform1i(location, uniforms.axis);
+            }
+            set_params(gl, self, values, names);
+
+            gl.BindBuffer(ffi::ARRAY_BUFFER, self.buffer);
+            gl.BufferData(
+                ffi::ARRAY_BUFFER,
+                bytes,
+                cells.as_ptr().cast(),
+                ffi::STREAM_DRAW,
+            );
+            gl.EnableVertexAttribArray(position);
+            gl.VertexAttribPointer(position, 2, ffi::FLOAT, ffi::FALSE, 0, std::ptr::null());
+            gl.VertexAttribDivisor(position, 0);
+
+            // Whatever error was flagged before is not this run's.
+            for _ in 0..16 {
+                if gl.GetError() == ffi::NO_ERROR {
+                    break;
+                }
+            }
+            let (mut was_draw, mut was_read) = (0, 0);
+            gl.GetIntegerv(ffi::DRAW_FRAMEBUFFER_BINDING, &raw mut was_draw);
+            gl.GetIntegerv(ffi::READ_FRAMEBUFFER_BINDING, &raw mut was_read);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.target[0]);
+            let mut feedback = 0;
+            gl.GenBuffers(1, &raw mut feedback);
+            gl.BindBuffer(ffi::TRANSFORM_FEEDBACK_BUFFER, feedback);
+            gl.BufferData(
+                ffi::TRANSFORM_FEEDBACK_BUFFER,
+                bytes,
+                std::ptr::null(),
+                ffi::STREAM_READ,
+            );
+            gl.BindBufferBase(ffi::TRANSFORM_FEEDBACK_BUFFER, 0, feedback);
+            gl.Enable(ffi::RASTERIZER_DISCARD);
+            gl.BeginTransformFeedback(ffi::POINTS);
+            gl.DrawArrays(ffi::POINTS, 0, count);
+            gl.EndTransformFeedback();
+            gl.Disable(ffi::RASTERIZER_DISCARD);
+            let error = gl.GetError();
+            let mapped = if error == ffi::NO_ERROR {
+                gl.MapBufferRange(ffi::TRANSFORM_FEEDBACK_BUFFER, 0, bytes, ffi::MAP_READ_BIT)
+            } else {
+                std::ptr::null_mut()
+            };
+            let read = if error != ffi::NO_ERROR {
+                Err(format!(
+                    "the GPU would not run the mesh (GL error {error:#06x})"
+                ))
+            } else if mapped.is_null() {
+                Err("the GPU gave its mesh's points no buffer to read".to_owned())
+            } else {
+                let floats: &[f32] = std::slice::from_raw_parts(mapped.cast::<f32>(), points * 2);
+                let read = floats.to_vec();
+                gl.UnmapBuffer(ffi::TRANSFORM_FEEDBACK_BUFFER);
+                Ok(read)
+            };
+            gl.BindBufferBase(ffi::TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+            gl.BindBuffer(ffi::TRANSFORM_FEEDBACK_BUFFER, 0);
+            gl.DeleteBuffers(1, &raw const feedback);
+            gl.DisableVertexAttribArray(position);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, u32::try_from(was_draw).unwrap_or(0));
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, u32::try_from(was_read).unwrap_or(0));
+            gl.UseProgram(0);
+            read
         }
     }
 
@@ -146,6 +408,8 @@ impl Program {
             buffer: 0,
             uniforms: Rc::from([]),
             attributes: [("position", None), ("uvq", None)],
+            target: [0, 0],
+            source: None,
         }
     }
 
@@ -277,6 +541,10 @@ impl Program {
         // SAFETY: the caller's contract; both names are this context's.
         unsafe {
             gl.DeleteBuffers(1, &raw const self.buffer);
+            if self.target[0] != 0 {
+                gl.DeleteFramebuffers(1, &raw const self.target[0]);
+                gl.DeleteRenderbuffers(1, &raw const self.target[1]);
+            }
             gl.DeleteProgram(self.id);
         }
     }

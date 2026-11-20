@@ -1912,7 +1912,7 @@ fn the_shipped_configuration_declares_no_rules() {
 }
 
 /// **The shipped configuration writes out the engine's defaults**:
-/// `config.lua`'s `effects.sandbox`, `limits` and `present` are the
+/// `config.lua`'s `effects.limits` and `present` are the
 /// numbers Rust defaults to, so the two cannot drift; and a `user.lua`
 /// that raises one reaches the compositor.
 #[test]
@@ -1920,12 +1920,9 @@ fn the_shipped_configuration_writes_out_the_engines_defaults() {
     for (user, wanted) in [
         ("return {}", crate::effect::settings::Settings::default()),
         (
-            "return { effects = { sandbox = { load_ms = 300 } } }",
+            "return { effects = { limits = { params = 12 } } }",
             crate::effect::settings::Settings {
-                sandbox: crate::effect::settings::Caps {
-                    load: std::time::Duration::from_millis(300),
-                    ..crate::effect::settings::Caps::default()
-                },
+                limits: crate::effect::settings::Limits { params: 12 },
                 ..crate::effect::settings::Settings::default()
             },
         ),

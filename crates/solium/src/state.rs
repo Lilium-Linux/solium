@@ -889,11 +889,11 @@ pub(crate) struct Solium {
     /// compiled at the top of `render::prepare` (Ruling 7).
     /// `effect::host::tests::an_empty_host_touches_no_gl`.
     pub(crate) effects: crate::effect::host::Host,
-    /// The engine's own keys, `effects.sandbox`, `limits` and `present`, as
+    /// The engine's own keys, `effects.limits` and `present`, as
     /// the last `effects` gave them (Ruling 28): what binding a
     /// `present` geometry reads; and `xray` and `memo` (Rulings F29,
     /// F30), what the xray and the memos read.
-    /// `tests::effects_sandbox_reaches_the_host`,
+    /// `tests::effects_limits_reach_the_settings`,
     /// `tests::real_client::the_xray_target_is_the_monitor_at_its_scale_times_xray_scale`.
     pub(crate) effect_settings: crate::effect::settings::Settings,
     /// The problems' generation the scripts were last told about, so `settle`
@@ -2514,11 +2514,6 @@ impl Solium {
         if self.rebind {
             self.rebind_effects();
         }
-        // An effect whose Lua its budget stopped this frame is loaded again
-        // from its unchanged folder, after the frame and never in `prepare`
-        // (Ruling 4); nothing is read unless one was stopped:
-        // `tests::settle_rebuilds_an_effect_its_budget_stopped`.
-        self.effects.revive();
         // The overlay hears about a changed problem once, after the frame
         // that found it:
         // `tests::settle_tells_the_scripts_once_per_change_of_the_problems`.

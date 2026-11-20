@@ -1,0 +1,7 @@
+# A geometry that drops the window by its own height as it goes, which the
+# test compilers run with no GPU (the word DROPS in its `.vert`): a mesh
+# that bends where the window is drawn.
+# `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`.
+api = 2
+grid = [1, 4]
+mesh = "drop.vert"

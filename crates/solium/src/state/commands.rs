@@ -1769,24 +1769,19 @@ impl Solium {
         }
     }
 
-    /// The engine's own keys, `effects.sandbox`, `limits` and `present`
-    /// (Ruling 28), and `xray` and `memo` (Rulings F29, F30): kept for what
-    /// reads them, and the caps handed to the host and to the reader of a
-    /// style's `effects.lua`, which read again what new caps may change.
+    /// The engine's own keys, `limits` and `present` (Ruling 28), and `xray`
+    /// and `memo` (Rulings F29, F30): kept for what reads them.
     /// `effects.memo.split` goes to the host before anything binds, so the
     /// user's rules `apply_effects` binds next, and a style's rebound here
     /// when it changed, are split by it.
-    /// `tests::effects_sandbox_reaches_the_host`,
     /// `tests::real_client::the_memo_split_key_reaches_the_bound_chain`.
     pub(crate) fn apply_settings(&mut self, settings: crate::effect::settings::Settings) {
-        let caps = settings.sandbox;
         let split = self.effects.set_memo_split(settings.memo.split);
         // Before anything plays them: what the configuration's presents will
         // name, wanted up front so the first one finds them compiled (#300).
         self.effects.want("load", settings.load.iter().cloned());
         self.effect_settings = settings;
-        let caps = self.effects.set_caps(caps);
-        if caps || split {
+        if split {
             self.apply_style_rules();
         }
     }

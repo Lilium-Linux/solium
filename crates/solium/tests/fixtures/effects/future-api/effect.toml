@@ -1,0 +1,3 @@
+# An effect.toml written for an api this Solium does not read.
+api = 3
+frag = "effect.frag"
