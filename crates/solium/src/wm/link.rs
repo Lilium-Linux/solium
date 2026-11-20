@@ -26,6 +26,15 @@ use solium_wm_protocol::Ask;
 
 use crate::wm::{Chosen, Which};
 
+/// The compositor's Wayland socket, which a window manager written for
+/// river connects to: set once, when the socket is made.
+static WAYLAND_SOCKET: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+
+/// Say which socket a river window manager is to connect to.
+pub(crate) fn set_wayland_socket(name: &std::ffi::OsStr) {
+    let _ = WAYLAND_SOCKET.set(name.to_owned());
+}
+
 /// How long a write to the window manager may block. Its socket's buffer
 /// holds hundreds of batches, so a write blocks only when the window manager
 /// has read none of them: that one has stopped, and the compositor does not
@@ -50,6 +59,13 @@ enum Peer {
         expect(dead_code, reason = "a test runs the window manager on a thread")
     )]
     Process(RefCell<std::process::Child>),
+    /// A window manager written for river: its process, a Wayland client
+    /// of the compositor's (none for a test's, run on a thread), and the
+    /// bridge at the other end of this socket, which speaks for it.
+    River {
+        child: Option<RefCell<std::process::Child>>,
+        bridge: std::rc::Rc<RefCell<crate::river::Bridge>>,
+    },
     #[cfg(test)]
     Thread {
         control: Option<std::sync::mpsc::Sender<tests::Control>>,
@@ -61,6 +77,7 @@ impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.peer {
             Peer::Process(child) => write!(f, "Link(process {})", child.borrow().id()),
+            Peer::River { bridge, .. } => write!(f, "Link(river {})", bridge.borrow().pid()),
             #[cfg(test)]
             Peer::Thread { .. } => f.write_str("Link(thread)"),
         }
@@ -135,6 +152,11 @@ impl Link {
     /// "the window manager" wherever it is reported.
     pub(crate) fn send(&self, message: &Message) -> Result<()> {
         frame::write(&mut &self.stream, message).context("could not be written to")?;
+        // The bridge answers as it reads, so the answer is there before
+        // anyone waits for it.
+        if let Peer::River { bridge, .. } = &self.peer {
+            bridge.borrow_mut().pump();
+        }
         if !matches!(message, Message::Hello(_)) {
             self.wake();
         }
@@ -188,6 +210,15 @@ impl Link {
     /// Read more of what the window manager wrote: `false` when nothing
     /// came by `until`, or, with none, when nothing is there to read.
     fn fill(&self, until: Option<Instant>) -> Result<bool> {
+        // A river window manager's process is not at the other end of the
+        // socket: its going is seen here.
+        if let Peer::River {
+            child: Some(child), ..
+        } = &self.peer
+            && let Ok(Some(status)) = child.borrow_mut().try_wait()
+        {
+            bail!("exited: {status}");
+        }
         let mut chunk = [0u8; 64 * 1024];
         let read = match until {
             Some(until) => {
@@ -238,6 +269,12 @@ impl Link {
     /// `solium-lua`, with no arguments.
     #[cfg(not(test))]
     fn open(which: &Which, chosen: &Chosen) -> Result<Self> {
+        if chosen.speaks == crate::wm::Speaks::River
+            && !which.safe()
+            && let Some([program, arguments @ ..]) = chosen.command.as_deref()
+        {
+            return Self::open_river(program, arguments);
+        }
         let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
         // Started as every program the compositor starts is
         // (`launch::command`): with the environment Solium was started
@@ -273,6 +310,46 @@ impl Link {
         Self::connected(ours, Peer::Process(RefCell::new(child)))
     }
 
+    /// A window manager written for river: `program`, started as a Wayland
+    /// client of the compositor's, and the bridge that speaks for it.
+    #[cfg_attr(
+        test,
+        expect(dead_code, reason = "a test runs its river client on a thread")
+    )]
+    fn open_river(program: &str, arguments: &[String]) -> Result<Self> {
+        let (ours, theirs) = UnixStream::pair().context("making the window manager's socket")?;
+        let mut command = crate::launch::command(program);
+        command.args(arguments).stdin(std::process::Stdio::null());
+        if let Some(socket) = WAYLAND_SOCKET.get() {
+            command.env("WAYLAND_DISPLAY", socket);
+        }
+        let child = command
+            .spawn()
+            .with_context(|| format!("starting {program}"))?;
+        tracing::info!(
+            pid = child.id(),
+            program,
+            "window manager started, speaking river's protocol"
+        );
+        let bridge =
+            crate::river::Bridge::new(theirs, child.id()).context("making the river bridge")?;
+        Self::connected(
+            ours,
+            Peer::River {
+                child: Some(RefCell::new(child)),
+                bridge: std::rc::Rc::new(RefCell::new(bridge)),
+            },
+        )
+    }
+
+    /// The bridge, when the window manager is one written for river.
+    pub(crate) fn river(&self) -> Option<std::rc::Rc<RefCell<crate::river::Bridge>>> {
+        match &self.peer {
+            Peer::River { bridge, .. } => Some(std::rc::Rc::clone(bridge)),
+            _ => None,
+        }
+    }
+
     /// The compositor's end of `stream`, with `peer` at the other.
     fn connected(stream: UnixStream, peer: Peer) -> Result<Self> {
         stream
@@ -291,6 +368,7 @@ impl Link {
     pub(crate) fn pid(&self) -> Option<u32> {
         match &self.peer {
             Peer::Process(child) => Some(child.borrow().id()),
+            Peer::River { bridge, .. } => Some(bridge.borrow().pid()),
             #[cfg(test)]
             Peer::Thread { .. } => None,
         }
@@ -349,6 +427,16 @@ impl Drop for Link {
                 tracing::warn!(pid = child.id(), "the window manager did not go; stopped");
                 let _ = child.kill();
                 let _ = child.wait();
+            }
+            Peer::River { child, bridge } => {
+                // River's way to say goodbye, and then the process goes: it
+                // has nothing of its own to keep.
+                bridge.borrow_mut().finish();
+                if let Some(child) = child {
+                    let child = child.get_mut();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
             }
             #[cfg(test)]
             Peer::Thread { control, thread } => {
@@ -478,6 +566,24 @@ pub(crate) mod tests {
                 },
             )
             .expect("a socket")
+        }
+
+        /// A window manager written for river, whose Wayland client a test
+        /// connects itself: the bridge, as a river window manager's link has
+        /// it, for a process that is this one.
+        pub(crate) fn river_here(answers: &dyn Ask) -> Result<(Self, wire::HelloAnswer)> {
+            let (ours, theirs) =
+                UnixStream::pair().context("making the window manager's socket")?;
+            let bridge = crate::river::Bridge::new(theirs, std::process::id())
+                .context("making the river bridge")?;
+            Self::connected(
+                ours,
+                Peer::River {
+                    child: None,
+                    bridge: std::rc::Rc::new(std::cell::RefCell::new(bridge)),
+                },
+            )?
+            .greeted(false, Vec::new(), answers, Duration::from_secs(10))
         }
 
         /// A window manager that is not the Lua one, run by `run` on a

@@ -91,6 +91,7 @@ pub(crate) fn run() -> Result<()> {
         .context("binding a wayland socket")?;
     let socket_name = source.socket_name().to_string_lossy().into_owned();
     state.socket_name = socket_name.clone();
+    crate::wm::link::set_wayland_socket(std::ffi::OsStr::new(&socket_name));
 
     // X11 clients, if XWayland is installed. Started before the socket source
     // so that a client launched from a script's startup has a display to find.

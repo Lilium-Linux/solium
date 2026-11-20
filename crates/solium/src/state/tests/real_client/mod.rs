@@ -13,6 +13,7 @@
 //! fixture was always the expensive part of it.
 
 mod explicit_sync;
+mod river;
 use super::*;
 use smithay::output::{Mode, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_server::Display;

@@ -1563,7 +1563,13 @@ impl Solium {
             seat_state,
             screencopy_state: crate::screencopy::ScreencopyState::new::<Self>(&display_handle),
             background_effect: crate::background_effect::BackgroundEffect::new(&display_handle),
-            ext_workspaces: crate::ext_workspace::ExtWorkspaces::new(&display_handle),
+            ext_workspaces: {
+                // River's window management globals, beside the other
+                // window-management protocol: a window manager written for
+                // river binds them (`crate::river`).
+                crate::river::dispatch::create_globals(&display_handle);
+                crate::ext_workspace::ExtWorkspaces::new(&display_handle)
+            },
             toplevels: crate::toplevels::Toplevels::new(&display_handle),
             output_management: crate::output_management::OutputManagement::new(&display_handle),
             image_copy_state: crate::image_copy::ImageCopyState::new::<Self>(&display_handle),
@@ -2396,6 +2402,16 @@ impl Solium {
             self.dnd_icon = None;
         }
         self.dnd_icon.clone()
+    }
+
+    /// The bridge of the window manager running now, when it is one written
+    /// for river.
+    pub(crate) fn river_bridge(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::RefCell<crate::river::Bridge>>> {
+        self.scripts
+            .as_ref()
+            .and_then(|scripts| scripts.link.river())
     }
 
     /// Retire transforms that have landed, and say whether anything still

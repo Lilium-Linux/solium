@@ -2323,6 +2323,7 @@ name = "solium"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.13.2",
  "cc",
  "inotify",
  "libc",
@@ -2343,10 +2344,12 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "x11rb",
  "xcursor",
  "zbus",

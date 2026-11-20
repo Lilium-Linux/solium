@@ -26,6 +26,7 @@ file is out of date.
 | Path | What is there |
 |---|---|
 | `crates/solium/src/` | The compositor. `state/` is the `Solium` struct and its Wayland handlers; `render.rs` draws a frame; `input/` is libinput, the seat and grabs; `wm/` is the connection to the window manager, and `script/` its commands and settings as the compositor's own types; `qml/` hosts Qt; `effect/` and `pass/` run effects; `models/` is what QML scenes read |
+| `crates/solium/src/river/`, `crates/solium/protocols/` | River's window management protocol as a second way in for a window manager: the interface files, the server code generated from them, and the bridge that speaks Solium's protocol for a window manager written for river |
 | `crates/solium/qml/` | The QML: the `Solium` module's types, the window frame styles in `panes/` |
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |

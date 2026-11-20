@@ -348,6 +348,7 @@ pub(crate) fn run(place: crate::session::Place) -> Result<()> {
 
     let mut solium = Solium::new(display_handle.clone());
     solium.socket_name = start_socket(&mut event_loop, display)?;
+    crate::wm::link::set_wayland_socket(std::ffi::OsStr::new(&solium.socket_name));
 
     let loop_handle = event_loop.handle();
     solium.explicit_sync.sender = Some(crate::explicit_sync::install(

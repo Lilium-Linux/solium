@@ -15,6 +15,8 @@ pub(crate) mod stores;
 mod timing;
 mod wake;
 
+#[cfg(not(test))]
+pub(crate) use chosen::Speaks;
 pub(crate) use chosen::{Chosen, Which};
 pub(crate) use scripts::{Keeps, Late, Scripts};
 pub(crate) use settings::{Restarts, Settings, Start, Wait};

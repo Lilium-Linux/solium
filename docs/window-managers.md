@@ -57,6 +57,7 @@ cpu_weight = 1000
 | Key | What it is |
 |---|---|
 | `command` | The program and its arguments, run exactly as written. A program with no directory in its name is looked for on `PATH`, and a leading `~/` in the program or an argument is your home directory. Without this key, the shipped `solium-lua` runs. |
+| `protocol` | What the program speaks: `"solium"`, this page's protocol, on its standard input (the default), or `"river"`, river's window management protocol, as an ordinary Wayland client. See [a window manager written for river](#a-window-manager-written-for-river). |
 | `cpu_weight` | The CPU weight of the systemd scope the window manager is put in, from 1 to 10000, where 100 is what an ordinary program has. 1000 unless you say. |
 
 The program is started with the socket to the compositor as its **standard
@@ -556,6 +557,51 @@ comes.
 An event is listened to by its name, as the WIT spells it (`monitors-changed`).
 The generated Rust types list the names in the WIT's order:
 `solium_wm_protocol::Event::CASES` and `Command::CASES`.
+
+## A window manager written for river
+
+A window manager written for [river](https://codeberg.org/river/river)'s
+`river-window-management-v1` protocol runs on Solium unchanged:
+
+```toml
+# ~/.config/solium/wm.toml
+command = ["rrwm"]
+protocol = "river"
+```
+
+The program is started as an ordinary Wayland client of Solium's, and binds
+`river_window_manager_v1` (version 4) and `river_xkb_bindings_v1` (version 3).
+Only that program, or one it starts, is answered; any other client that binds
+the global is told `unavailable`. Inside the compositor a bridge speaks this
+page's protocol for it, so waiting, restarting and the problems overlay work
+as for any window manager: it tells the river window manager the desktop as
+river's windows, outputs and seat, and turns its manage and render sequences
+into `place`, `focus`, `close`, `toggle-fullscreen` and `declare`. A key
+binding it asks for is declared as a binding, and its press is followed by a
+manage sequence, as river's protocol says.
+
+Tried nested: river's own `tinyrwm` (a stacking window manager: windows open at
+a size of their own, focus cycles, a window closes), and `rrwm` (a tiling one:
+windows split the output, focus moves, a closed window's space is given to the
+rest, and its own animation runs one placement per render sequence).
+
+Where Solium is not river:
+
+- **Nothing waits for an application.** River tells a window's new dimensions
+  once the application has taken them; Solium draws a tiled window in its
+  rectangle at once, so a render sequence is told the dimensions proposed, and
+  a size the application takes of its own starts another one.
+- **Stacking, frames and the pointer are Solium's.** `place_top` and the
+  other stacking requests change nothing, and the window the keyboard moves to
+  is raised as any is. Frames are QML, so windows are drawn bare and
+  `set_borders`, decoration surfaces and shell surfaces are taken and not
+  drawn. There is no stream of pointer motion in this protocol, so a pointer
+  operation (an interactive move or resize) ends as soon as it starts.
+- **Not sent:** a `river_output_v1`'s or `river_seat_v1`'s `wl_output` and
+  `wl_seat` names, which the Wayland backend Solium uses does not give.
+- **Not offered:** river's other protocols (`river-layer-shell-v1`,
+  `river-input-management-v1`, `river-xkb-config-v1`). A window manager that
+  needs one for a bar of its own, input settings or a keymap does without it.
 
 ## Checking and debugging
 

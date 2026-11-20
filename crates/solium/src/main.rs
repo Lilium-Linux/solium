@@ -71,6 +71,7 @@ mod qml;
 mod remains;
 mod render;
 mod resizing;
+mod river;
 mod runs;
 mod scanout;
 #[cfg(test)]

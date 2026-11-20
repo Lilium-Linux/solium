@@ -276,6 +276,19 @@ impl Scripts {
         Ok(Self::over(link, answer, stores, Which::Chosen))
     }
 
+    /// The bridge of a window manager written for river, whose client a test
+    /// connects itself (`crate::river`).
+    #[cfg(test)]
+    pub(crate) fn river_here() -> Result<Self> {
+        let stores = Rc::new(StoreReads::default());
+        let answers = Answers {
+            snapshot: None,
+            stores: Rc::clone(&stores),
+        };
+        let (link, answer) = Link::river_here(&answers)?;
+        Ok(Self::over(link, answer, stores, Which::Chosen))
+    }
+
     /// The window manager `which` at the other end of `link`, which
     /// answered `hello` with `answer`.
     pub(crate) fn over(

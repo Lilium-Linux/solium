@@ -13,6 +13,14 @@ workspace = true
 [dependencies]
 # Where the shipped files are, as every program of Solium's finds them.
 solium-paths = { path = "../paths" }
+# The server code of river's window management protocols (`src/river/`),
+# generated from their interface in `protocols/`. Already in the lockfile, at
+# this version, through wayland-protocols.
+wayland-scanner = "0.31"
+# Named by that generated code. Both already in the lockfile, at these
+# versions, through smithay.
+wayland-backend = "0.3"
+bitflags = "2"
 # The animation engine, as a crate so that curves can be tested and previewed
 # without a compositor. See crates/animation/preview.
 solium-animation = { path = "../animation" }

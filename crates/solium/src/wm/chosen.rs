@@ -17,6 +17,12 @@
 //!   or an argument is the home directory. Its standard input is the
 //!   socket to the compositor, and it is told nothing else: the protocol
 //!   says the rest.
+//! - `protocol`: what the program speaks. `"solium"`, the default, is this
+//!   compositor's own protocol, on the socket that is its standard input.
+//!   `"river"` is river's window management protocol: the program is an
+//!   ordinary Wayland client that binds `river_window_manager_v1`, and the
+//!   compositor answers it through `crate::river`, so a window manager
+//!   written for river runs unchanged.
 //! - `cpu_weight`: the CPU weight of the scope the window manager runs in,
 //!   1 to 10000, as systemd's `CPUWeight=` counts it, where 100 is what
 //!   every other program has. A window manager answers in microseconds and
@@ -68,12 +74,24 @@ impl From<&std::path::PathBuf> for Which {
     }
 }
 
+/// What a window manager speaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Speaks {
+    /// This compositor's protocol, on its standard input.
+    #[default]
+    Solium,
+    /// River's window management protocol, as a Wayland client.
+    River,
+}
+
 /// What `wm.toml` says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Chosen {
     /// The program and its arguments, in place of the shipped window
     /// manager; `None` for the shipped one.
     pub(crate) command: Option<Vec<String>>,
+    /// What the program speaks; the shipped one speaks Solium's.
+    pub(crate) speaks: Speaks,
     /// The CPU weight of the window manager's scope.
     pub(crate) cpu_weight: u64,
 }
@@ -83,6 +101,7 @@ impl Default for Chosen {
     fn default() -> Self {
         Self {
             command: None,
+            speaks: Speaks::Solium,
             cpu_weight: CPU_WEIGHT,
         }
     }
@@ -170,6 +189,15 @@ impl Chosen {
                      [\"my-wm\", \"--flag\"]. The shipped window manager runs"
                         .to_owned(),
                 ),
+                ("protocol", toml::de::DeValue::String(word)) => match word.as_ref() {
+                    "solium" => chosen.speaks = Speaks::Solium,
+                    "river" => chosen.speaks = Speaks::River,
+                    other => said.push(format!(
+                        "`protocol` is \"solium\" or \"river\", not {other:?}: \"solium\" is used"
+                    )),
+                },
+                ("protocol", _) => said
+                    .push("`protocol` is \"solium\" or \"river\": \"solium\" is used".to_owned()),
                 ("cpu_weight", toml::de::DeValue::Integer(number)) => {
                     let digits = number.as_str().replace('_', "");
                     match u64::from_str_radix(&digits, number.radix()) {
@@ -185,8 +213,8 @@ impl Chosen {
                     "`cpu_weight` is a whole number, 1 to 10000: {CPU_WEIGHT} is used"
                 )),
                 (other, _) => said.push(format!(
-                    "`{other}` is not a key of this file, which has `command` and \
-                     `cpu_weight`; left out"
+                    "`{other}` is not a key of this file, which has `command`, \
+                     `protocol` and `cpu_weight`; left out"
                 )),
             }
         }
@@ -238,6 +266,21 @@ mod tests {
 
     fn parse(text: &str) -> (Chosen, Vec<String>) {
         Chosen::parse(text, Some(Path::new("/home/someone")))
+    }
+
+    /// A window manager written for river is named, and said to speak
+    /// river's protocol; anything else is Solium's, and said.
+    #[test]
+    fn a_window_manager_can_speak_rivers_protocol() {
+        let (chosen, said) = parse("command = [\"rrwm\"]\nprotocol = \"river\"\n");
+        assert_eq!(said, Vec::<String>::new());
+        assert_eq!(chosen.speaks, super::Speaks::River);
+        let (chosen, said) = parse("command = [\"my-wm\"]\nprotocol = \"solium\"\n");
+        assert_eq!((chosen.speaks, said.len()), (super::Speaks::Solium, 0));
+        let (chosen, said) = parse("protocol = \"x11\"\n");
+        assert_eq!(chosen.speaks, super::Speaks::Solium);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("\"x11\""), "{said:?}");
     }
 
     /// No file, and an empty one, are the shipped window manager at the
