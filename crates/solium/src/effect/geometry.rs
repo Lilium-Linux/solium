@@ -662,21 +662,25 @@ pub(crate) mod tests {
         let stopped = host.effect("spin").expect("loaded");
         stopped
             .sandbox()
+            .expect("an effect.lua")
             .lua()
             .globals()
             .set("spin", true)
             .expect("set");
-        assert_eq!(mesh(stopped.sandbox(), &ask(), 1, 1), Err(Refusal::Budget));
+        assert_eq!(
+            mesh(stopped.sandbox().expect("an effect.lua"), &ask(), 1, 1),
+            Err(Refusal::Budget)
+        );
         host.revive();
         let fresh = host.effect("spin").expect("still loaded");
-        assert!(!fresh.sandbox().poisoned());
+        assert!(!fresh.poisoned());
         assert!(
-            mesh(fresh.sandbox(), &ask(), 1, 1).is_ok(),
+            mesh(fresh.sandbox().expect("an effect.lua"), &ask(), 1, 1).is_ok(),
             "the next call after the rebuild did not draw"
         );
         assert_eq!(host.id("spin"), Some(id), "a rebuild is not a new version");
         assert!(
-            mesh(stopped.sandbox(), &ask(), 1, 1).is_err(),
+            mesh(stopped.sandbox().expect("an effect.lua"), &ask(), 1, 1).is_err(),
             "the pane that overran holds its own state"
         );
         let _ = std::fs::remove_dir_all(place);

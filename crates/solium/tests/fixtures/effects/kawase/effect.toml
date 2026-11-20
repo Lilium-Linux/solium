@@ -1,0 +1,19 @@
+api = 2
+inputs = ["self"]
+fallback = [{ passes = 2 }, { passes = 1 }]
+reach = "ceil(offset * 2 ^ (passes + 1))"
+
+[params]
+passes = { default = 3, min = 1, max = 6, int = true }
+offset = 3
+
+# Worked out at load, never per frame.
+[[stages]]
+repeat = "passes"
+pass = "down.frag"
+scale = 0.5
+
+[[stages]]
+repeat = "passes"
+pass = "up.frag"
+scale = 2

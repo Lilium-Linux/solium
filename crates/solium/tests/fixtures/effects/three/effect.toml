@@ -1,0 +1,11 @@
+api = 2
+inputs = ["self", "shape", "state:a"]
+
+[[stages]]
+state = "a"
+depends = "params"
+stages = [{ pass = "a.frag" }]
+
+[[stages]]
+pass = "three.frag"
+uses = ["a", "shape"]

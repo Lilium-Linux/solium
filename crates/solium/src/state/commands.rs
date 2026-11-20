@@ -171,7 +171,7 @@ impl Solium {
                     format!("its pixels, `{}`: {}", other.name(), problem.message)
                 })
             });
-            (loaded.dir().join("effect.lua"), loaded.bind(&mine), pixels)
+            (loaded.file().to_owned(), loaded.bind(&mine), pixels)
         };
         // Its own problems, said again for this present or mended by it.
         let label = format!("present:{name}");
@@ -1776,7 +1776,7 @@ impl Solium {
     /// `effects.memo.split` goes to the host before anything binds, so the
     /// user's rules `apply_effects` binds next, and a style's rebound here
     /// when it changed, are split by it.
-    /// `tests::effects_sandbox_reaches_the_host_and_the_styles_reader`,
+    /// `tests::effects_sandbox_reaches_the_host`,
     /// `tests::real_client::the_memo_split_key_reaches_the_bound_chain`.
     pub(crate) fn apply_settings(&mut self, settings: crate::effect::settings::Settings) {
         let caps = settings.sandbox;
@@ -1785,11 +1785,8 @@ impl Solium {
         // name, wanted up front so the first one finds them compiled (#300).
         self.effects.want("load", settings.load.iter().cloned());
         self.effect_settings = settings;
-        let caps = self.effects.set_caps(caps).then_some(caps);
-        if let Some(caps) = caps {
-            crate::style::set_caps(caps);
-        }
-        if caps.is_some() || split {
+        let caps = self.effects.set_caps(caps);
+        if caps || split {
             self.apply_style_rules();
         }
     }
@@ -2018,7 +2015,7 @@ impl Solium {
             .and_then(std::path::Path::file_name)
             .map(|name| format!("style:{}", name.to_string_lossy()))
             .unwrap_or_default();
-        let file = dir.map(|dir| dir.join("effects.lua")).unwrap_or_default();
+        let file = dir.map(|dir| dir.join("effects.toml")).unwrap_or_default();
         let mut problems = read.problems.clone();
         for (index, rule) in read.rules.iter().enumerate() {
             if rule.fill == Fill::Off {
@@ -2035,7 +2032,7 @@ impl Solium {
                     self.chains.remove(key);
                     problems.push(Problem {
                         effect: effect.clone(),
-                        message: format!("effects.lua, rule {}: {}", index + 1, problem.message),
+                        message: format!("effects.toml, rule {}: {}", index + 1, problem.message),
                         file: if problem.line.is_some() {
                             problem.file
                         } else {

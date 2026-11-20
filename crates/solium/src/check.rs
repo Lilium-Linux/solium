@@ -376,16 +376,15 @@ pub(crate) fn scenes(scripts: &mut crate::script::Scripts, report: &mut Report) 
 }
 
 /// Your own pane-style bundles, every layer included, and the rules of each
-/// one's `effects.lua`, read as the compositor reads them. The shipped ones
+/// one's `effects.toml`, read as the compositor reads them. The shipped ones
 /// are `cargo test`'s, which builds them
 /// (`decoration::tests::a_narrow_tile_hides_the_titlebars_pieces_in_every_shipped_style`).
 /// `tests::a_broken_style_of_your_own_fails`,
-/// `tests::a_broken_effects_lua_of_your_own_fails`.
-pub(crate) fn styles(report: &mut Report, caps: crate::effect::settings::Caps) {
+/// `tests::a_broken_effects_toml_of_your_own_fails`.
+pub(crate) fn styles(report: &mut Report) {
     styles_in(
         &crate::style::directories(),
         &crate::style::shipped(),
-        caps,
         report,
     );
 }
@@ -393,12 +392,7 @@ pub(crate) fn styles(report: &mut Report, caps: crate::effect::settings::Caps) {
 /// [`styles`], over directories handed in, so a test can hand in its own.
 /// `tests::a_broken_style_of_your_own_fails`,
 /// `tests::the_shipped_styles_are_left_to_cargo_test`.
-fn styles_in(
-    directories: &[std::path::PathBuf],
-    shipped: &Path,
-    caps: crate::effect::settings::Caps,
-    report: &mut Report,
-) {
+fn styles_in(directories: &[std::path::PathBuf], shipped: &Path, report: &mut Report) {
     for directory in directories.iter().filter(|directory| *directory != shipped) {
         let Ok(bundles) = std::fs::read_dir(directory) else {
             continue;
@@ -422,13 +416,13 @@ fn styles_in(
             let Some(dir) = manifest.parent() else {
                 continue;
             };
-            let file = dir.join("effects.lua");
-            if !file.is_file() {
+            let file = dir.join("effects.toml");
+            // An `effects.lua` alone is read too, for the problem that says
+            // to write `effects.toml` instead.
+            if !file.is_file() && !dir.join("effects.lua").is_file() {
                 continue;
             }
-            // Under the configured sandbox, as the session reads it
-            // (`tests::a_styles_effects_lua_is_checked_under_the_configured_sandbox`).
-            let read = crate::style::rules_with(dir, caps);
+            let read = crate::style::rules_of(dir);
             if read.problems.is_empty() {
                 report.line(&format!(
                     "    ok {}: {} rule(s)",
@@ -556,8 +550,11 @@ pub(crate) fn effects<C: crate::effect::host::Compiler>(
     }
     let mut seen = std::collections::BTreeSet::new();
     for dir in library.user_folders() {
-        if !dir.join("effect.lua").is_file() {
-            report.fail(&format!("    {}: has no effect.lua", dir.display()));
+        if crate::effect::host::description_of(&dir).is_none() {
+            report.fail(&format!(
+                "    {}: has no effect.toml (nor effect.lua)",
+                dir.display()
+            ));
             continue;
         }
         seen.insert(
@@ -976,7 +973,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
     match single {
         // An effect folder: checked alone, with no Qt
         // (`cli::check_exits_0_on_a_good_effect_folder`).
-        Some(dir) if dir.is_dir() && dir.join("effect.lua").is_file() => {
+        Some(dir) if dir.is_dir() && crate::effect::host::description_of(dir).is_some() => {
             // Under the configuration's `effects.sandbox`, as the session
             // loads the folder; the defaults when it does not load
             // (`cli::check_of_a_folder_reads_the_configured_sandbox`).
@@ -1025,7 +1022,7 @@ pub(crate) fn run(single: Option<&Path>) -> std::process::ExitCode {
                 match crate::qml::start() {
                     Ok(()) => {
                         scenes(&mut scripts, &mut report);
-                        styles(&mut report, caps);
+                        styles(&mut report);
                         let mut gpu = render_node();
                         let formats = gpu.as_mut().map(crate::pool::probe_formats);
                         let mut compiler = gpu.as_mut().map(crate::effect::GlCompiler);
@@ -1694,22 +1691,17 @@ mod tests {
             software_qt();
             let own = fixture("");
             let (passed, text) = reported(|report| {
-                styles_in(
-                    std::slice::from_ref(&own),
-                    &crate::style::shipped(),
-                    CAPS,
-                    report,
-                );
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
             });
             assert!(!passed, "{text}");
             assert!(text.contains("Ring.qml"), "{text}");
         });
     }
 
-    /// **A style of your own whose `effects.lua` is broken fails**, at its
+    /// **A style of your own whose `effects.toml` is broken fails**, at its
     /// file and line, as the overlay names it, though every layer builds.
     #[test]
-    fn a_broken_effects_lua_of_your_own_fails() {
+    fn a_broken_effects_toml_of_your_own_fails() {
         crate::qml::qt_test::on_the_qt_thread(|| {
             software_qt();
             let own = std::env::temp_dir().join(format!(
@@ -1725,21 +1717,16 @@ mod tests {
             )
             .expect("writing the manifest");
             std::fs::write(
-                style.join("effects.lua"),
-                "return {\n  { part = = 'client' } }\n",
+                style.join("effects.toml"),
+                "[[rules]]\npart = = \"client\"\n",
             )
-            .expect("writing effects.lua");
+            .expect("writing effects.toml");
             let (passed, text) = reported(|report| {
-                styles_in(
-                    std::slice::from_ref(&own),
-                    &crate::style::shipped(),
-                    CAPS,
-                    report,
-                );
+                styles_in(std::slice::from_ref(&own), &crate::style::shipped(), report);
             });
             let _ = std::fs::remove_dir_all(&own);
             assert!(!passed, "{text}");
-            assert!(text.contains("effects.lua:2: "), "{text}");
+            assert!(text.contains("effects.toml:2: "), "{text}");
         });
     }
 
@@ -1749,7 +1736,7 @@ mod tests {
     fn the_shipped_styles_are_left_to_cargo_test() {
         let shipped = crate::style::shipped();
         let (passed, text) = reported(|report| {
-            styles_in(std::slice::from_ref(&shipped), &shipped, CAPS, report);
+            styles_in(std::slice::from_ref(&shipped), &shipped, report);
         });
         assert!(passed, "{text}");
         assert!(!text.contains("Pane.qml"), "{text}");
@@ -2092,7 +2079,7 @@ mod tests {
         let (passed, out) = check(&[]);
         assert!(!passed, "{out}");
         assert!(
-            out.contains("empty: has no effect.lua") && out.contains("good: ok"),
+            out.contains("empty: has no effect.toml") && out.contains("good: ok"),
             "{out}"
         );
         std::fs::remove_dir(place.join("user/empty")).expect("the empty folder goes");
@@ -2330,45 +2317,6 @@ mod tests {
         assert!(passed, "{out}");
     }
 
-    /// **A style's `effects.lua` is checked under the configured
-    /// `effects.sandbox`**: one that builds 20 MiB fails under the default
-    /// 16 and passes under 64.
-    #[test]
-    fn a_styles_effects_lua_is_checked_under_the_configured_sandbox() {
-        crate::qml::qt_test::on_the_qt_thread(|| {
-            software_qt();
-            let own = std::env::temp_dir().join(format!(
-                "solium-check-test-{}-style-caps",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&own);
-            let style = own.join("roomy");
-            std::fs::create_dir_all(&style).expect("a style folder");
-            std::fs::write(
-                style.join("Pane.qml"),
-                "import Solium\nPaneStyle { Layer { depth: \"frame\"; name: \"bar\" } }\n",
-            )
-            .expect("writing the manifest");
-            std::fs::write(style.join("effects.lua"), format!("{BIG}return {{}}\n"))
-                .expect("writing effects.lua");
-            let check = |caps| {
-                reported(|report| {
-                    styles_in(
-                        std::slice::from_ref(&own),
-                        &crate::style::shipped(),
-                        caps,
-                        report,
-                    );
-                })
-            };
-            let (refused, said) = check(CAPS);
-            let (passed, out) = check(ROOMY);
-            let _ = std::fs::remove_dir_all(&own);
-            assert!(!refused, "the premise: 20 MiB under 16: {said}");
-            assert!(passed, "{out}");
-        });
-    }
-
     /// **The shipped effects pass the check**, every one of them, GPU-free.
     #[test]
     fn the_shipped_effects_pass_the_check() {
@@ -2377,7 +2325,7 @@ mod tests {
             .expect("the shipped folders")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.join("effect.lua").is_file())
+            .filter(|path| crate::effect::host::description_of(path).is_some())
             .collect();
         assert!(
             !folders.is_empty(),

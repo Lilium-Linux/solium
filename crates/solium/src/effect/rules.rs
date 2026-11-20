@@ -306,8 +306,8 @@ const MATCH_KEYS: [&str; 12] = [
 ];
 const SOURCES: [&str; 4] = ["xray", "live", "auto", "self"];
 const MASKS: [&str; 3] = ["shape", "alpha", "region"];
-const NO_EFFECT: &str = "`effect` names no effect: give its name, a link such as { \"blur\", passes = 3 }, a chain of links, or false to empty the slot";
-const NOT_A_LINK: &str = "a chain is a list of links, each a name or { \"name\", params }";
+const NO_EFFECT: &str = "`effect` names no effect: give its name, a link such as { \"blur\", passes = 3 } or { effect = \"blur\", passes = 3 }, a chain of links, or false to empty the slot";
+const NOT_A_LINK: &str = "a chain is a list of links, each a name, { \"name\", params } or { effect = \"name\", params }";
 
 /// What `nearest` found among `among`, as the end of a message.
 /// `tests::a_broken_rule_is_refused_at_its_key`.
@@ -769,6 +769,10 @@ fn read_fill(effect: &Doc) -> Result<(Fill, Option<Source>), Refused> {
                 let (link, source) = read_link(effect, true)?;
                 Ok((Fill::Chain(vec![link]), source))
             }
+            None if fields.contains_key("effect") => {
+                let (link, source) = read_link(effect, true)?;
+                Ok((Fill::Chain(vec![link]), source))
+            }
             Some(Doc::Table(_)) => {
                 if !fields.is_empty() {
                     return Err(refused(
@@ -797,7 +801,12 @@ fn read_fill(effect: &Doc) -> Result<(Fill, Option<Source>), Refused> {
 
 /// One link: a name, or a table whose `[1]` is the name and whose named keys
 /// are its params, its `reach` and `bleed`, and (in a first link) `source`.
+/// The name may be its `effect` key instead, for a language whose tables
+/// have keys or a list part but not both, such as TOML or JSON:
+/// `{ effect = "blur", passes = 3 }`. `effect` is no param's name
+/// (`solium_effects::spec::RESERVED`), so the two cannot be confused.
 /// `tests::a_mixed_table_keeps_its_params_beside_the_name`,
+/// `tests::a_link_may_name_its_effect_by_key`,
 /// `tests::a_links_reach_and_bleed_override_the_files`.
 fn read_link(link: &Doc, first: bool) -> Result<(Link, Option<Source>), Refused> {
     let refused = |message: String| ("effect", message);
@@ -805,6 +814,10 @@ fn read_link(link: &Doc, first: bool) -> Result<(Link, Option<Source>), Refused>
         Doc::Text(name) => (name, None),
         Doc::Table(DocTable { list, fields, .. }) => match list.as_slice() {
             [Doc::Text(name)] => (name, Some(fields)),
+            [] => match fields.get("effect") {
+                Some(Doc::Text(name)) => (name, Some(fields)),
+                _ => return Err(refused(NOT_A_LINK.to_owned())),
+            },
             [Doc::Text(_), ..] => {
                 return Err(refused(
                     "a link is one effect's name and its params; a chain is a list of links: { { \"blur\" }, { \"tint\" } }"
@@ -823,6 +836,7 @@ fn read_link(link: &Doc, first: bool) -> Result<(Link, Option<Source>), Refused>
     let mut source = None;
     for (key, value) in fields.into_iter().flatten() {
         match key.as_str() {
+            "effect" => {}
             "source" if !first => {
                 return Err(refused(
                     "`source` goes on the rule or in the first link: it rebinds the chain's first input"
@@ -1334,6 +1348,43 @@ mod tests {
                 ("radius".to_owned(), Value::Int(12)),
                 ("tint".to_owned(), Value::Vec4([1.0, 0.0, 0.0, 1.0]))
             ]
+        );
+    }
+
+    /// **A link may name its effect by key**, `{ effect = "glow", … }`, as
+    /// a style's `effects.toml` must, and a chain may be made of such links;
+    /// the same rule reads the same either way.
+    #[test]
+    fn a_link_may_name_its_effect_by_key() {
+        let listed = parse(&rules(
+            r#"{ { match = "*", part = "pane", slot = "behind", effect = { "glow", radius = 12, tint = { 1, 0, 0, 1 } } } }"#,
+        ))
+        .expect("parses");
+        let keyed = parse(&rules(
+            r#"{ { match = "*", part = "pane", slot = "behind", effect = { effect = "glow", radius = 12, tint = { 1, 0, 0, 1 } } } }"#,
+        ))
+        .expect("parses");
+        assert_eq!(listed, keyed);
+        let chain = parse(&rules(
+            r#"{ { match = "*", part = "client", slot = "behind", effect = { { effect = "blur", source = "self" }, { effect = "tint", amount = 0.1 } } } }"#,
+        ))
+        .expect("parses");
+        let Fill::Chain(links) = &chain[0].fill else {
+            panic!("a chain")
+        };
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.effect.as_str())
+                .collect::<Vec<_>>(),
+            ["blur", "tint"]
+        );
+        assert!(
+            parse(&rules(
+                r#"{ { match = "*", part = "pane", slot = "behind", effect = { effect = 3 } } }"#,
+            ))
+            .is_err(),
+            "the key names an effect"
         );
     }
 

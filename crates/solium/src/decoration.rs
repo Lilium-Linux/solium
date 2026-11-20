@@ -614,7 +614,7 @@ pub(crate) struct Decoration {
     /// Whether the radii changed, or their source was animating, when last
     /// read: a binding with a `Behavior` is followed frame by frame.
     corners_moving: bool,
-    /// The effect rules the style's `effects.lua` gives this pane, and the
+    /// The effect rules the style's `effects.toml` gives this pane, and the
     /// generation they were read at, copied from the `Style` for the reason
     /// `effects` is: a frame resolves the pane's slots from here. Shared,
     /// not copied, between the panes of one style
@@ -2959,7 +2959,7 @@ pub(crate) fn style_file(style: Option<&str>) -> Option<PathBuf> {
 /// The style folder a window's frame is built from, by the lookup `Decorations::build`
 /// takes (the default style when none is named), or `None` for `none`, a
 /// single-file decoration or a name that is nowhere: where
-/// `Solium::apply_style_rules` reads `effects.lua` from.
+/// `Solium::apply_style_rules` reads `effects.toml` from.
 /// `state::tests::the_formats_probe_rebinds_the_styles_rules_too`,
 /// `state::tests::sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again`.
 pub(crate) fn style_dir(style: Option<&str>) -> Option<PathBuf> {
@@ -7149,7 +7149,7 @@ mod tests {
 
     /// **The glass style draws no shade of its own and its bar no fill**:
     /// its layers are the bar and the keyboard pill, the shade being the
-    /// `shade` effect its `effects.lua` puts in front of the pane
+    /// `shade` effect its `effects.toml` puts in front of the pane
     /// (`state::tests::the_shipped_glass_style_binds_liquid_glass_behind_the_pane`);
     /// and the bar, focused or not, draws nothing across its band but its
     /// buttons, title and icon, so the glass behind it shows through.
@@ -7226,7 +7226,7 @@ mod tests {
     /// `qml::buffers::tests::a_scene_growing_a_pixel_a_frame_is_rebound_once_a_step`);
     /// read as the compositor reads it
     /// (`tests::a_layer_is_drawn_again_for_a_new_size_at_most_resize_hz_times_a_second`).
-    /// The shade's are the `shade` effect's params, in `effects.lua`.
+    /// The shade's are the `shade` effect's params, in `effects.toml`.
     #[test]
     fn the_glass_bars_numbers_change_what_it_draws() {
         on_the_qt_thread(|| {
@@ -7283,7 +7283,7 @@ mod tests {
                 &[
                     ("Pane.qml", &read("Pane.qml")),
                     ("Frame.qml", &held),
-                    ("effects.lua", &read("effects.lua")),
+                    ("effects.toml", &read("effects.toml")),
                 ],
             );
             let style = crate::style::load(&dir).expect("the copied style loads");

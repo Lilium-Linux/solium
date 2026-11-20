@@ -1,0 +1,6 @@
+# The `frosted` fixture's rules: each applies to this style's panes only.
+[[rules]]
+match = "*"
+part = "region:titlebar"
+slot = "behind"
+effect = "tint"

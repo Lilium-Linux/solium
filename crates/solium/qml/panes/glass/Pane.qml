@@ -8,7 +8,7 @@
 //   Pane.qml     what the frame reserves, the corners, and the layers;
 //   Frame.qml    the bar: the window buttons at the left, the title after
 //                them, the application's icon at the right, and no fill;
-//   effects.lua  two rules: the shipped `glass` effect behind the whole pane,
+//   effects.toml two rules: the shipped `glass` effect behind the whole pane,
 //                and the shipped `shade` in front of it while the window does
 //                not have the keyboard, a thin dark edge just inside its
 //                rounded outline, round all four sides and the corners,
@@ -30,7 +30,7 @@
 // the window between sizes.
 //
 // The numbers here, the ones at the top of `Frame.qml` and the shade's in
-// `effects.lua` are the style's to change: copy this folder to
+// `effects.toml` are the style's to change: copy this folder to
 // ~/.config/solium/qml/panes/glass/, change them there, and your copy is used
 // in place of this one.
 

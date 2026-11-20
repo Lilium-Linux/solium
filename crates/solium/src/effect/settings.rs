@@ -148,16 +148,15 @@ const MOTION_HZ: std::ops::RangeInclusive<f64> = 10.0..=1000.0;
 /// `sandbox::tests::the_memory_cap_is_configurable`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Caps {
-    /// A load-time call's budget (`effect.lua`, `stages`, `reach`, `bleed`,
-    /// a style's `effects.lua`), and the one the checks at load share.
+    /// A load-time call's budget in an `effect.lua` (its table, `stages`,
+    /// `reach`, `bleed`), and the one the checks at load share.
     pub(crate) load: Duration,
     /// The bytes a state may hold.
     pub(crate) memory: usize,
 }
 
 impl Caps {
-    /// 100 ms and 16 MiB: the defaults, as a constant, so a `static` can
-    /// start from them (`style::set_caps`).
+    /// 100 ms and 16 MiB: the defaults.
     pub(crate) const DEFAULT: Self = Self {
         load: Duration::from_millis(100),
         memory: 16 << 20,

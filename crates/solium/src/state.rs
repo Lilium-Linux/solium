@@ -893,7 +893,7 @@ pub(crate) struct Solium {
     /// the last `effects` gave them (Ruling 28): what binding a
     /// `present` geometry reads; and `xray` and `memo` (Rulings F29,
     /// F30), what the xray and the memos read.
-    /// `tests::effects_sandbox_reaches_the_host_and_the_styles_reader`,
+    /// `tests::effects_sandbox_reaches_the_host`,
     /// `tests::real_client::the_xray_target_is_the_monitor_at_its_scale_times_xray_scale`.
     pub(crate) effect_settings: crate::effect::settings::Settings,
     /// The problems' generation the scripts were last told about, so `settle`

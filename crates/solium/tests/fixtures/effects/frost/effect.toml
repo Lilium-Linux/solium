@@ -1,0 +1,15 @@
+api = 2
+inputs = ["self"]
+reach = 48
+
+[params]
+tint = { default = 0.12, min = 0, max = 1 }
+passes = { default = 2, int = true }
+
+[[stages]]
+use = "kawase"
+params = { passes = "passes" }
+
+[[stages]]
+use = "tint"
+params = { amount = "tint" }

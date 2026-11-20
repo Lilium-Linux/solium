@@ -1,6 +1,7 @@
-//! A Lua value as a settings document, for the Lua the compositor runs
-//! itself: an effect's or a style's. A window manager sends its documents
-//! already made.
+//! A Lua value as a settings document: what the tests write rules and
+//! settings in, as the Lua window manager does. A window manager sends its
+//! documents already made, and the compositor reads a style's rules from
+//! TOML.
 
 use mlua::Value;
 

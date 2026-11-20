@@ -13,11 +13,15 @@
 
 pub(crate) mod beneath;
 pub(crate) mod crossfade;
+pub(crate) mod described;
 pub(crate) mod element;
 pub(crate) mod fade;
 pub(crate) mod geometry;
 pub(crate) mod gl;
 pub(crate) mod host;
+/// Lua tables as a [`crate::script::Doc`], for the tests that write rules
+/// and settings as the Lua window manager does.
+#[cfg(test)]
 pub(crate) mod lua_doc;
 pub(crate) mod mask;
 pub(crate) mod memo;

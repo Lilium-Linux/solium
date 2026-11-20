@@ -9452,7 +9452,7 @@ fn a_reload_that_changes_only_the_sandbox_keeps_a_present() {
             .state
             .effects
             .effect("genie")
-            .map(|loaded| loaded.sandbox().caps()),
+            .map(|loaded| loaded.sandbox().expect("an effect.lua").caps()),
         Some(fixture.state.effects.caps()),
         "the genie that runs is not the one loaded under the new caps"
     );

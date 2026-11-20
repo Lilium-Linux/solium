@@ -148,7 +148,7 @@ fn check_exits_0_on_a_good_effect_folder() {
     );
 }
 
-/// **The shipped `glass` passes `solium --check`**: its `effect.lua`, its
+/// **The shipped `glass` passes `solium --check`**: its `effect.toml`, its
 /// params, `refract.frag`'s checks, and the shipped `blur` its `use` stage
 /// names, found beside it.
 #[test]

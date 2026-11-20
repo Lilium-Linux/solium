@@ -2,9 +2,9 @@
 //
 // The window buttons at the left, the title right after them, and the
 // application's icon at the right. The bar has no fill at all, so what shows
-// through it is the glass `effects.lua` puts behind the whole pane, and the
+// through it is the glass `effects.toml` puts behind the whole pane, and the
 // bar and the window are one piece. A window without the keyboard is told
-// apart by the shade round its edge (the `shade` effect `effects.lua` puts in
+// apart by the shade round its edge (the `shade` effect `effects.toml` puts in
 // front of it) and by its dimmer title.
 //
 // **Nothing here animates.** A focus change, a new title, a button under the
@@ -20,7 +20,7 @@
 //
 // The numbers to change are under "The look" below, beside the two in
 // `Pane.qml`, the corners and the bar's height, and the shade's in
-// `effects.lua`. The panes README lists them.
+// `effects.toml`. The panes README lists them.
 
 import QtQuick
 import Solium

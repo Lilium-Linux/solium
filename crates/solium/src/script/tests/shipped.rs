@@ -225,8 +225,8 @@ fn every_effect_named_is_one_the_engine_has() {
     let shipped = crate::assets::effects();
     for (file, line, name) in asked {
         assert!(
-            shipped.join(&name).join("effect.lua").is_file(),
-            "{file}:{line} asks for effect {name:?}, which is no folder with an effect.lua in {}",
+            crate::effect::host::description_of(&shipped.join(&name)).is_some(),
+            "{file}:{line} asks for effect {name:?}, which is no effect folder in {}",
             shipped.display()
         );
     }

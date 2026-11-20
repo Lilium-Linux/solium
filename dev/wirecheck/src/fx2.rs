@@ -255,7 +255,7 @@ fn read_float(renderer: &mut GlesRenderer, fbo: u32) -> Result<[f32; 4]> {
 }
 
 /// A test effect folder of `crates/solium/tests/fixtures/effects/`, as its
-/// `effect.lua` binds at the params given: its inputs, its stages and its
+/// description binds at the params given: its inputs, its stages and its
 /// params, and its frags by file name.
 pub(crate) struct Fixture {
     inputs: &'static [&'static str],
@@ -340,7 +340,7 @@ pub(crate) fn shipped_blur(passes: u32, offset: f64) -> Fixture {
 }
 
 /// The shipped `shade/` with `params` (the glass style's are its defaults),
-/// as its `effect.lua` makes it (no Lua here): its one pass, its input the
+/// as its description makes it (no Lua here): its one pass, its input the
 /// part's shape alone. FX3's case 13j draws it.
 pub(crate) fn shipped_shade(params: Vec<(String, Value)>) -> Fixture {
     Fixture {

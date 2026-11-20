@@ -1,7 +1,9 @@
 //! The effect host: where effect folders are, what was loaded from them, and
 //! what went wrong, by file and line.
 //!
-//! An effect is `effects/<name>/effect.lua` and the files beside it (\[16\] §2).
+//! An effect is `effects/<name>/effect.toml` and the files beside it (\[16\]
+//! §2; `effect.lua` for a geometry effect's `mesh`, until meshes are vertex
+//! shaders).
 //! The user's folder shadows the shipped one name by name, as a pane style's
 //! does (`style::resolve`): `tests::a_user_folder_shadows_the_shipped_one`.
 
@@ -10,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use solium_effects::describe::Described;
 use solium_effects::glsl::{self, Sources};
-use solium_effects::spec::{EffectSpec, GridSpec, Rung, Severity, Value};
+use solium_effects::spec::{EffectSpec, Extent, GridSpec, Rung, Severity, Value};
 use solium_effects::stage::{Binding, Plan, Stage};
 
 use super::geometry::{self, Refusal};
@@ -42,8 +45,8 @@ impl Library {
     /// The folder the effect called `name` is in, or `None`.
     ///
     /// A bare name only (`tests::an_effect_name_is_a_bare_name`), and a folder
-    /// with no `effect.lua` is skipped so the shipped one still draws
-    /// (`tests::a_folder_without_effect_lua_falls_through`).
+    /// with no `effect.toml` (or `effect.lua`) is skipped so the shipped one
+    /// still draws (`tests::a_folder_without_effect_lua_falls_through`).
     pub(crate) fn resolve(&self, name: &str) -> Option<PathBuf> {
         if !is_name(name) {
             return None;
@@ -52,7 +55,7 @@ impl Library {
             .iter()
             .chain(std::iter::once(&self.shipped))
             .map(|place| place.join(name))
-            .find(|folder| folder.join("effect.lua").is_file())
+            .find(|folder| description_of(folder).is_some())
     }
 
     /// Where a folder's closure (`pixels`, `fallback`, `use`) is looked for when the
@@ -79,6 +82,16 @@ impl Library {
         folders.sort();
         folders
     }
+}
+
+/// The file that says what the effect in `dir` is: its `effect.toml`, or,
+/// with none, its `effect.lua` (a geometry effect's, until meshes are
+/// vertex shaders). `tests::an_effect_toml_wins_over_an_effect_lua`.
+pub(crate) fn description_of(dir: &Path) -> Option<PathBuf> {
+    ["effect.toml", "effect.lua"]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|file| file.is_file())
 }
 
 /// Whether `name` can name an effect: lower-case letters, digits, `-` and `_`.
@@ -124,15 +137,26 @@ impl Problem {
     }
 }
 
-/// One effect, loaded: its folder, what its `effect.lua` said, its Lua.
+/// What an effect was loaded from: its `effect.toml`'s description, or an
+/// `effect.lua` in its sandbox.
+#[derive(Debug)]
+pub(crate) enum Source {
+    Described(Described),
+    Lua(Sandbox),
+}
+
+/// One effect, loaded: its folder, what its description said, and the
+/// description itself.
 /// `P` is the program type a [`Compiler`] makes: GL's in the compositor, a
 /// number in the tests (`tests::a_program_is_compiled_once_per_content`).
 #[derive(Debug)]
 pub(crate) struct Loaded<P = super::gl::Program> {
     name: String,
     dir: PathBuf,
+    /// Its `effect.toml` or `effect.lua`, which problems with it name.
+    file: PathBuf,
     spec: EffectSpec,
-    sandbox: Sandbox,
+    source: Source,
     /// The params at their defaults, and the stages `stages` gave for them at
     /// load: a bind at the defaults reads these rather than calling
     /// `stages(p)` again (`tests::a_fallback_naming_another_effect_binds_it_at_load`).
@@ -178,8 +202,8 @@ pub(crate) fn pack_pixels<P>(
     params: &[(String, Value)],
     limit: usize,
 ) -> Result<geometry::Params, Problem> {
-    let file = loaded.dir().join("effect.lua");
-    let refused = |message: String| Problem::error(loaded.name(), &file, None, message);
+    let file = loaded.file();
+    let refused = |message: String| Problem::error(loaded.name(), file, None, message);
     let (bound, _) = solium_effects::spec::bind(&loaded.spec().params, params).map_err(refused)?;
     geometry::packed(&bound, limit).map_err(refused)
 }
@@ -199,9 +223,10 @@ pub(crate) struct Bound {
 }
 
 impl<P> Loaded<P> {
-    /// Load the effect in `dir` into a sandbox of its own, and read its
-    /// stages at the defaults: a stage that cannot be read refuses the
-    /// version, and the effects its `use`s name are loaded with it.
+    /// Load the effect in `dir`, from its `effect.toml` (an `effect.lua`
+    /// into a sandbox of its own), and read its stages at the defaults: a
+    /// stage that cannot be read refuses the version, and the effects its
+    /// `use`s name are loaded with it.
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::a_used_effect_is_loaded_with_its_user_and_a_broken_stage_is_refused`.
     #[cfg(test)]
@@ -212,19 +237,31 @@ impl<P> Loaded<P> {
     /// `Self::load`, its Lua made with `caps` (`effects.sandbox`):
     /// `tests::a_mesh_stopped_at_load_names_its_budget_and_key`.
     pub(crate) fn load_with(name: &str, dir: &Path, caps: Caps) -> Result<Self, Problem> {
-        let file = dir.join("effect.lua");
-        let mut sandbox = Sandbox::with_caps(name, &file, caps)?;
-        let spec = sandbox.load_effect()?;
-        let (defaults, _) = solium_effects::spec::bind(&spec.params, &[])
-            .map_err(|message| Problem::error(name, &file, None, message))?;
-        let stages = sandbox.stages(&spec, &defaults)?;
+        let file = description_of(dir).unwrap_or_else(|| dir.join("effect.toml"));
+        let refused = |message: String| Problem::error(name, &file, None, message);
+        let (spec, source) = if file
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            let (spec, described) = super::described::read(name, &file)?;
+            (spec, Source::Described(described))
+        } else {
+            let mut sandbox = Sandbox::with_caps(name, &file, caps)?;
+            (sandbox.load_effect()?, Source::Lua(sandbox))
+        };
+        let (defaults, _) = solium_effects::spec::bind(&spec.params, &[]).map_err(refused)?;
+        let stages = match &source {
+            Source::Described(described) => described.stages(&defaults).map_err(refused)?,
+            Source::Lua(sandbox) => sandbox.stages(&spec, &defaults)?,
+        };
         let mut used = Vec::new();
         named_by_use(&stages, &mut used);
         Ok(Self {
             name: name.to_owned(),
             dir: dir.to_owned(),
+            file,
             spec,
-            sandbox,
+            source,
             defaults,
             stages,
             hash: folder_hash(dir),
@@ -247,8 +284,23 @@ impl<P> Loaded<P> {
         &self.spec
     }
 
-    pub(crate) fn sandbox(&self) -> &Sandbox {
-        &self.sandbox
+    /// Its `effect.toml`, or its `effect.lua`.
+    pub(crate) fn file(&self) -> &Path {
+        &self.file
+    }
+
+    /// Its Lua, when it was loaded from an `effect.lua`.
+    pub(crate) fn sandbox(&self) -> Option<&Sandbox> {
+        match &self.source {
+            Source::Lua(sandbox) => Some(sandbox),
+            Source::Described(_) => None,
+        }
+    }
+
+    /// Whether its Lua was stopped by its budget, so it must be loaded again
+    /// before it runs: never, for a described effect, which runs no Lua.
+    pub(crate) fn poisoned(&self) -> bool {
+        self.sandbox().is_some_and(Sandbox::poisoned)
     }
 
     /// The params at their defaults, as a bind with no overrides gives them.
@@ -279,7 +331,12 @@ impl<P> Loaded<P> {
         if params == self.defaults.as_slice() {
             return Ok(self.stages.clone());
         }
-        self.sandbox.stages(&self.spec, params)
+        match &self.source {
+            Source::Described(described) => described
+                .stages(params)
+                .map_err(|message| Problem::error(&self.name, &self.file, None, message)),
+            Source::Lua(sandbox) => sandbox.stages(&self.spec, params),
+        }
     }
 
     /// Bind with `overrides`: refused for an unknown param or a wrong kind,
@@ -287,14 +344,31 @@ impl<P> Loaded<P> {
     /// `tests::the_fixture_effects_load_and_bind_at_their_defaults`,
     /// `tests::binding_names_the_effect_and_warns_of_a_clamp`.
     pub(crate) fn bind(&self, overrides: &[(String, Value)]) -> Result<Bound, Problem> {
-        let file = self.dir.join("effect.lua");
-        let (params, warnings) = solium_effects::spec::bind(&self.spec.params, overrides)
-            .map_err(|message| Problem::error(&self.name, &file, None, message))?;
-        let reach = self.sandbox.extent("reach", &params)?;
-        let bleed = self.sandbox.extent("bleed", &params)?;
+        let file = &self.file;
+        let refused = |message: String| Problem::error(&self.name, file, None, message);
+        let (params, warnings) =
+            solium_effects::spec::bind(&self.spec.params, overrides).map_err(refused)?;
+        let fixed = |extent: Extent| match extent {
+            Extent::Fixed(pixels) => pixels,
+            Extent::Function => 0.0,
+        };
+        let (reach, bleed) = match &self.source {
+            Source::Described(described) => (
+                described
+                    .extent(false, fixed(self.spec.reach), &params)
+                    .map_err(refused)?,
+                described
+                    .extent(true, fixed(self.spec.bleed), &params)
+                    .map_err(refused)?,
+            ),
+            Source::Lua(sandbox) => (
+                sandbox.extent("reach", &params)?,
+                sandbox.extent("bleed", &params)?,
+            ),
+        };
         let warnings = warnings
             .into_iter()
-            .map(|message| Problem::warning(&self.name, &file, message))
+            .map(|message| Problem::warning(&self.name, file, message))
             .collect();
         Ok(Bound {
             params,
@@ -809,8 +883,10 @@ impl<P: Clone> Host<P> {
             && slot.current.as_ref().is_some_and(|current| {
                 current.hash() == hash
                     && current.dir() == dir
-                    && !current.sandbox().poisoned()
-                    && current.sandbox().caps() == self.caps
+                    && !current.poisoned()
+                    && current
+                        .sandbox()
+                        .is_none_or(|sandbox| sandbox.caps() == self.caps)
             })
         {
             return false;
@@ -937,7 +1013,7 @@ impl<P: Clone> Host<P> {
         let Some(loaded) = self.latest(name).filter(|loaded| loaded.spec().mesh) else {
             return Ok(None);
         };
-        let file = loaded.dir().join("effect.lua");
+        let file = loaded.file().to_owned();
         let source = match (&loaded.spec().frag, &loaded.spec().pixels) {
             (Some(_), _) => name.to_owned(),
             (None, Some(other)) => other.clone(),
@@ -1064,7 +1140,7 @@ impl<P: Clone> Host<P> {
                 format!("no effect called `{name}` is loaded"),
             )]
         })?;
-        let file = loaded.dir().join("effect.lua");
+        let file = loaded.file().to_owned();
         let mut bound = loaded.bind(overrides).map_err(|problem| vec![problem])?;
         // Each plan to make: its root effect, its params, and which rung.
         let mut wanted = vec![(name.to_owned(), overrides.to_vec(), None::<String>)];
@@ -1347,11 +1423,7 @@ impl<P: Clone> Host<P> {
             if slot.given_up {
                 continue;
             }
-            let Some(current) = slot
-                .current
-                .as_ref()
-                .filter(|current| current.sandbox().poisoned())
-            else {
+            let Some(current) = slot.current.as_ref().filter(|current| current.poisoned()) else {
                 continue;
             };
             #[cfg(test)]
@@ -1616,22 +1688,25 @@ fn refused_at_rest<P>(loaded: &Loaded<P>) -> Option<Problem> {
         .spec()
         .grid
         .unwrap_or(GridSpec::Fixed { cols: 1, rows: 1 });
-    let refusal = geometry::at_rest(loaded.sandbox(), grid, loaded.defaults()).err()?;
+    let refusal = geometry::at_rest(loaded.sandbox()?, grid, loaded.defaults()).err()?;
     Some(at_rest_problem(loaded, refusal))
 }
 
 /// What a refusal at load says, and where.
 /// `tests::a_mesh_too_slow_for_a_frame_is_a_problem_at_its_mesh`.
 fn at_rest_problem<P>(loaded: &Loaded<P>, refusal: Refusal) -> Problem {
-    let file = loaded.dir().join("effect.lua");
-    let line = loaded.sandbox().mesh_line();
+    let file = loaded.file();
+    let line = loaded.sandbox().and_then(Sandbox::mesh_line);
     let message = match refusal {
         Refusal::Error { line, message } => {
-            return Problem::error(loaded.name(), &file, line, message);
+            return Problem::error(loaded.name(), file, line, message);
         }
         Refusal::Budget => format!(
             "its mesh ran past the {} ms its checks at load have (`effects.sandbox.load_ms`; progress 0 and 1, every axis and direction), and was stopped",
-            loaded.sandbox().caps().load.as_millis()
+            loaded
+                .sandbox()
+                .map_or(Caps::default().load, Sandbox::caps_load)
+                .as_millis()
         ),
         Refusal::Slow { took } => format!(
             "its mesh takes {:.1} ms a call; a frame gives it {} ms",
@@ -1648,7 +1723,7 @@ fn at_rest_problem<P>(loaded: &Loaded<P>, refusal: Refusal) -> Problem {
         }
         Refusal::MovesAtRest => "its mesh moves the window at progress 0: at rest a geometry draws the window where it is, arriving, leaving and resizing".to_owned(),
     };
-    Problem::error(loaded.name(), &file, line, message)
+    Problem::error(loaded.name(), file, line, message)
 }
 
 /// A configuration error as a problem: the first `<file>.lua:<line>:` in it
@@ -1750,16 +1825,23 @@ pub(crate) mod tests {
         dir
     }
 
-    /// An effect folder `name` in `place`: its `effect.lua` and any other files.
+    /// An effect folder `name` in `place`: its description and any other
+    /// files. TOML, which begins with `api`, a `#` comment or a `[table]`,
+    /// is written as its `effect.toml`; anything else as its `effect.lua`.
     pub(crate) fn folder(
         place: &Path,
         name: &str,
-        effect_lua: &str,
+        description: &str,
         files: &[(&str, &str)],
     ) -> PathBuf {
         let dir = place.join(name);
         std::fs::create_dir_all(&dir).expect("an effect folder");
-        std::fs::write(dir.join("effect.lua"), effect_lua).expect("writing effect.lua");
+        let start = description.trim_start();
+        let toml = ["api", "#", "["]
+            .iter()
+            .any(|first| start.starts_with(first));
+        let file = if toml { "effect.toml" } else { "effect.lua" };
+        std::fs::write(dir.join(file), description).expect("writing the description");
         for (file, text) in files {
             std::fs::write(dir.join(file), text).expect("writing an effect's file");
         }
@@ -1880,8 +1962,8 @@ pub(crate) mod tests {
                 (loaded.name(), loaded.dir(), loaded.hash()),
                 (name, dir.as_path(), super::folder_hash(&dir))
             );
-            assert_eq!(loaded.spec().api, 1, "{name}");
-            assert!(!loaded.sandbox().poisoned() && loaded.needs.is_empty());
+            assert_eq!(loaded.spec().api, 2, "{name}");
+            assert!(!loaded.poisoned() && loaded.needs.is_empty());
             if name == "frost" {
                 // its stages(p) at the defaults use both.
                 assert_eq!(loaded.used, ["kawase", "tint"]);
@@ -2137,7 +2219,7 @@ pub(crate) mod tests {
         folder(
             &place,
             "rounded",
-            &read("rounded/effect.lua"),
+            &read("rounded/effect.toml"),
             &[("rounded.frag", &frag)],
         );
         let warp = |text: &str| {
@@ -2441,7 +2523,7 @@ pub(crate) mod tests {
         for effect in ["style:a", "style:b", "rules"] {
             host.push_problem(super::Problem::error(
                 effect,
-                Path::new("effects.lua"),
+                Path::new("effects.toml"),
                 None,
                 "wrong".to_owned(),
             ));
@@ -2664,13 +2746,15 @@ pub(crate) mod tests {
             host.problems()
         );
         assert_eq!(
-            host.latest("small").map(|loaded| loaded.sandbox().caps()),
+            host.latest("small")
+                .map(|loaded| loaded.sandbox().expect("an effect.lua").caps()),
             Some(big),
             "an unchanged folder kept the caps it loaded under"
         );
         host.compile_pending(&mut Counting::default());
         assert_eq!(
-            host.effect("small").map(|loaded| loaded.sandbox().caps()),
+            host.effect("small")
+                .map(|loaded| loaded.sandbox().expect("an effect.lua").caps()),
             Some(big),
             "the version that runs is not the one loaded under the new caps"
         );
@@ -2717,7 +2801,8 @@ pub(crate) mod tests {
         assert_eq!(host.id("frag"), Some(frag), "a frag lost its id");
         for (name, id) in [("flat", flat), ("frag", frag)] {
             assert_eq!(
-                host.by_id(id).map(|loaded| loaded.sandbox().caps()),
+                host.by_id(id)
+                    .map(|loaded| loaded.sandbox().expect("an effect.lua").caps()),
                 Some(caps),
                 "{name}'s id does not name the version under the new caps"
             );
@@ -2834,13 +2919,14 @@ pub(crate) mod tests {
         let stopped = host.effect("spin").expect("current");
         stopped
             .sandbox()
+            .expect("an effect.lua")
             .lua()
             .globals()
             .set("spin", true)
             .expect("set");
         assert_eq!(
             crate::effect::geometry::mesh(
-                stopped.sandbox(),
+                stopped.sandbox().expect("an effect.lua"),
                 &crate::effect::geometry::tests::ask(),
                 1,
                 1
@@ -2868,12 +2954,12 @@ pub(crate) mod tests {
         });
         assert_eq!(read.get(), 0, "a changed folder's Lua was run");
         assert!(
-            host.effect("spin").expect("loaded").sandbox().poisoned(),
+            host.effect("spin").expect("loaded").poisoned(),
             "a changed folder was swapped in under the old version"
         );
         assert_eq!(host.id("spin"), id);
         host.reload();
-        assert!(!host.effect("spin").expect("loaded").sandbox().poisoned());
+        assert!(!host.effect("spin").expect("loaded").poisoned());
         assert_ne!(host.id("spin"), id, "the reload's is a new version");
         let _ = std::fs::remove_dir_all(place);
     }
@@ -2890,7 +2976,7 @@ pub(crate) mod tests {
         let (mut host, _stopped) = stopped_in(&place);
         host.revive_with(|name, _| super::Loaded::load(name, &other));
         assert!(
-            host.effect("spin").expect("loaded").sandbox().poisoned(),
+            host.effect("spin").expect("loaded").poisoned(),
             "a load of other files was swapped in"
         );
         let _ = std::fs::remove_dir_all(place);
@@ -2916,7 +3002,7 @@ pub(crate) mod tests {
         assert!(!stopped.needs.is_empty(), "its frag is a program it needs");
         host.revive();
         let fresh = host.effect("spin").expect("loaded");
-        assert!(!fresh.sandbox().poisoned());
+        assert!(!fresh.poisoned());
         assert_eq!(fresh.needs, stopped.needs);
         let _ = std::fs::remove_dir_all(place);
     }
@@ -2946,7 +3032,7 @@ pub(crate) mod tests {
             "{:?}",
             host.problems()
         );
-        assert!(host.effect("spin").expect("loaded").sandbox().poisoned());
+        assert!(host.effect("spin").expect("loaded").poisoned());
         let before = host.loads;
         host.revive();
         assert_eq!(
@@ -2955,7 +3041,7 @@ pub(crate) mod tests {
         );
         host.reload();
         assert!(
-            !host.effect("spin").expect("loaded").sandbox().poisoned(),
+            !host.effect("spin").expect("loaded").poisoned(),
             "a reload of the unchanged folder left it stopped"
         );
         assert!(
@@ -3337,6 +3423,7 @@ pub(crate) mod tests {
         }
         let calls: i64 = rich
             .sandbox()
+            .expect("an effect.lua")
             .lua()
             .globals()
             .get("calls")

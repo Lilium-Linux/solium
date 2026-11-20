@@ -23,7 +23,7 @@ const MONITOR: (usize, usize) = (640, 360);
 const PART: (usize, usize, usize, usize) = (200, 40, 120, 80);
 
 /// The shipped blur's `passes`, `offset` and reach (`offset · 2^(passes + 1)`,
-/// its `effect.lua`'s), at its defaults.
+/// its description's), at its defaults.
 const PASSES: u32 = 3;
 const OFFSET: f64 = 3.0;
 const REACH: usize = 48;

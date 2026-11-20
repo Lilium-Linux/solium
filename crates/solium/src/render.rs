@@ -931,7 +931,15 @@ fn present_grid(
                 params: &params,
                 ..ask
             };
-            mesh(loaded.sandbox(), &ask, cols, rows).map(|points| crate::warp::Grid {
+            // Only an `effect.lua` has a mesh; a description that reached
+            // here is refused rather than drawn flat.
+            let Some(sandbox) = loaded.sandbox() else {
+                return Err(crate::effect::geometry::Refusal::Error {
+                    line: None,
+                    message: "it has no mesh".to_owned(),
+                });
+            };
+            mesh(sandbox, &ask, cols, rows).map(|points| crate::warp::Grid {
                 cols,
                 rows,
                 part,

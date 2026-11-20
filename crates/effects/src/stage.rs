@@ -44,7 +44,7 @@ pub enum Depends {
     Region,
 }
 
-/// One stage, as an `effect.lua` wrote it.
+/// One stage, as an effect's description gives it once its params are bound.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stage {
     /// One `.frag` into a target `scale` times the size of what it reads,

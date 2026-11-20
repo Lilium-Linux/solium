@@ -363,8 +363,8 @@ its pane style, its `region:titlebar`, or a scripted or layer surface; `slot`
 is `behind` it, in `front` of it, or `replace` it; `effect` is a name, a name
 with params (`{ "blur", passes = 3 }`), a chain of them, or `false` to empty
 the slot. A later rule for the same part and slot wins, and yours win over a
-pane style's: a style may give its own windows rules in an `effects.lua`
-beside its `Pane.qml` ([pane styles](../crates/solium/qml/panes/README.md#effectslua)). `source = "self"` is what makes this blur read mpv's own
+pane style's: a style may give its own windows rules in an `effects.toml`
+beside its `Pane.qml` ([pane styles](../crates/solium/qml/panes/README.md#effectstoml)). `source = "self"` is what makes this blur read mpv's own
 pixels. Without it, a blur reads what is behind the window: put it `behind`
 a translucent terminal and the wallpaper shows through blurred, the blur run
 once per monitor and shared by every window it is behind

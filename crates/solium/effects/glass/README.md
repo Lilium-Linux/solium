@@ -36,7 +36,7 @@ from what lies past it.
 
 ## Params
 
-By family, as `effect.lua` lists them. A value outside a param's range is
+By family, as `effect.toml` lists them. A value outside a param's range is
 clamped, with a warning; a param it does not have is refused, with the one
 you probably meant.
 

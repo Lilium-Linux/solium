@@ -1,0 +1,24 @@
+# An edge shade: a thin band just inside the part's rounded outline, round
+# all four sides and through the corners, darkest at the very edge and gone
+# `width` pixels in. Solium's own design and code. Every number is a param.
+#
+# It reads nothing of the frame, only the part's shape (tier T0): it runs
+# once, and again only when the part's size or its params change, whatever
+# the window draws, and needs no capture. The `glass` pane style puts it in
+# front of a window without the keyboard, fading in and out with the focus
+# (the rule's `fade`):
+#   { match = { focused = false }, part = "pane", slot = "front", effect = "shade",
+#     fade = { duration = 240, easing = "outCubic" } }
+# Copy this folder to ~/.config/solium/effects/shade/ to change it; your copy
+# is used instead, everywhere that names `shade`.
+api = 2
+inputs = ["shape"]
+frag = "shade.frag"
+
+[params]
+width = { default = 12, min = 0, max = 256 }     # how far in it reaches, px; 0 for none
+strength = { default = 0.5, min = 0, max = 1 }   # how opaque it is at the very edge
+color = [0, 0, 0, 1]                             # its colour; its alpha scales `strength`
+falloff = { default = 2, min = 0.25, max = 8 }   # how it fades across the band: 1 evenly,
+                                                 # 2 with the square of the way in
+radius = { default = -1, min = -1, max = 512 }   # the corners; -1 keeps the part's own

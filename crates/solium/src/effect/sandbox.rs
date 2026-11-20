@@ -159,6 +159,11 @@ impl Sandbox {
         self.caps
     }
 
+    /// The load budget it was made with, which a problem at load names.
+    pub(crate) fn caps_load(&self) -> Duration {
+        self.caps.load
+    }
+
     /// Whether a call was stopped by its budget, so this state must not run
     /// again. `tests::an_effect_that_never_returns_is_stopped_within_its_budget`.
     pub(crate) fn poisoned(&self) -> bool {
@@ -468,17 +473,6 @@ impl Sandbox {
             _ => Err(problem(format!("`{key}` is not a number or a function"))),
         }
     }
-
-    /// Run a Lua file in this sandbox, under the load budget, and return its
-    /// value: a pane style's `effects.lua`, which says rules, not an effect.
-    /// `style::tests::effects_lua_cannot_reach_sol`.
-    pub(crate) fn eval_file(&self, path: &Path) -> Result<LuaValue, Problem> {
-        let text = std::fs::read_to_string(path).map_err(|err| {
-            Problem::error(&self.effect, path, None, format!("cannot read it: {err}"))
-        })?;
-        let name = format!("@{}", path.display());
-        self.at_load(|lua| lua.load(text.as_str()).set_name(name).eval::<LuaValue>())
-    }
 }
 
 /// Whether `err` is Lua running out of the memory its state may hold,
@@ -632,7 +626,15 @@ fn read_spec(table: &Table) -> Result<EffectSpec, String> {
     let mut spec = EffectSpec::default();
     for (key, value) in entries {
         match key.as_str() {
-            "api" => spec.api = whole(&value).ok_or("`api` must be a whole number")?,
+            "api" => {
+                spec.api = whole(&value).ok_or("`api` must be a whole number")?;
+                if spec.api != 1 {
+                    return Err(format!(
+                        "`api` is {}, and an effect.lua is api 1; api 2 is written as an effect.toml",
+                        spec.api
+                    ));
+                }
+            }
             "inputs" => spec.inputs = words(&value, "inputs")?,
             "params" => spec.params = params(&value)?,
             "reach" => spec.reach = extent(&value, "reach")?,

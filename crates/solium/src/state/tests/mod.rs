@@ -125,11 +125,10 @@ fn apply_effects_lua(state: &mut Solium, lua: &str) {
     state.apply_effects_set(rules, settings);
 }
 
-/// **`effects.sandbox` reaches the host and the styles' reader**: the caps
-/// one `sol.effects` gives are what every effect's Lua and every style's
-/// `effects.lua` are made with, and what it gives is kept for its readers.
+/// **`effects.sandbox` reaches the host**: the caps one `sol.effects` gives
+/// are what every effect's Lua is made with, and what it gives is kept.
 #[test]
-fn effects_sandbox_reaches_the_host_and_the_styles_reader() {
+fn effects_sandbox_reaches_the_host() {
     let display = smithay::reexports::wayland_server::Display::<Solium>::new()
         .expect("creating a test wayland display");
     let mut state = Solium::new(display.handle());
@@ -142,13 +141,10 @@ fn effects_sandbox_reaches_the_host_and_the_styles_reader() {
         memory: 32 << 20,
     };
     assert_eq!(state.effects.caps(), caps);
-    let styles = crate::style::caps();
     assert_eq!(state.effect_settings.limits.params, 12);
-    // Back to the defaults, which every other test reads styles under.
     apply_effects_lua(&mut state, "{}");
-    assert_eq!(styles, caps, "the styles' reader kept its own caps");
     assert_eq!(
-        crate::style::caps(),
+        state.effects.caps(),
         crate::effect::settings::Caps::default()
     );
 }
@@ -1103,16 +1099,20 @@ fn settle_rebuilds_an_effect_its_budget_stopped() {
     let stopped = state.effects.effect("spin").expect("current");
     stopped
         .sandbox()
+        .expect("an effect.lua")
         .lua()
         .globals()
         .set("spin", true)
         .expect("set");
     let ask = crate::effect::geometry::tests::ask();
-    assert!(crate::effect::geometry::mesh(stopped.sandbox(), &ask, 1, 1).is_err());
+    assert!(
+        crate::effect::geometry::mesh(stopped.sandbox().expect("an effect.lua"), &ask, 1, 1)
+            .is_err()
+    );
     let _ = state.settle(state.clock.now());
     let fresh = state.effects.effect("spin").expect("still current");
     assert!(
-        !fresh.sandbox().poisoned(),
+        !fresh.poisoned(),
         "settle did not rebuild the stopped effect"
     );
     let _ = std::fs::remove_dir_all(place);
@@ -1340,9 +1340,9 @@ fn the_environment_names_a_style() -> bool {
         .any(|name| std::env::var_os(name).is_some())
 }
 
-/// A pane style folder `frosted` in `place`, with `effects.lua` as given and
-/// a manifest nothing here builds.
-fn style_with_rules(place: &std::path::Path, effects_lua: &str) -> std::path::PathBuf {
+/// A pane style folder `frosted` in `place`, with `effects.toml` as given
+/// and a manifest nothing here builds.
+fn style_with_rules(place: &std::path::Path, effects_toml: &str) -> std::path::PathBuf {
     let style = place.join("frosted");
     std::fs::create_dir_all(&style).expect("a style folder");
     std::fs::write(
@@ -1350,8 +1350,16 @@ fn style_with_rules(place: &std::path::Path, effects_lua: &str) -> std::path::Pa
         "import Solium\nPaneStyle { Layer { depth: \"frame\"; name: \"bar\" } }\n",
     )
     .expect("writing the manifest");
-    std::fs::write(style.join("effects.lua"), effects_lua).expect("writing effects.lua");
+    std::fs::write(style.join("effects.toml"), effects_toml).expect("writing effects.toml");
     style
+}
+
+/// A style's rule, in `effects.toml`: every window's `client`, in `slot`,
+/// filled by `effect` reading the client's own pixels.
+fn own_pixels_rule(effect: &str, slot: &str) -> String {
+    format!(
+        "[[rules]]\nmatch = \"*\"\npart = \"client\"\nslot = \"{slot}\"\neffect = {{ effect = \"{effect}\", source = \"self\" }}\n"
+    )
 }
 
 /// The style's newest bound plan's first step's program, as a test reads it.
@@ -1364,7 +1372,7 @@ fn style_step(state: &Solium) -> Option<u64> {
 }
 
 /// **A style's rules are bound when it is applied, and a broken
-/// `effects.lua` is on the overlay** (Ruling 15): its effects are wanted and
+/// `effects.toml` is on the overlay** (Ruling 15): its effects are wanted and
 /// its rules bound at config load, not when a frame first resolves one; a
 /// broken edit lists its line, and the rules that ran stay bound. Applied
 /// again unchanged it tells the overlay nothing, and mended it leaves
@@ -1373,10 +1381,7 @@ fn style_step(state: &Solium) -> Option<u64> {
 fn a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overlay() {
     let place = crate::effect::host::tests::scratch("state-style-rules");
     crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
-    let style = style_with_rules(
-        &place,
-        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
-    );
+    let style = style_with_rules(&place, &own_pixels_rule("tint", "front"));
     let (_display, mut state) = state_with_effects_in(&place);
     state.apply_style_rules_from(Some(&style));
     assert!(
@@ -1391,8 +1396,8 @@ fn a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overl
         "the style's rule is not bound when the style is applied"
     );
     std::fs::write(
-        style.join("effects.lua"),
-        "return {\n  {\n    part = = 'client' } }",
+        style.join("effects.toml"),
+        "[[rules]]\nmatch = \"*\"\npart = = \"client\"\n",
     )
     .expect("breaking it");
     state.apply_style_rules_from(Some(&style));
@@ -1419,7 +1424,7 @@ fn a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overl
         told,
         "applied again unchanged, the overlay was told of a change"
     );
-    std::fs::write(style.join("effects.lua"), "return {}").expect("mending it");
+    std::fs::write(style.join("effects.toml"), "rules = []\n").expect("mending it");
     state.apply_style_rules_from(Some(&style));
     assert!(
         !state
@@ -1441,7 +1446,7 @@ fn a_styles_rules_are_bound_when_it_is_applied_and_its_problems_are_on_the_overl
 }
 
 /// **The shipped glass style binds liquid glass behind the pane and the
-/// shade in front of it**: its `effects.lua` has two rules, the `glass`
+/// shade in front of it**: its `effects.toml` has two rules, the `glass`
 /// effect behind every pane but a fullscreen one (T2, reading the backdrop),
 /// and the `shade` in front of every such pane without the keyboard (T0,
 /// reading only the pane's shape), fading in and out over 240 ms on
@@ -1514,7 +1519,7 @@ fn the_shipped_glass_style_binds_liquid_glass_behind_the_pane() {
     assert_eq!(tiers, [(0, Tier::Xray), (1, Tier::Generated)], "{tiers:?}");
 }
 
-/// **A style's rule that cannot bind is a problem at its `effects.lua`, and
+/// **A style's rule that cannot bind is a problem at its `effects.toml`, and
 /// the others run** (Ruling 15): where your own set is taken whole, a
 /// style's rules are bound one by one, so one naming an effect nobody ships
 /// costs only its own slot.
@@ -1524,10 +1529,10 @@ fn a_style_rule_that_cannot_bind_is_a_problem_and_the_others_run() {
     crate::effect::host::tests::folder(&place, "tint", TINT, &[("effect.frag", TINT_FRAG)]);
     let style = style_with_rules(
         &place,
-        "return {
-            { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } },
-            { match = '*', part = 'client', slot = 'behind', effect = 'nobody' },
-        }",
+        &format!(
+            "{}[[rules]]\nmatch = \"*\"\npart = \"client\"\nslot = \"behind\"\neffect = \"nobody\"\n",
+            own_pixels_rule("tint", "front")
+        ),
     );
     let (_display, mut state) = state_with_effects_in(&place);
     state.apply_style_rules_from(Some(&style));
@@ -1542,7 +1547,7 @@ fn a_style_rule_that_cannot_bind_is_a_problem_and_the_others_run() {
             .iter()
             .any(|each| each.effect == "style:frosted"
                 && each.message.contains("rule 2")
-                && each.file == style.join("effects.lua")),
+                && each.file == style.join("effects.toml")),
         "{:?}",
         state.effects.problems()
     );
@@ -1565,10 +1570,7 @@ fn a_replaced_style_holds_only_its_own_programs() {
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
         )],
     );
-    let style = style_with_rules(
-        &place,
-        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
-    );
+    let style = style_with_rules(&place, &own_pixels_rule("tint", "front"));
     let (_display, mut state) = state_with_effects_in(&place);
     state.apply_style_rules_from(Some(&style));
     let tint = style_step(&state).expect("bound");
@@ -1577,8 +1579,8 @@ fn a_replaced_style_holds_only_its_own_programs() {
         "the style's program is not held"
     );
     std::fs::write(
-        style.join("effects.lua"),
-        "return { { match = '*', part = 'client', slot = 'front', effect = { 'plain', source = 'self' } } }",
+        style.join("effects.toml"),
+        own_pixels_rule("plain", "front"),
     )
     .expect("editing it");
     state.apply_style_rules_from(Some(&style));
@@ -1597,7 +1599,7 @@ fn a_replaced_style_holds_only_its_own_programs() {
 }
 
 /// **`sol.pane` binds its style's rules, and a reload binds them again**
-/// (Ruling 15): naming a style applies its `effects.lua` there and then, and
+/// (Ruling 15): naming a style applies its `effects.toml` there and then, and
 /// a reload reads the file again even when the configuration does not name
 /// the style again.
 #[test]
@@ -1617,10 +1619,7 @@ fn sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again() {
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
         )],
     );
-    let style = style_with_rules(
-        &directory,
-        "return { { match = '*', part = 'client', slot = 'front', effect = { 'tint', source = 'self' } } }",
-    );
+    let style = style_with_rules(&directory, &own_pixels_rule("tint", "front"));
     let entry = directory.join("init.lua");
     std::fs::write(&entry, format!("sol.pane('{}')\n", style.display()))
         .expect("writing the test script");
@@ -1628,8 +1627,8 @@ fn sol_pane_binds_the_styles_rules_and_a_reload_binds_them_again() {
     state.reload_from(&entry);
     let tint = style_step(&state).expect("sol.pane did not bind its style's rules");
     std::fs::write(
-        style.join("effects.lua"),
-        "return { { match = '*', part = 'client', slot = 'front', effect = { 'plain', source = 'self' } } }",
+        style.join("effects.toml"),
+        own_pixels_rule("plain", "front"),
     )
     .expect("editing it");
     std::fs::write(&entry, "-- the style stays as it was\n").expect("writing the test script");
@@ -1661,10 +1660,7 @@ fn the_formats_probe_rebinds_the_styles_rules_too() {
             "vec4 sol_effect(vec2 uv) { return sol_tex(uv); }\n",
         )],
     );
-    let style = style_with_rules(
-        &place,
-        "return { { match = '*', part = 'client', slot = 'replace', effect = { 'wide', source = 'self' } } }",
-    );
+    let style = style_with_rules(&place, &own_pixels_rule("wide", "replace"));
     let (_display, mut state) = state_with_effects_in(&place);
     state
         .decorations

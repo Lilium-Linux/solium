@@ -1348,7 +1348,7 @@ local defaults = {
     -- drawn, at no extra cost: no pass and no copy of the window. The panes
     -- README, `qml/panes/README.md`, has what each style is made of and
     -- costs. A style folder may also give its windows effect rules, in an
-    -- `effects.lua` beside its Pane.qml; yours in `effects.rules` win over
+    -- `effects.toml` beside its Pane.qml; yours in `effects.rules` win over
     -- them. "glass" is the one that ships with a rule: the `glass` effect
     -- behind every window it frames, except a fullscreen one, which keeps
     -- direct scanout. Its blur is run once per monitor and shared, and each
@@ -2262,7 +2262,7 @@ local defaults = {
         --
         -- A list, so yours replaces this one whole. A set with a broken rule
         -- is refused whole, named on the overlay, and the rules that ran stay.
-        -- A pane style's own rules, in its effects.lua, come first: yours win.
+        -- A pane style's own rules, in its effects.toml, come first: yours win.
         rules = {},
         -- What an effect's own Lua may spend as it loads: `load_ms` of time
         -- for each call (10 to 5000), shared by the checks a geometry

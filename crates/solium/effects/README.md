@@ -1,16 +1,20 @@
 # Effect folders
 
-An effect is a folder of Lua and GLSL: `effects/<name>/effect.lua`, which says
-what the effect takes and how it runs, and the shader files beside it that draw
-it. No effect is written into the compositor. Solium gives every effect the
-same generic pieces to build from, and the effects that ship with it are
-folders like any other, here, to read, copy and change. Yours go in
-`~/.config/solium/effects/<name>/` (`$XDG_CONFIG_HOME/solium/effects/` when
-that is set), and a folder of yours shadows the shipped one of the same name,
-name by name, as a pane style's does: copy a shipped folder there, change it,
-and everything that names it uses your copy. A folder with no `effect.lua` in
-it is skipped, so an empty one made and not filled yet does not cost you the
-shipped effect of that name.
+An effect is a folder of a description and GLSL: `effects/<name>/effect.toml`,
+which says what the effect takes and how it runs, as data, and the shader
+files beside it that draw it. No effect is written into the compositor, and
+none runs code of its own on the CPU: Solium reads the description and runs
+it. Solium gives every effect the same generic pieces to build from, and the
+effects that ship with it are folders like any other, here, to read, copy and
+change. Yours go in `~/.config/solium/effects/<name>/`
+(`$XDG_CONFIG_HOME/solium/effects/` when that is set), and a folder of yours
+shadows the shipped one of the same name, name by name, as a pane style's
+does: copy a shipped folder there, change it, and everything that names it
+uses your copy. A folder with no `effect.toml` in it is skipped, so an empty
+one made and not filled yet does not cost you the shipped effect of that
+name. A geometry effect, one with a `mesh`, is still described in Lua, as an
+`effect.lua` ([below](#writing-a-mesh)), which is read where a folder has no
+`effect.toml`.
 
 A name is lower-case letters, digits, `-` and `_`: `blur`, `soft-glow`,
 `fade_2`. It is a name and never a path, because an effect is named in rules
@@ -60,7 +64,7 @@ return {
 | `match` | `"*"`, or a table of what to match: `app_id`, `title`, `monitor`, `style` (a bare window's is `"none"`), `focused`, `fullscreen`, `maximized`, `client_side` (its application draws its own titlebar, and the style draws its client-side frame) and `blur_region` (its client asked for what is behind it to be blurred, #78) as `true` or `false`, and `values`, a table of what the configuration handed the window with `sol.frame(id, { ... })` (each key equal to the boolean, number or word given, and `false` also matching a key never handed: `values = { snapped = false }`), for a window's parts; `surface` for a scripted surface's; `layer_shell` and `blur_region` for a layer surface's. A word is exact, `"*"`, or a prefix ending in `*` (`"org.gnome.*"`); there are no Lua patterns. A key of another kind of part's is refused. `focused` is whether the window is drawn focused, `fullscreen` and `maximized` whether Solium last told it to be, and `sol.windows()` gives every one of a window's keys, so you can see what a rule will match |
 | `part` | `pane` (the window's frame and client, not its popups), `client`, `popup` (all of a window's popups at once), `layer:<name>` (a pane style's layer), `region:titlebar` (the band along the one side a pane style reserves most for: the window's full width above or below the client, its two outer corners rounded as the client's largest, or square down a side between those; a style that reserves its most on two sides or more, such as `border`, or nothing, and a bare window have none), `surface:<name>` (one scripted surface on one monitor) or `layer_shell:<namespace>` |
 | `slot` | `behind` the part, in `front` of it, or `replace` it. A `pane`'s go around its frame and client and under its popups, so a menu stays on top; a `client`'s between the pane style's layers and the client; a `popup`'s around the popups; `region:titlebar`'s around the pane style's layer named `bar` (else its first `frame` layer) and a `layer:<name>`'s around that layer; a scripted or layer surface's just under and over it |
-| `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name; a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
+| `effect` | an effect's name; a link, `{ "blur", passes = 3 }`, with the effect's params beside its name, or `{ effect = "blur", passes = 3 }`, the same with the name under its own key (a TOML or JSON table cannot hold both a list and keys); a chain of links, run in order, each reading the last one's result, `{ { "blur", source = "self" }, { "tint", amount = 0.1 } }`; or `false`, which empties the slot |
 | `source` | what the chain's first input reads in place of its own: `"self"`, the part's own pixels; for an effect reading the `backdrop`, `"xray"` (the default: the layers below the part's band, the wallpaper first), or `"live"`, everything drawn beneath the part, the windows under a bar included (T3, below). `"auto"` is read as `"live"`: what is beneath a part with no window under it is the xray picture, kept until it changes. On the rule or in its first link, never a later one |
 | `mask` | how the result is cut: `"shape"`, the part's own shape (the default: the client's own rectangle and rounded corners for `client`; the whole window rounded at its largest corner for `pane`; the band, as above, for `region:titlebar`; the rectangle for the rest), `"alpha"`, the alpha of the part's own pixels, which needs `source = "self"`, or `"region"`, the region the part's client asked to have blurred through ext-background-effect (#78), and nothing where it asked for none: a window's `client` or a layer surface |
 | `memo` | `false` shares nothing of this rule's chain per monitor: each part runs its whole chain over xray, whatever `effects.memo.split` says (see *The memo*). `true` unless you say so |
@@ -86,8 +90,8 @@ added or reordered, another effect, or a param that makes an effect run other
 passes, starts every slot afresh.
 
 A pane style may give rules of its own, for the windows it frames, in an
-`effects.lua` beside its `Pane.qml`
-([pane styles](../qml/panes/README.md#effectslua)). For one part and one slot
+`effects.toml` beside its `Pane.qml`
+([pane styles](../qml/panes/README.md#effectstoml)). For one part and one slot
 the later rule wins: a pane style's rules first, then yours, so yours win
 over a style's, and a later one of yours over an earlier one. `effect = false` in a later rule empties the slot an earlier one
 filled. The part itself is always drawn: `behind` and `front` only add, and a
@@ -251,11 +255,11 @@ without effects at all, a fullscreen one straight from its own buffers.
 ## When it is read, and when it compiles
 
 An effect's folder is read when your configuration loads, and again at every
-reload, with no GPU: its `effect.lua`, its params and the checks of its
+reload, with no GPU: its `effect.toml`, its params and the checks of its
 shaders below. Its shaders are compiled on the GPU just before the next frame.
 An effect whose files have not changed is kept as it is, compiled and all, so
 a reload that changes something else rebuilds nothing. A new version that
-fails, in its Lua, its checks or its compile, leaves the version that ran
+fails, in its description, its checks or its compile, leaves the version that ran
 before it running; an effect that has never compiled is left out, as if it
 were not named. A shader that failed to compile is not compiled again until
 its file changes, or until a reload, which tries every failure once more.
@@ -263,10 +267,11 @@ its file changes, or until a reload, which tries every failure once more.
 ## When something is wrong
 
 What is broken is named with its file and line in the top-right corner of
-your primary monitor, for as long as it is broken: a Lua error in an
-`effect.lua`, a check of a shader that fails, a compile the GPU refused, a
-rule that cannot be applied (above), a pane style's `effects.lua` that does
-not run or a rule of it that cannot be bound, a key of `effects` outside its
+your primary monitor, for as long as it is broken: a mistake in an
+`effect.toml` (or a Lua error in an `effect.lua`), a check of a shader that
+fails, a compile the GPU refused, a rule that cannot be applied (above), a
+pane style's `effects.toml` that does not read or a rule of it that cannot
+be bound, a key of `effects` outside its
 bounds (which keeps the rules and keys that ran). A
 configuration that fails to reload is listed there too, at its own line, and
 the configuration that was running before it keeps running. The list goes
@@ -285,14 +290,15 @@ leaves out `require("problems")` has no overlay.
 solium --check ~/.config/solium/effects/<name>
 ```
 
-checks one effect folder and starts nothing: its `effect.lua` in a Lua of its
-own, every key in it, the checks of its shaders below, and the effects it
+checks one effect folder and starts nothing: its `effect.toml`, every key in
+it, the checks of its shaders below, and the effects it
 names in turn (`pixels`, a `fallback` naming an effect, a `use` stage),
 looked for beside it
 first and then among the shipped folders, as when it runs, so a copy of a
-shipped effect that names another shipped one passes. Its Lua runs under
-your configuration's `effects.sandbox` ([below](#what-an-effects-lua-can-reach)), as the
-session loads it, or the defaults if your configuration does not load.
+shipped effect that names another shipped one passes. An `effect.lua` runs
+under your configuration's `effects.sandbox`
+([below](#an-effectluas-lua)), as the session loads it, or the defaults if
+your configuration does not load.
 Errors are printed at their file and line and exit 1; warnings are printed
 and pass. `solium --check .` inside the folder does the same.
 
@@ -313,42 +319,63 @@ there too. Rules that do not parse fail by their number and key, and are not
 bound; nor are the rules of a `sol.effects` whose own keys (`sandbox`,
 `limits`, `present`, `xray`, `memo`) are refused, which fails naming the
 key, since the session refuses that whole call: it says `rules not checked:
-they did not parse, or their sol.effects was refused`. A folder with no `effect.lua`
-fails, and so does one whose name cannot name an effect, such as `Blur`,
-since nothing could use it. The `effects.lua` of each pane style of your
-own is read too, and fails on what the overlay would name. Every effect and
-style is read under your `effects.sandbox`.
+they did not parse, or their sol.effects was refused`. A folder with no
+`effect.toml` (nor `effect.lua`) fails, and so does one whose name cannot
+name an effect, such as `Blur`, since nothing could use it. The
+`effects.toml` of each pane style of your own is read too, and fails on what
+the overlay would name.
 
-## What `effect.lua` returns
+## What `effect.toml` says
 
-`effect.lua` returns one table. Every key in it is checked, and a key Solium
-does not know is refused by name, with the key you probably meant, so a typo
-never quietly means a default.
+`effect.toml` is a [TOML](https://toml.io) document. Every key in it is
+checked, and a key Solium does not know is refused by name, with the key you
+probably meant, at its line, so a typo never quietly means a default. Blur,
+as it ships:
+
+```toml
+api = 2
+inputs = ["backdrop"]
+reach = "ceil(offset * 2 ^ (passes + 1))"
+fallback = [{ passes = 2 }, { passes = 1 }]
+
+[params]
+passes = { default = 3, min = 1, max = 6, int = true }
+offset = { default = 3, min = 0 }
+
+[[stages]]
+repeat = "passes"
+pass = "down.frag"
+scale = 0.5
+
+[[stages]]
+repeat = "passes"
+pass = "up.frag"
+scale = 2
+```
 
 | Key | What it is |
 |---|---|
-| `api` | `1`, the version of this format |
+| `api` | `2`, the version of this format |
 | `inputs` | what the effect reads: `self`, `backdrop`, `shape`, `old`, or `state:<name>` of its own |
 | `params` | its knobs, below |
 | `frag` | a one-pass effect's shader, a file in the folder |
-| `stages` | a many-pass effect's passes: a list, or a function of the params, below |
+| `stages` | a many-pass effect's passes, `[[stages]]` tables, below |
 | `pixels` | another effect's name, whose `frag` draws this one's pixels |
-| `mesh` | a geometry effect's `function(t, cols, rows, out)`, [below](#writing-a-mesh) |
-| `grid` | a geometry effect's grid: `{ along = 48, across = 8 }`, which turns with the direction the window moves in, or a fixed `{ cols, rows }` |
-| `reach` | how far beyond its part the effect reads, in pixels: a number, or a function of the params |
+| `grid` | a geometry effect's grid: `{ along = 48, across = 8 }`, which turns with the direction the window moves in, or a fixed `[cols, rows]` |
+| `reach` | how far beyond its part the effect reads, in pixels: a number, or an [expression](#expressions) of the params |
 | `bleed` | how far beyond its part the effect draws, likewise |
 | `fallback` | cheaper versions to fall back to, in order: each a table of params, or another effect's name |
 | `duration` | how long it plays, in milliseconds |
 | `easing` | its curve, by name: `outBack`, `inOutQuad` and the rest of Solium's curves |
 
 An effect draws something, and says how once: `frag` or `stages`, not both,
-or a `mesh`, or `pixels`. `motion` is refused until motion tokens exist; give
-`duration` and `easing`. `image:` inputs are not read yet, and are refused.
+or `pixels`. `motion` is refused until motion tokens exist; give `duration`
+and `easing`. `image:` inputs are not read yet, and are refused.
 
 ### Fallbacks
 
-```lua
-fallback = { { passes = 2 }, { passes = 1 }, "frost" },
+```toml
+fallback = [{ passes = 2 }, { passes = 1 }, "frost"]
 ```
 
 Wherever the effect is used, its stages are put in place for the params it
@@ -364,27 +391,30 @@ compiled.
 
 ### Params
 
-```lua
-params = { passes = { 3, min = 1, max = 6, int = true }, offset = { 3 } },
+```toml
+[params]
+passes = { default = 3, min = 1, max = 6, int = true }
+offset = 3
+tint = [0, 0, 0, 0.3]
 ```
 
-A param is `{ default, min =, max =, int = }`, and its default's kind is the
-param's: a number (a whole one with `int = true`), four numbers, a boolean,
-or a word. Its name is lower-case letters, digits and `_`, and it may not be
-one of the words said beside params where an effect is used: `source`,
-`mask`, `keep`, `effect`, `geometry`, `pixels`, `decoration`, `duration`,
-`easing`, `motion`, `from`, `to`, `axis`, `reach` and `bleed`. An effect
-with a `mesh` finds its params in `t`, beside the fields Solium writes
-there, so neither may it take one of theirs: `progress`, `clamped`,
-`direction`, `axis`, `seed`, `scale`, `cols`, `rows`, `from`, `to`,
-`monitor` and `part`.
+A param is its default, or `{ default =, min =, max =, int = }`, and its
+default's kind is the param's: a number (a whole one with `int = true`;
+`3` without it is the number 3.0), four numbers, or `true` or `false`.
+There are no word params: nothing in an effect reads one, neither an
+expression nor a shader. Its name is lower-case letters, digits and `_`,
+and it may not be one of the words said beside params where an effect is
+used: `source`, `mask`, `keep`, `effect`, `geometry`, `pixels`,
+`decoration`, `duration`, `easing`, `motion`, `from`, `to`, `axis`, `reach`
+and `bleed`. Params are read in the order of their names, whatever order
+the file gives them in.
 
 Where the effect is used its params can be given, as in
 `{ "blur", passes = 2 }`. A param the effect does not have is refused, with
 the one you probably meant; a value of another kind is refused; a whole
 number is a fine value for a fractional param; and a value outside `min` and
-`max` is clamped, with a warning. A function of the params, such as `reach`,
-is called with the params as they were bound.
+`max` is clamped, with a warning. An expression of the params, such as
+`reach`, is worked out from the params as they were bound.
 
 A geometry effect played by `sol.present` packs its params into numbers (a
 number, a whole one, a boolean as 0 or 1, four numbers as four), so a
@@ -395,35 +425,32 @@ window drawn undeformed; nothing is cut.
 
 ### Stages
 
-A many-pass effect lists its passes in `stages`, each a table that begins
-with its kind:
-
-```lua
-stages = function(p)
-  local s = {}
-  for i = 1, p.passes do s[#s + 1] = { "pass", "down.frag", scale = 0.5 } end
-  for i = 1, p.passes do s[#s + 1] = { "pass", "up.frag", scale = 2 } end
-  return s
-end,
-```
-
-`stages` is a list, or a function of the params that returns one. The
-function is called when the effect is loaded and where it is used with other
-params, never once a frame, so a loop over `p.passes` costs nothing while the
-effect draws.
+A many-pass effect lists its passes as `[[stages]]` tables, in order. Each
+says its kind with one key:
 
 | Stage | What it does |
 |---|---|
-| `{ "pass", "<file>.frag" }` | draws one shader into a texture of its own. `sol_tex` reads the last result, or the effect's first input in the first pass. `scale =` sizes it against what it reads, rounded up to whole pixels, 1 when not given; `format =` is `"rgba8"`, the default, or `"rgba16f"`; `uses = { … }` lists the other textures it reads, by name, at most seven, since a pass reads eight textures with its `sol_tex`; `input =` names what `sol_tex` reads in place of the last result; `per_part = true` says it must run for each part alone: a pass that reads only the backdrop may otherwise run once for a whole monitor and be shared by every part on it, and one whose `.frag` reads a part's own names (`sol_content`, `sol_shape`, `sol_progress`, `sol_self` and the like) never is |
-| `{ "repeat", over = { 64, 32, … }, as = "<name>", <stages> }` | runs the stages after its kind once for each number in `over`, with `p_<name>` set to that number. The name is a new one, not one of the effect's params |
-| `{ "save", "<name>" }`, `{ "get", "<name>" }` | names the last result; makes a named result the last one again |
-| `{ "use", "<effect>", <param> = <value>, … }` | runs another effect's stages here, on the last result, with those params. The names it saves are its own, and where it reads its first input by name it reads what it was given. It is put in place when the effect is loaded, so it costs nothing while the effect draws |
-| `{ "state", "<name>", depends = "…", stages = { … } }` | a texture kept from one run to the next, made by its own `stages` from the effect's inputs and the states before it, and made again only when what it `depends` on changes: `"shape"`, `"params"`, or `"self"`, a commit of the part's own surface; and when its size changes with the part's, or a state it reads is made again. Later stages read it by its name. `format =` and `scale =` as for a pass |
+| `pass = "<file>.frag"` | draws one shader into a texture of its own. `sol_tex` reads the last result, or the effect's first input in the first pass. `scale` sizes it against what it reads, rounded up to whole pixels, 1 when not given; `format` is `"rgba8"`, the default, or `"rgba16f"`; `uses = [ … ]` lists the other textures it reads, by name, at most seven, since a pass reads eight textures with its `sol_tex`; `input` names what `sol_tex` reads in place of the last result; `per_part = true` says it must run for each part alone: a pass that reads only the backdrop may otherwise run once for a whole monitor and be shared by every part on it, and one whose `.frag` reads a part's own names (`sol_content`, `sol_shape`, `sol_progress`, `sol_self` and the like) never is |
+| `save = "<name>"`, `get = "<name>"` | names the last result; makes a named result the last one again |
+| `use = "<effect>"` | runs another effect's stages here, on the last result, with `params = { … }`: each a value, or an [expression](#expressions) of this effect's params. The names it saves are its own, and where it reads its first input by name it reads what it was given. It is put in place when the effect is loaded, so it costs nothing while the effect draws |
+| `state = "<name>"` | a texture kept from one run to the next, made by its own `stages = [ … ]` from the effect's inputs and the states before it, and made again only when what it `depends` on changes: `"shape"`, `"params"`, or `"self"`, a commit of the part's own surface; and when its size changes with the part's, or a state it reads is made again. Later stages read it by its name. `format` and `scale` as for a pass |
+| `stages = [ … ]` alone | the stages in it, in its place: how one `when` or `repeat` covers several |
+
+Any stage may also say:
+
+| Key | What it does |
+|---|---|
+| `repeat` | how many times the stage runs: a whole number, or an expression giving one, from 0 to 256 (`repeat = "passes"`); or `{ over = [64, 32, …], as = "<name>" }`, once for each number in `over` with `p_<name>` set to that number in its shaders, a new name, not one of the effect's params |
+| `when` | an expression: the stage runs only when it is not 0 (`when = "soften_passes >= 1"`) |
+
+Both are worked out when the effect is loaded and where it is used with other
+params, never once a frame, so a stage repeated `passes` times costs nothing
+while the effect draws.
 
 A pass with a `scale` above 1 after passes below 1 is the size of what the
 matching smaller pass read, so a blur that halves a window three times and
 doubles it three times comes back to its exact size, odd or not. Every stage
-is checked as `effect.lua`'s own keys are, and a key a stage does not take is
+is checked as the file's own keys are, and a key a stage does not take is
 refused with the one you probably meant. A name an effect saves or makes a
 state is a new GLSL name, because every pass reads it as `sol_<name>`:
 lower-case letters, digits and `_`, not one of the `sol_` names below, and
@@ -432,9 +459,36 @@ use itself, directly or through others, and one effect runs at most 256
 passes, its states' included. `depends = "region"`, an outline a region publishes, waits
 for regions, and is refused.
 
-## What an effect's Lua can reach
+### Expressions
 
-Each effect runs in a Lua of its own, apart from your configuration and from
+Where a number is worked out from the params, in `reach`, `bleed`, a stage's
+`repeat` and `when`, and a `use`'s params, it is written as a string:
+
+```toml
+reach = "(soften_passes >= 1) * ceil(soften_offset * 2 ^ (soften_passes + 1)) + 1"
+```
+
+An expression has numbers, the effect's params by name, `+ - * / ^`,
+the comparisons `< <= > >= == ~=` (and `!=`), `and`, `or`, `not`,
+parentheses, and the functions `min`, `max`, `clamp(x, low, high)`,
+`floor`, `ceil`, `abs` and `sqrt`; nothing else, so it cannot loop or
+call anything, and Solium works every one out itself, in microseconds,
+whenever params are bound. Operators bind as in Lua: `^` first (from the
+right: `2 ^ 3 ^ 2` is 512), then a unary `-` and `not`, `*` and `/`, `+`
+and `-`, the comparisons, `and`, `or`. Every value is a number: a
+comparison is 1 or 0, a param that is `true` is 1, and `and`, `or`, `not`
+and `when` take anything but 0 as true. A param that is four numbers is
+no number and is refused in an expression, as is a name that is not a
+param, with the one you probably meant. A value that is not a number of
+pixels, or a `repeat` that is not a whole number of times, is refused
+where the effect is bound, naming the stage.
+
+## An `effect.lua`'s Lua
+
+A geometry effect is described in Lua for now, by an `effect.lua` that
+returns a table of the keys above (`api = 1`, a param written
+`{ default, min =, max =, int = }`, `stages` a list of `{ "pass", "<file>" }`
+tables or a function of the params) and its `mesh`. Each runs in a Lua of its own, apart from your configuration and from
 every other effect, with `math`, `table` and `string` and the base functions
 that reach nothing outside it. There is no `sol`, `io`, `os`, `require`,
 `load`, `loadfile` or `dofile`, no `pcall` or `xpcall`, no `collectgarbage`
@@ -456,7 +510,7 @@ in a frame 2 ms, and the checks a `mesh` is put through when it loads
 `effects.sandbox.memory_mib` (16 MiB unless you change it). Both are keys
 of `effects` in your configuration, `sandbox = { load_ms = 100, memory_mib =
 16 }`, from 10 to 5000 ms and from 1 to 512 MiB; changing either loads every
-effect again, and a pane style's `effects.lua` runs under them too. A
+`effect.lua` again. A
 problem the budget or the memory caused names the key. A call runs at full
 speed, with nothing counting its
 instructions. One that runs longer is stopped at its next Lua instruction,

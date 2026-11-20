@@ -222,21 +222,21 @@ pub(crate) struct Style {
     /// starts from, and compares its own reading with, when its style binds
     /// them to something that changes per window (#454).
     pub(crate) client_radii: solium_effects::fragment::Corners,
-    /// The effect rules this style's `effects.lua` gives its panes, read
+    /// The effect rules this style's `effects.toml` gives its panes, read
     /// once per folder and content by [`rules_of`]; empty for a style with no
     /// such file. Copied onto each pane's `Decoration`, as `effects` is.
-    /// `tests::a_styles_effects_lua_is_read_with_it`.
+    /// `tests::a_styles_effects_toml_is_read_with_it`.
     pub(crate) rules: std::sync::Arc<[crate::effect::rules::Rule]>,
-    /// Which read of `effects.lua` `rules` came from: what a rule's key
+    /// Which read of `effects.toml` `rules` came from: what a rule's key
     /// carries, so a slot finds the chain bound for this list and not for
-    /// one since replaced. `tests::effects_lua_is_read_once_per_content`.
+    /// one since replaced. `tests::effects_toml_is_read_once_per_content`.
     pub(crate) rules_generation: u32,
     pub(crate) dir: PathBuf,
 }
 
-/// A style's `effects.lua`, read: the rules that run, their generation, and
+/// A style's `effects.toml`, read: the rules that run, their generation, and
 /// what is wrong with the file as it is now (nothing when it read).
-/// `tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`.
+/// `tests::a_broken_style_effects_toml_is_a_problem_and_keeps_the_rules_that_ran`.
 #[derive(Clone, Debug)]
 pub(crate) struct StyleRules {
     pub(crate) rules: std::sync::Arc<[crate::effect::rules::Rule]>,
@@ -245,8 +245,8 @@ pub(crate) struct StyleRules {
 }
 
 impl StyleRules {
-    /// No rules, generation 0: a style with no `effects.lua`, a bare pane.
-    /// `tests::a_style_without_effects_lua_declares_no_rules`.
+    /// No rules, generation 0: a style with no `effects.toml`, a bare pane.
+    /// `tests::a_style_without_effects_toml_declares_no_rules`.
     pub(crate) fn none() -> Self {
         Self {
             rules: std::sync::Arc::from(Vec::new()),
@@ -256,82 +256,64 @@ impl StyleRules {
     }
 }
 
-/// Per style folder: the hash of the `effects.lua` last read, the caps it
-/// was read under, and what reading it gave. One for the process, not one
-/// per thread, so a pane's rules and the chains bound for them agree on a
-/// generation wherever each was read. `tests::effects_lua_is_read_once_per_content`.
-type Read = (u64, crate::effect::settings::Caps, StyleRules);
+/// Per style folder: the hash of the `effects.toml` last read, and what
+/// reading it gave. One for the process, not one per thread, so a pane's
+/// rules and the chains bound for them agree on a generation wherever each
+/// was read. `tests::effects_toml_is_read_once_per_content`.
+type Read = (u64, StyleRules);
 static READ: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Read>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// What a style's `effects.lua` runs under, `effects.sandbox`, as the host's
-/// effects do: one for the process, as [`READ`] is, so the style read when a
-/// pane is framed and the one its rules are bound from are read alike.
-/// `tests::a_styles_effects_lua_reads_under_the_configured_caps`.
-static CAPS: std::sync::Mutex<crate::effect::settings::Caps> =
-    std::sync::Mutex::new(crate::effect::settings::Caps::DEFAULT);
-
-/// Read every style's `effects.lua` under `caps` from now on
-/// (`Solium::apply_settings`):
-/// `state::tests::effects_sandbox_reaches_the_host_and_the_styles_reader`.
-pub(crate) fn set_caps(caps: crate::effect::settings::Caps) {
-    *CAPS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = caps;
-}
-
-/// What a style's `effects.lua` runs under now.
-pub(crate) fn caps() -> crate::effect::settings::Caps {
-    *CAPS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 /// The generation the last new list of rules was given.
 static GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// A style folder's `effects.lua`, read once per folder and content, as
+/// A style folder's `effects.toml`, read once per folder and content, as
 /// rules every one of which applies to this style's panes only (Ruling 15).
 /// A file that will not read keeps the rules that ran for this folder, with
-/// its problems at its file and line (\[16\] §5 row 1).
-/// `tests::effects_lua_is_read_once_per_content`,
-/// `tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`.
+/// its problems at its file and line (\[16\] §5 row 1). A style's rules were
+/// once Lua: an `effects.lua` with no `effects.toml` beside it is a problem
+/// that says what to write, and gives no rules.
+/// `tests::effects_toml_is_read_once_per_content`,
+/// `tests::a_broken_style_effects_toml_is_a_problem_and_keeps_the_rules_that_ran`,
+/// `tests::a_styles_effects_lua_is_a_problem_naming_effects_toml`.
 pub(crate) fn rules_of(dir: &Path) -> StyleRules {
-    rules_with(dir, caps())
-}
-
-/// [`rules_of`] under `caps`, which `--check` reads a style under too
-/// (`check::tests::a_styles_effects_lua_is_checked_under_the_configured_sandbox`).
-/// A file read once is not read again for the
-/// same content, unless reading it failed and the caps have changed since,
-/// so a budget or a memory cap that refused it can be raised; what read is
-/// kept whatever the caps, as a larger budget changes nothing for it.
-/// `tests::a_styles_effects_lua_reads_under_the_configured_caps`.
-pub(crate) fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> StyleRules {
     use crate::effect::host::Problem;
-    let file = dir.join("effects.lua");
-    if !file.is_file() {
-        return StyleRules::none();
-    }
+    let file = dir.join("effects.toml");
     let effect = format!(
         "style:{}",
         dir.file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     );
+    if !file.is_file() {
+        let old = dir.join("effects.lua");
+        if old.is_file() {
+            return StyleRules {
+                problems: vec![Problem::error(
+                    &effect,
+                    &old,
+                    None,
+                    "a style's rules are its effects.toml now, not Lua: [[rules]] tables with the same keys"
+                        .to_owned(),
+                )],
+                ..StyleRules::none()
+            };
+        }
+        return StyleRules::none();
+    }
     let mut read = READ
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The rules that ran for this folder, whatever content they came from
-    // (`tests::a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran`).
+    // (`tests::a_broken_style_effects_toml_is_a_problem_and_keeps_the_rules_that_ran`).
     let ran = read
         .get(dir)
-        .map_or_else(StyleRules::none, |(_, _, read)| StyleRules {
+        .map_or_else(StyleRules::none, |(_, read)| StyleRules {
             problems: Vec::new(),
             ..read.clone()
         });
-    let bytes = match std::fs::read(&file) {
-        Ok(bytes) => bytes,
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
         Err(err) => {
             return StyleRules {
                 problems: vec![Problem::error(
@@ -344,13 +326,11 @@ pub(crate) fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> Sty
             };
         }
     };
-    let hash = solium_effects::glsl::content_hash(&[&bytes]);
-    if let Some((_, _, found)) = read.get(dir).filter(|(seen, under, found)| {
-        *seen == hash && (found.problems.is_empty() || *under == caps)
-    }) {
+    let hash = solium_effects::glsl::content_hash(&[text.as_bytes()]);
+    if let Some((_, found)) = read.get(dir).filter(|(seen, _)| *seen == hash) {
         return found.clone();
     }
-    let rules = match read_rules(&effect, &file, caps) {
+    let rules = match read_rules(&effect, &file, &text) {
         Ok(rules) => StyleRules {
             rules: std::sync::Arc::from(rules),
             generation: GENERATION
@@ -360,40 +340,48 @@ pub(crate) fn rules_with(dir: &Path, caps: crate::effect::settings::Caps) -> Sty
         },
         Err(problems) => StyleRules { problems, ..ran },
     };
-    read.insert(dir.to_owned(), (hash, caps, rules.clone()));
+    read.insert(dir.to_owned(), (hash, rules.clone()));
     rules
 }
 
-/// `effects.lua` in an effect sandbox, parsed: the rules, or every problem
-/// at its file (a Lua error with its line; a rule error by its number).
-/// `tests::effects_lua_cannot_reach_sol`,
-/// `tests::an_effects_lua_that_returns_no_list_is_a_problem`.
+/// `effects.toml`'s `rules`, parsed: the rules, or every problem at its
+/// file (a TOML error with its line; a rule error by its number). A file
+/// with no `rules` gives none.
+/// `tests::an_effects_toml_whose_rules_are_no_list_is_a_problem`.
 fn read_rules(
     effect: &str,
     file: &Path,
-    caps: crate::effect::settings::Caps,
+    text: &str,
 ) -> Result<Vec<crate::effect::rules::Rule>, Vec<crate::effect::host::Problem>> {
     use crate::effect::host::Problem;
-    use crate::script::Doc;
-    let sandbox = crate::effect::sandbox::Sandbox::with_caps(effect, file, caps)
-        .map_err(|problem| vec![problem])?;
-    let value = sandbox.eval_file(file).map_err(|problem| vec![problem])?;
-    let problem = |message: String| vec![Problem::error(effect, file, None, message)];
-    let tree = match crate::effect::lua_doc::doc_of_plain(&value)
-        .map_err(|err| problem(err.to_string()))?
-    {
-        // Nothing returned is no rules: a file written and not filled yet
-        // (`tests::an_effects_lua_that_returns_no_list_is_a_problem`).
-        None if value.is_nil() => return Ok(Vec::new()),
-        Some(tree @ Doc::Table(_)) => tree,
-        _ => {
+    use crate::script::{Doc, DocTable};
+    let problem =
+        |line: Option<u32>, message: String| vec![Problem::error(effect, file, line, message)];
+    let Doc::Table(DocTable { fields, .. }) =
+        crate::effect::described::doc(text).map_err(|(line, message)| problem(line, message))?
+    else {
+        return Err(problem(None, "effects.toml is a table".to_owned()));
+    };
+    if let Some(other) = fields.keys().find(|key| *key != "rules") {
+        return Err(problem(
+            None,
+            format!(
+                "`{other}` is not a key of effects.toml, which holds its `rules`: [[rules]] tables"
+            ),
+        ));
+    }
+    let tree = match fields.get("rules") {
+        None => return Ok(Vec::new()),
+        Some(tree @ Doc::Table(DocTable { fields, .. })) if fields.is_empty() => tree,
+        Some(_) => {
             return Err(problem(
-                "effects.lua returns a list of rules: return { { match = …, part = …, slot = …, effect = … }, … }"
+                None,
+                "`rules` is a list of rules: [[rules]] tables, each with match, part, slot and effect"
                     .to_owned(),
             ));
         }
     };
-    crate::effect::rules::parse(&tree).map_err(|errors| {
+    crate::effect::rules::parse(tree).map_err(|errors| {
         errors
             .iter()
             .map(|error| {
@@ -734,7 +722,7 @@ pub(crate) fn load(dir: &Path) -> Result<Style> {
 
     let radii = read_client_radii(&mut scene);
     let effects = client_effects(radii);
-    // The rules of its `effects.lua` (`tests::a_styles_effects_lua_is_read_with_it`),
+    // The rules of its `effects.toml` (`tests::a_styles_effects_toml_is_read_with_it`),
     // its problems left to whoever applies the style
     // (`Solium::apply_style_rules`, which lists them): a typo there costs its
     // new rules, never the frame or the rules that ran
@@ -1865,9 +1853,9 @@ mod tests {
         });
     }
 
-    /// **A style's `effects.lua` is read with it**, parsed as rules.
+    /// **A style's `effects.toml` is read with it**, parsed as rules.
     #[test]
-    fn a_styles_effects_lua_is_read_with_it() {
+    fn a_styles_effects_toml_is_read_with_it() {
         on_the_qt_thread(|| {
             let dir = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1884,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn a_style_without_effects_lua_declares_no_rules() {
+    fn a_style_without_effects_toml_declares_no_rules() {
         on_the_qt_thread(|| {
             let dir = Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1894,39 +1882,47 @@ mod tests {
         });
     }
 
-    /// **`effects.lua` cannot reach `sol`**: it runs in an effect sandbox.
+    /// **A style's `effects.lua` is not run**: its rules were Lua once, and
+    /// one left from then is a problem that says to write `effects.toml`,
+    /// with no rules from it.
     #[test]
-    fn effects_lua_cannot_reach_sol() {
-        let dir = fixture("reaches-sol", "import Solium\nPaneStyle {}\n");
-        std::fs::write(dir.join("effects.lua"), "sol.spawn('x') return {}").expect("writing");
+    fn a_styles_effects_lua_is_a_problem_naming_effects_toml() {
+        let dir = fixture("old-lua", "import Solium\nPaneStyle {}\n");
+        std::fs::write(dir.join("effects.lua"), "return {}").expect("writing");
         let read = super::rules_of(&dir);
+        assert!(read.rules.is_empty());
         assert!(
             read.problems
                 .iter()
-                .any(|problem| problem.message.contains("sol")),
+                .any(|problem| problem.message.contains("effects.toml")),
             "{:?}",
             read.problems
         );
-        assert!(read.rules.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// **`effects.lua` returns a list of rules**: anything else is said, not
-    /// read as none, so a file that forgot its `return { … }` braces is on
-    /// the overlay; nothing returned at all is no rules.
+    /// **`rules` is a list of rules**: anything else is said, not read as
+    /// none; a file with no `rules` yet is no rules, and a key beside them is
+    /// a problem.
     #[test]
-    fn an_effects_lua_that_returns_no_list_is_a_problem() {
-        let dir = fixture("returns-no-list", "import Solium\nPaneStyle {}\n");
-        std::fs::write(dir.join("effects.lua"), "return 'blur'").expect("writing");
-        let read = super::rules_of(&dir);
-        assert!(
-            read.problems
-                .iter()
-                .any(|problem| problem.message.contains("a list of rules")),
-            "{:?}",
-            read.problems
-        );
-        std::fs::write(dir.join("effects.lua"), "-- nothing yet\n").expect("emptying it");
+    fn an_effects_toml_whose_rules_are_no_list_is_a_problem() {
+        let dir = fixture("rules-no-list", "import Solium\nPaneStyle {}\n");
+        for (text, said) in [
+            ("rules = \"blur\"\n", "a list of rules"),
+            ("[rules]\neffect = \"blur\"\n", "a list of rules"),
+            ("rule = []\n", "`rule`"),
+        ] {
+            std::fs::write(dir.join("effects.toml"), text).expect("writing");
+            let read = super::rules_of(&dir);
+            assert!(
+                read.problems
+                    .iter()
+                    .any(|problem| problem.message.contains(said)),
+                "{text}: {:?}",
+                read.problems
+            );
+        }
+        std::fs::write(dir.join("effects.toml"), "# nothing yet\n").expect("emptying it");
         let read = super::rules_of(&dir);
         assert_eq!(
             (read.rules.len(), read.problems.len()),
@@ -1940,74 +1936,44 @@ mod tests {
     /// Read once per folder and content: two panes of one style share one
     /// list, and an edited file is read again.
     #[test]
-    fn effects_lua_is_read_once_per_content() {
+    fn effects_toml_is_read_once_per_content() {
         let dir = fixture("once", "import Solium\nPaneStyle {}\n");
-        std::fs::write(dir.join("effects.lua"), "return {}").expect("writing");
+        std::fs::write(dir.join("effects.toml"), "rules = []\n").expect("writing");
         let a = super::rules_of(&dir);
         let b = super::rules_of(&dir);
         assert!(std::sync::Arc::ptr_eq(&a.rules, &b.rules) && a.generation == b.generation);
         std::fs::write(
-            dir.join("effects.lua"),
-            "return { { match = '*', part = 'client', slot = 'front', effect = false } }",
+            dir.join("effects.toml"),
+            "[[rules]]\nmatch = \"*\"\npart = \"client\"\nslot = \"front\"\neffect = false\n",
         )
         .expect("editing");
         let c = super::rules_of(&dir);
-        assert_eq!(c.rules.len(), 1);
+        assert_eq!(c.rules.len(), 1, "{:?}", c.problems);
         assert_ne!(a.generation, c.generation);
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// **A style's `effects.lua` reads under the configured caps**: one that
-    /// builds a 20 MiB string is refused under the default 16 MiB, naming the
-    /// key, and read once `effects.sandbox.memory_mib` is 64, although its
-    /// content has not changed.
+    /// **A broken `effects.toml` is a problem at its line and keeps the
+    /// rules that ran** ([16] §5 row 1): an edit that breaks it costs nothing
+    /// that worked, and the overlay can name where.
     #[test]
-    fn a_styles_effects_lua_reads_under_the_configured_caps() {
-        let dir = fixture("caps", "import Solium\nPaneStyle {}\n");
-        std::fs::write(
-            dir.join("effects.lua"),
-            "local big = string.rep('x', 20 * 1024 * 1024) return {}",
-        )
-        .expect("writing");
-        let default = crate::effect::settings::Caps::default();
-        let refused = super::rules_with(&dir, default);
-        assert!(
-            refused
-                .problems
-                .iter()
-                .any(|problem| problem.message.contains("effects.sandbox.memory_mib")),
-            "{:?}",
-            refused.problems
-        );
-        let read = super::rules_with(
-            &dir,
-            // A long budget beside it, so a busy machine building the
-            // string slowly is not what is tested.
-            crate::effect::settings::Caps {
-                memory: 64 << 20,
-                load: std::time::Duration::from_millis(5000),
-            },
-        );
-        assert!(read.problems.is_empty(), "{:?}", read.problems);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// **A broken `effects.lua` is a problem at its line and keeps the rules
-    /// that ran** ([16] §5 row 1): an edit that breaks it costs nothing that
-    /// worked, and the overlay can name where.
-    #[test]
-    fn a_broken_style_effects_lua_is_a_problem_and_keeps_the_rules_that_ran() {
+    fn a_broken_style_effects_toml_is_a_problem_and_keeps_the_rules_that_ran() {
         let dir = fixture("broken-edit", "import Solium\nPaneStyle {}\n");
         std::fs::write(
-            dir.join("effects.lua"),
-            "return { { match = '*', part = 'client', slot = 'front', effect = false } }",
+            dir.join("effects.toml"),
+            "[[rules]]\nmatch = \"*\"\npart = \"client\"\nslot = \"front\"\neffect = false\n",
         )
         .expect("writing");
         let ran = super::rules_of(&dir);
-        assert_eq!((ran.rules.len(), ran.problems.len()), (1, 0));
+        assert_eq!(
+            (ran.rules.len(), ran.problems.len()),
+            (1, 0),
+            "{:?}",
+            ran.problems
+        );
         std::fs::write(
-            dir.join("effects.lua"),
-            "return {\n  { match = '*',\n    part = = 'client' } }",
+            dir.join("effects.toml"),
+            "[[rules]]\nmatch = \"*\"\npart = = \"client\"\n",
         )
         .expect("breaking it");
         let broken = super::rules_of(&dir);
@@ -2018,7 +1984,7 @@ mod tests {
         );
         let problem = broken.problems.first().expect("a problem");
         assert!(
-            problem.effect.starts_with("style:") && problem.file.ends_with("effects.lua"),
+            problem.effect.starts_with("style:") && problem.file.ends_with("effects.toml"),
             "{problem:?}"
         );
         assert_eq!(problem.line, Some(3), "{problem:?}");
