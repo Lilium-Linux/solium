@@ -9754,7 +9754,10 @@ fn a_loading_pane_under_a_present_is_planned_through_the_warp() {
             pane,
             "{ effect = 'genie', progress = 0.5, to = { x = 380, y = 900, w = 40, h = 40 } }",
         );
-        crate::render::plan_warps(&mut state);
+        {
+            let now = state.clock.now();
+            crate::render::plan_warps(&mut state, now);
+        }
         assert!(
             matches!(
                 state.presented.take(pane),
@@ -9781,7 +9784,10 @@ fn a_loading_pane_at_rest_builds_no_capture() {
             return;
         }
         let (mut state, pane) = loading_with_its_scene("loading-rest");
-        crate::render::plan_warps(&mut state);
+        {
+            let now = state.clock.now();
+            crate::render::plan_warps(&mut state, now);
+        }
         let planned = state.presented.take(pane);
         assert!(
             matches!(planned, Some(crate::render::Planned::Flat)),
@@ -9828,7 +9834,10 @@ fn a_present_on_a_loading_pane_survives_its_applications_arrival() {
         Some(before),
         "the handover dropped or changed the present"
     );
-    crate::render::plan_warps(&mut fixture.state);
+    {
+        let now = fixture.state.clock.now();
+        crate::render::plan_warps(&mut fixture.state, now);
+    }
     assert!(
         matches!(
             fixture.state.presented.take(pane),
@@ -11166,7 +11175,10 @@ fn unlock_session(fixture: &mut Fixture, lock: ext_session_lock_v1::ExtSessionLo
 /// and memos wanted, in the store's next pass.
 fn resolved(fixture: &mut Fixture) -> crate::effect::plan::Slots {
     let pass = fixture.state.store.next_pass();
-    crate::render::plan_warps(&mut fixture.state);
+    {
+        let now = fixture.state.clock.now();
+        crate::render::plan_warps(&mut fixture.state, now);
+    }
     let mut slots = crate::render::build_slots(&mut fixture.state);
     crate::render::record_boxes(&fixture.state, &mut slots);
     crate::render::want_t2(&mut fixture.state, &mut slots, pass);
@@ -11898,7 +11910,10 @@ fn a_gliding_windows_t2_place_is_measured_at_the_passs_instant() {
     );
     fixture.state.clock.advance(Duration::from_millis(30));
     let _ = fixture.state.store.next_pass();
-    crate::render::plan_warps(&mut fixture.state);
+    {
+        let now = fixture.state.clock.now();
+        crate::render::plan_warps(&mut fixture.state, now);
+    }
     let at = fixture.state.presented.at().expect("the pass's instant");
     fixture.state.clock.advance(Duration::from_millis(4));
     let mut slots = crate::render::build_slots(&mut fixture.state);

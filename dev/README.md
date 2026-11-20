@@ -1250,8 +1250,8 @@ fails*.
 
 | Mode | What it does |
 |---|---|
-| `auto` | The default. On the hardware, the GPU pre-flight runs first in a short-lived child process — this binary, as `--probe-qml-gpu` — and QML renders on the GPU if it passes, in software if it fails or takes longer than `qml.probe_timeout` (5000 ms, after which the child is killed). Nested, software: winit hands the compositor no GBM device. |
-| `gpu` | The GPU, with no child probe. Nested this draws no QML at all, for the same reason. |
+| `auto` | The default. On the hardware, the GPU pre-flight runs first in a short-lived child process — this binary, as `--probe-qml-gpu` — and QML renders on the GPU if it passes, in software if it fails or takes longer than `qml.probe_timeout` (5000 ms, after which the child is killed). Nested, software. |
+| `gpu` | The GPU, with no child probe. Nested, scenes render into buffers from the host's render node, the one the nested window is drawn with: how a scene in Qt Quick 3D, which software cannot draw, is seen nested. |
 | `software` | Qt's software rasteriser. |
 
 Asked for in this order, and the first that says anything decides:

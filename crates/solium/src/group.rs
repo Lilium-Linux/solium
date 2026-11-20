@@ -586,6 +586,16 @@ pub(crate) type Displaced = Vec<(u64, (f64, f64))>;
 
 impl Groups {
     /// Whether anything at all is grouped. The first gate on the cheap path.
+    /// Every group's own shift at `now`, by its name, in the order they
+    /// were declared: what a scene reads as `Solium.groups`
+    /// (`models::groups`), so a scene can draw a world the window manager's
+    /// poses move, its camera where theirs is.
+    pub(crate) fn poses(&self, now: Duration) -> impl Iterator<Item = (&str, Shift)> {
+        self.groups
+            .iter()
+            .map(move |group| (&*group.name, group.shift(now)))
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }

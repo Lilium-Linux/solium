@@ -1041,7 +1041,7 @@ pub(crate) fn wants_warp(state: &Solium, pane: crate::pane::PaneId) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct Presented {
     planned: std::collections::HashMap<crate::pane::PaneId, Planned>,
-    /// The pass's one instant, read once at the top of [`plan_warps`]: what
+    /// The pass's one instant, the QML tick's, handed to [`plan_warps`]: what
     /// the warps, the T2 places and the walk are all measured at (amended
     /// 2026-10-14, live under motion and warps).
     /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
@@ -1065,7 +1065,7 @@ impl Presented {
     }
 }
 
-/// The instant this pass is measured at: the one [`plan_warps`] read, or
+/// The instant this pass is measured at: the one [`plan_warps`] was given, or
 /// the clock for a caller before any pass (a test calling a phase alone).
 pub(crate) fn pass_now(state: &Solium) -> std::time::Duration {
     state.presented.at().unwrap_or_else(|| state.clock.now())
@@ -1120,13 +1120,12 @@ pub(crate) fn captured(
 /// Plan every warp of the pass, as `warps` planned them: the same panes
 /// (on screen, with what to capture and an outer rectangle, [`captured`],
 /// `shown`), the same
-/// rectangle and scale, the same `plan_warp`, once each, all at the one
-/// instant read here. A refusal is still said once and counted once a pass
+/// rectangle and scale, the same `plan_warp`, once each, all at `now`, the
+/// pass's one instant, the QML tick's ([`frame_tick`]). A refusal is still said once and counted once a pass
 /// (`state::tests::real_client::a_present_refused_for_its_popups_alone_is_said_once`).
 /// `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`,
 /// `state::tests::real_client::a_gliding_windows_t2_place_is_measured_at_the_passs_instant`.
-pub(crate) fn plan_warps(state: &mut Solium) {
-    let now = state.clock.now();
+pub(crate) fn plan_warps(state: &mut Solium, now: std::time::Duration) {
     let mut planned = std::collections::HashMap::new();
     for (pane, window) in state.on_screen() {
         let Some((_, outer)) = captured(state, pane, window.as_ref()) else {
@@ -1195,8 +1194,9 @@ pub(crate) fn note_formats(state: &mut Solium, found: crate::pool::Formats) {
 /// (`tests::a_style_with_a_radius_is_drawn_inline`).
 ///
 /// Must run before the backend binds its own buffer; see [`Prepared`].
-/// Note on the clock: the pass reads it **once**, at the top of `resolve`
-/// ([`plan_warps`]), and everything of the pass is measured at that instant:
+/// Note on the clock: the pass reads it **once**, at the QML tick
+/// ([`frame_tick`]), and everything of the pass is measured at that instant:
+/// the scenes' animations and what they read of the groups,
 /// the warps' plans, the T2 places ([`measured`]) and the walk, which
 /// `elements` makes at [`Prepared::now`] however much later it runs
 /// (amended 2026-10-14, live under motion and warps). A T2 place measured
@@ -1229,10 +1229,10 @@ pub(crate) fn prepare(
     // Once per *frame* and not once per output: with two monitors, ticking in
     // `elements` would advance every animation twice as fast as the clock, and
     // on monitors of different refresh rates by different amounts.
-    {
+    let instant = {
         let _tick = crate::pacing::span(crate::pacing::Phase::Tick);
-        frame_tick(state);
-    }
+        frame_tick(state)
+    };
 
     // Twice the largest monitor's bytes may wait on the pool's free list
     // (Ruling 10): `pool::tests::a_target_given_back_over_budget_is_dropped`.
@@ -1258,6 +1258,7 @@ pub(crate) fn prepare(
         scenes: Vec::new(),
         pass: 0,
         drawing,
+        instant,
     };
     // What the pool makes in the effect phases, for the pass record: a
     // capture or an effect step at a size it had no target of, which a drag
@@ -1315,16 +1316,26 @@ pub(crate) fn prepare(
 /// from here on sees the frame at that size: `Solium::follow_growth`. And
 /// their client radii (#454), so a client is cut to the corners its style
 /// gives it this frame: `Solium::follow_corners`.
-pub(crate) fn frame_tick(state: &mut Solium) {
+///
+/// Returns that instant, which the pass is drawn at ([`plan_warps`]): the
+/// windows and the scenes' animations at one moment, and a scene that reads
+/// `Solium.groups` in step with the windows the groups carry.
+pub(crate) fn frame_tick(state: &mut Solium) -> std::time::Duration {
     state.publish_models();
     let now = state.clock.now();
     if state.lock_scenes.exit_frame(now) {
         tracing::debug!("the lock's exit is drawn from this frame");
     }
+    // Where every group is at this instant, for `Solium.groups`, before the
+    // tick runs the scenes' bindings: a scene's camera read from the window
+    // manager's camera groups is where the windows those groups carry are
+    // drawn, since the pass is drawn at this same instant (`prepare`).
+    state.publish_groups(now);
     crate::qml::tick(now);
     state.follow_growth(now);
     state.follow_corners();
     state.build_frames(now);
+    now
 }
 
 /// The first desktop frame's gate (`warm::Warm`, spec C14), asked once a
@@ -1423,6 +1434,8 @@ struct Gpu<'a> {
     /// The monitors this pass draws: a cut of another is kept as it is
     /// (`drawing.rs`).
     drawing: crate::drawing::Drawing,
+    /// The pass's one instant, the QML tick's ([`frame_tick`]).
+    instant: std::time::Duration,
 }
 
 impl std::fmt::Debug for Gpu<'_> {
@@ -1479,7 +1492,7 @@ impl Phases for Gpu<'_> {
         // pass (Ruling F31, amended 2026-10-14). With no effects it is the
         // plan `warps` made before, made earlier.
         // `state::tests::real_client::a_warped_panes_behind_slot_is_drawn_beneath_its_warp`.
-        plan_warps(state);
+        plan_warps(state, self.instant);
         // Every rule resolved once, after the effects compiled and before any
         // job is built; nothing, and no fact gathered, with no rules (spec §8.4,
         // `state::tests::real_client::with_no_rules_no_slot_is_wanted_and_no_fact_is_gathered`).

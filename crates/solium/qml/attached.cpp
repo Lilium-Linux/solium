@@ -341,6 +341,15 @@ SoliumStatus &SoliumStatus::instance()
     return *status;
 }
 
+SoliumGroups &SoliumGroups::instance()
+{
+    static SoliumGroups *groups = nullptr;
+    if (groups == nullptr) {
+        groups = new SoliumGroups();
+    }
+    return *groups;
+}
+
 SoliumDirs &SoliumDirs::instance()
 {
     static SoliumDirs *dirs = nullptr;
@@ -362,6 +371,18 @@ SoliumAttached::SoliumAttached(QObject *item) : QObject(item), m_item(item)
 {
     QObject::connect(&SoliumStatus::instance(), &SoliumStatus::changed, this,
                      &SoliumAttached::statusChanged);
+    QObject::connect(&SoliumGroups::instance(), &SoliumGroups::changed, this,
+                     &SoliumAttached::groupsChanged);
+}
+
+QVariantMap SoliumAttached::groups() const
+{
+    // Where a window manager is carrying the session's windows is the
+    // session's, as `sol.status` is.
+    if (solium_redacted(m_item)) {
+        return QVariantMap();
+    }
+    return SoliumGroups::instance().poses;
 }
 
 QString SoliumAttached::status() const
@@ -806,6 +827,22 @@ extern "C" int solium_qml_set_status(const char *text)
         status.text = next;
         emit status.changed();
     }
+    return 1;
+}
+
+/* What `Solium.groups` reads: a JSON object of each group's pose by name.
+ * Anything that is not one is taken as no groups.
+ * `qml::hosted::tests::a_published_group_reaches_solium_groups`. */
+extern "C" int solium_qml_set_groups(const char *json)
+{
+    if (QCoreApplication::instance() == nullptr) {
+        return 0;
+    }
+    const QJsonDocument document =
+        QJsonDocument::fromJson(QByteArray(json != nullptr ? json : "{}"));
+    SoliumGroups &groups = SoliumGroups::instance();
+    groups.poses = document.object().toVariantMap();
+    emit groups.changed();
     return 1;
 }
 

@@ -6,9 +6,8 @@
 //                      super+shift+right take the focused window along.
 //   super+2  carousel  every window a card on a ring, the front one flat
 //                      and in use; super+left and super+right turn the ring.
-//   super+3  room      a room in three dimensions, its walls, floor and
-//                      ceiling QML scenes, the windows hung on its walls,
-//                      walked as in a game: w a s d to walk, the arrows to
+//   super+3  room      a furnished room in Qt Quick 3D, the windows hung on
+//                      its walls, walked as in a game: w a s d to walk, the arrows to
 //                      turn and look up and down, space to jump, return to
 //                      step up to the window ahead (it comes out flat and
 //                      takes the keyboard), super+escape to step back.
@@ -192,11 +191,11 @@ internal sealed class Spaces : WindowManager
                 return new[] { Hop(0, Commands.Motion(0, Ease.Spring(170, 20))) };
             // The room has faded out after you left it: its scenes go.
             case RoomGone when _mode != Mode.Room:
-                return Planes().SelectMany(plane => new[]
+                return new[]
                 {
-                    new Command { SurfaceGone = plane.Name },
-                    Commands.Group(plane.Name, null),
-                });
+                    new Command { SurfaceGone = RoomScene },
+                    Commands.Group(RoomScene, null),
+                };
             default:
                 return Array.Empty<Command>();
         }
@@ -281,10 +280,7 @@ internal sealed class Spaces : WindowManager
         {
             // The room fades as the windows leave its walls, and its scenes
             // go once it has.
-            foreach (var plane in Planes())
-            {
-                commands.Add(Commands.Carry(plane.Name, PlanePose(plane), Commands.Motion(300, Ease.OutCubic), backface: true, opacity: 0));
-            }
+            commands.Add(Commands.Carry(RoomScene, new Pose(), Commands.Motion(300, Ease.OutCubic), opacity: 0));
             commands.Add(Commands.After(RoomGone, 320));
         }
         // What the old mode posed goes back to flat as the new mode's poses
@@ -296,6 +292,15 @@ internal sealed class Spaces : WindowManager
         commands.Add(Keys());
         commands.Add(new Command { Grab = mode == Mode.Room });
         commands.AddRange(Arrange(Gentle()));
+        if (mode == Mode.Room)
+        {
+            // You are in the room from its first frame, its camera where it
+            // will stay, and the windows glide onto its walls: a camera
+            // springing up from no perspective at all would sweep the room's
+            // scene through every lens on the way.
+            commands.AddRange(Camera(Commands.Motion(0)));
+            commands.Add(Hop(0, Commands.Motion(0)));
+        }
         return commands;
     }
 
@@ -460,116 +465,68 @@ internal sealed class Spaces : WindowManager
 
     // ---- The room ----
     //
-    // A room 7.2 m by 8 by 2.8 high, a metre a third of a screen across:
-    // four walls, a floor and a ceiling, each a QML scene posed in its
-    // place, and the windows hung on the walls at eye height. Four groups
-    // carry it all, one inside the next: where you stand (`move`), how high
-    // a jump has lifted you (`hop`), which way you face (`turn`) and how far
-    // you look up (`eye`), the last seeing it in perspective. Its scenes
-    // are drawn in the bottom layer and the windows over them, which is the
-    // right order from anywhere inside a room with nothing standing in it. Stepping up to a window puts you where it comes out flat and at
-    // its own size, so it is used as any window is.
+    // A room 7.2 m by 8 by 2.8 high, a metre a third of a screen across,
+    // furnished and lit: a scene in Qt Quick 3D (`qml/Room/`), drawn behind
+    // the windows, which hang on its walls at eye height. Four groups carry
+    // the windows, one inside the next: where you stand (`move`), how high a
+    // jump has lifted you (`hop`), which way you face (`turn`) and how far you
+    // look up (`eye`), the last seeing it in perspective. The scene reads the
+    // same groups (`Solium.groups`) and puts its camera where they say, at
+    // the instant the windows are drawn at, so the walls are where the
+    // windows are. Nothing in the room stands taller than the windows' lower
+    // edges but in its corners, so nothing should be drawn in front of a
+    // window, and the compositor draws them all over the scene. Stepping up
+    // to a window puts you where it comes out flat and at its own size, so it
+    // is used as any window is.
 
-    /// <summary>A flat part of the room: a scene, where its middle is, how it is turned, and its size.</summary>
-    private readonly record struct Plane(
-        string Name,
-        string Scene,
-        double X,
-        double Y,
-        double Z,
-        double RotateX,
-        double RotateY,
-        double W,
-        double H,
-        string Properties);
-
-    private IEnumerable<Plane> Planes()
-    {
-        var (w, d, h) = (RoomWidth(), RoomDepth(), RoomHeight());
-        var card = Card();
-        string Wall(double length, string feature) => string.Format(
-            System.Globalization.CultureInfo.InvariantCulture,
-            "{{\"slots\":[0.25,0.75],\"hangWidth\":{0},\"hangHeight\":{1},\"hangAt\":{2},\"feature\":\"{3}\"}}",
-            card.W / length,
-            card.H / h,
-            (h - EyeHeight()) / h,
-            feature);
-        yield return new Plane("room-front", "Wall.qml", 0, -h / 2, -d / 2, 0, 0, w, h, Wall(w, "window"));
-        yield return new Plane("room-back", "Wall.qml", 0, -h / 2, d / 2, 0, 180, w, h, Wall(w, "door"));
-        yield return new Plane("room-left", "Wall.qml", -w / 2, -h / 2, 0, 0, 90, d, h, Wall(d, "shelf"));
-        yield return new Plane("room-right", "Wall.qml", w / 2, -h / 2, 0, 0, -90, d, h, Wall(d, "art"));
-        yield return new Plane("room-floor", "Floor.qml", 0, 0, 0, 90, 0, w, d, "{}");
-        yield return new Plane("room-ceiling", "Ceiling.qml", 0, -h, 0, -90, 0, w, d, "{}");
-    }
-
-    /// <summary>
-    /// How much smaller than the room a plane's scene is declared: as large
-    /// as fits on the screen, which is the most a scene can be, and posed
-    /// that many times larger. The compositor captures it at its posed
-    /// size, so it is as sharp as a scene that big would be.
-    /// </summary>
-    private double Shrink(Plane plane) => Math.Max(plane.W / Width(), plane.H / Height());
-
-    private PixelRect PlaneRect(Plane plane)
-    {
-        var shrink = Shrink(plane);
-        return new PixelRect
-        {
-            X = (int)Screen().X,
-            Y = (int)Screen().Y,
-            W = (int)Math.Round(plane.W / shrink),
-            H = (int)Math.Round(plane.H / shrink),
-        };
-    }
+    private const string RoomScene = "space-room";
 
     /// <summary>Where a point of the room is drawn from, standing in its middle: what every pose in it is measured from.</summary>
     private (double X, double Y, double Z) Anchor() => (CenterX(), CenterY() + EyeHeight(), Eye());
 
-    private Pose PlanePose(Plane plane)
+    /// <summary>What the room's scene is told: its sizes in metres, a metre in pixels, and where each window hangs.</summary>
+    private string RoomProperties()
     {
-        var rect = PlaneRect(plane);
-        var (middleX, middleY) = (rect.X + rect.W / 2.0, rect.Y + rect.H / 2.0);
-        var (ax, ay, az) = Anchor();
-        return new Pose
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        string Number(double value) => value.ToString("0.####", culture);
+        var metre = Metre();
+        var card = Card();
+        var slots = string.Join(",", Enumerable.Range(0, 8).Select(at =>
         {
-            Scale = Shrink(plane),
-            RotateX = plane.RotateX,
-            RotateY = plane.RotateY,
-            OriginX = middleX,
-            OriginY = middleY,
-            X = ax + plane.X - middleX,
-            Y = ay + plane.Y - middleY,
-            Z = az + plane.Z,
-        };
+            var (x, z, heading) = Slot(at);
+            return $"[{Number(x / metre)},{Number(z / metre)},{Number(heading)}]";
+        }));
+        return $"{{\"metre\":{Number(metre)},"
+            + $"\"room\":[{Number(RoomWidth() / metre)},{Number(RoomDepth() / metre)},{Number(RoomHeight() / metre)}],"
+            + $"\"eye\":{Number(EyeHeight() / metre)},"
+            + $"\"hang\":[{Number(card.W / metre)},{Number(card.H / metre)}],"
+            + $"\"slots\":[{slots}]}}";
     }
 
-    /// <summary>The room's scenes, declared, and each posed where it stands, faded in.</summary>
+    /// <summary>The room's scene, declared on every screen behind the windows, and faded in.</summary>
     private IEnumerable<Command> BuildRoom()
     {
-        var folder = System.IO.Path.Combine(AppContext.BaseDirectory, "qml", "Room");
-        foreach (var plane in Planes())
+        yield return new Command
         {
-            yield return new Command
+            Surface = new Solium.Wm.Surface
             {
-                Surface = new Solium.Wm.Surface
-                {
-                    Name = plane.Name,
-                    Scene = System.IO.Path.Combine(folder, plane.Scene),
-                    // Over the field of stars, which is in the background
-                    // layer, and under the windows.
-                    Layer = Layer.Bottom,
-                    On = new Placement { Rect = PlaneRect(plane) },
-                    Properties = plane.Properties,
-                    Reserve = new Insets(),
-                    OutsideClick = new OutsideClick { Default = Outside.Pass },
-                    Keyboard = KeyPolicy.ExceptClaimed,
-                },
-            };
-            yield return Commands.Group(plane.Name, Array.Empty<ulong>(), parent: "move", surfaces: new[] { plane.Name });
-            var pose = PlanePose(plane);
-            yield return Commands.Carry(plane.Name, pose, Commands.Motion(0), backface: true, opacity: 0);
-            yield return Commands.Carry(plane.Name, pose, Commands.Motion(600, Ease.OutCubic), backface: true);
-        }
+                Name = RoomScene,
+                Scene = System.IO.Path.Combine(AppContext.BaseDirectory, "qml", "Room", "Room.qml"),
+                // Over the field of stars, which is in the background layer,
+                // and under the windows.
+                Layer = Layer.Bottom,
+                On = new Placement { EveryMonitor = new Unit() },
+                Properties = RoomProperties(),
+                Reserve = new Insets(),
+                OutsideClick = new OutsideClick { Default = Outside.Pass },
+                Keyboard = KeyPolicy.ExceptClaimed,
+            },
+        };
+        // A group of its own, so it fades in and out; posed by nothing, so
+        // the compositor draws it as it is.
+        yield return Commands.Group(RoomScene, Array.Empty<ulong>(), surfaces: new[] { RoomScene });
+        yield return Commands.Carry(RoomScene, new Pose(), Commands.Motion(0), opacity: 0);
+        yield return Commands.Carry(RoomScene, new Pose(), Commands.Motion(600, Ease.OutCubic));
     }
 
     /// <summary>Where window <paramref name="at"/> hangs: two to a wall, the window wall first, then the sides, then the door's.</summary>

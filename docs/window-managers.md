@@ -284,10 +284,16 @@ a turn keeps its speed, and a turn passes through every angle between.
   window manager posing windows into a room keeps their places on the screen
   and moves them with the pose.
 
+A scene can draw a world the poses move: `Solium.groups` gives every QML
+scene each group's pose at the instant the frame is drawn at, by its name
+([The boundary](shell-boundary.md#a-world-the-window-manager-moves)), so a
+room in Qt Quick 3D whose camera is where a window manager's camera groups
+are has its walls where the windows the groups hang on them are.
+
 `examples/space` is a window manager in C# with three such desktops: four
-desks on a cube, every window a card on a ring, and a room whose walls, floor
-and ceiling are QML scenes, the windows hung on its walls, which you walk
-through as in a game and step up to a window in.
+desks on a cube, every window a card on a ring, and a furnished room in Qt
+Quick 3D with the windows hung on its walls, which you walk through as in a
+game and step up to a window in.
 
 ### 8. Questions
 

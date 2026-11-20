@@ -191,8 +191,10 @@ pub(crate) struct Previous {
 ///
 /// `--check-qml` is software in every mode and never probes: it answers whether
 /// a file parses, and that must not depend on the machine. Nested `auto` is
-/// software, because winit hands the compositor no GBM device to allocate
-/// scene buffers from. `auto` on the hardware is software without a probe when
+/// software: a nested run is for what is not the hardware, and the host's GPU
+/// is the host session's. Asked for, nested `gpu` renders scenes into buffers
+/// from the host's render node (`winit.rs`), which is how a scene in Qt Quick
+/// 3D is seen nested. `auto` on the hardware is software without a probe when
 /// this build's last GPU start in the compositor did not work, and `gpu` never
 /// asks. Says what it chose in one line starting `QML renderer:`; a GPU start
 /// in the compositor that then fails says so in another. See
@@ -221,15 +223,15 @@ pub(crate) fn choose(
         (Entry::Nested, Mode::Gpu) => {
             tracing::info!(
                 from,
-                "QML renderer: gpu, as {from} asked. Nested there is no GBM device, so QML \
-                 scenes have no buffer to render into and none will draw"
+                "QML renderer: gpu, as {from} asked; nested, scenes render into buffers \
+                 from the host's render node"
             );
             Renderer::Gpu
         }
         (Entry::Nested, Mode::Auto) => {
             tracing::info!(
                 from,
-                "QML renderer: software, because nested has no GBM device for the GPU path"
+                "QML renderer: software, as nested is unless the GPU path is asked for"
             );
             Renderer::Software
         }

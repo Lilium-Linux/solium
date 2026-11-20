@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use smithay::{
     backend::{
+        allocator::gbm::GbmDevice,
         renderer::{
             Renderer as _,
             damage::OutputDamageTracker,
@@ -360,24 +361,7 @@ pub(crate) fn run() -> Result<()> {
     }
 
     if state.dmabuf_global.is_some() {
-        let device = (|| -> anyhow::Result<_> {
-            let device = smithay::backend::egl::EGLDevice::device_for_display(
-                backend.renderer().egl_context().display(),
-            )?;
-            let node = device
-                .try_get_render_node()?
-                .ok_or_else(|| anyhow::anyhow!("renderer has no DRM render node"))?;
-            let path = node
-                .dev_path()
-                .ok_or_else(|| anyhow::anyhow!("render node has no device path"))?;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)?;
-            Ok(smithay::backend::drm::DrmDeviceFd::new(
-                smithay::utils::DeviceFd::from(std::os::fd::OwnedFd::from(file)),
-            ))
-        })();
+        let device = render_node_fd(&mut backend);
         match device {
             Ok(device) => state.explicit_sync.enable(&display_handle, device, true),
             Err(err) => tracing::info!(?err, "nested explicit sync unavailable"),
@@ -468,7 +452,23 @@ pub(crate) fn run() -> Result<()> {
     // built after this, and one built undecided would start Qt on software.
     // See `qml::renderer::an_undecided_process_is_software`.
     let qml = scripts.as_ref().map(Scripts::qml).unwrap_or_default();
-    crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    let renderer = crate::qml::renderer::decide(crate::qml::renderer::Entry::Nested, &qml);
+    // Asked for, the GPU path renders scenes into buffers from the host's
+    // render node, the one the window is drawn with: what lets a scene in Qt
+    // Quick 3D, which the software path cannot draw, be seen nested. Before
+    // any scene is built, since one built without an allocator refuses for
+    // the rest of its life (`tty.rs` says the same).
+    if renderer == crate::qml::renderer::Renderer::Gpu {
+        match render_node_fd(&mut backend)
+            .and_then(|fd| GbmDevice::new(fd).context("creating the GBM device"))
+        {
+            Ok(gbm) => crate::qml::set_allocator(gbm),
+            Err(err) => tracing::warn!(
+                ?err,
+                "no render node for QML scenes on the GPU nested: none will draw"
+            ),
+        }
+    }
     // How a GPU scene's buffer is sized, before any scene is built:
     // `qml.buffers` (`qml::buffers`), read here as the renderer is.
     crate::qml::buffers::configure(qml.buffers.unwrap_or_default());
@@ -1482,4 +1482,28 @@ fn frame_interval(output: &smithay::output::Output) -> std::time::Duration {
     std::time::Duration::from_nanos(
         1_000_000_000_000_u64 / u64::try_from(refresh).unwrap_or(60_000),
     )
+}
+
+/// The render node the nested window is drawn with, opened: what clients'
+/// dmabufs are synced against, and what QML scenes on the GPU path render
+/// into buffers from.
+fn render_node_fd(
+    backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
+) -> Result<smithay::backend::drm::DrmDeviceFd> {
+    let device = smithay::backend::egl::EGLDevice::device_for_display(
+        backend.renderer().egl_context().display(),
+    )?;
+    let node = device
+        .try_get_render_node()?
+        .ok_or_else(|| anyhow::anyhow!("renderer has no DRM render node"))?;
+    let path = node
+        .dev_path()
+        .ok_or_else(|| anyhow::anyhow!("render node has no device path"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    Ok(smithay::backend::drm::DrmDeviceFd::new(
+        smithay::utils::DeviceFd::from(std::os::fd::OwnedFd::from(file)),
+    ))
 }
