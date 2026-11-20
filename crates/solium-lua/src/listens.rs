@@ -43,6 +43,7 @@ const HEARD: &[(&str, &str)] = &[
     ("resizing", "resizing"),
     ("drop", "dropped"),
     ("scroll", "scrolled"),
+    ("seam", "seam-moved"),
 ];
 
 /// Heard whatever the configuration listens to: the stores and the keeps

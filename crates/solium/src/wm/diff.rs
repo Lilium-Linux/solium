@@ -52,6 +52,22 @@ fn same<T>(then: Option<&Rc<T>>, now: &Rc<T>) -> bool {
     then.is_some_and(|then| Rc::ptr_eq(then, now))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a window manager on this thread was last told each window's
+    /// application says of its size: what a test solves a tree of boxes it
+    /// answered with, as the compositor would.
+    static TOLD_LIMITS: std::cell::RefCell<HashMap<u64, solium_wm_protocol::space::Limits>> =
+        std::cell::RefCell::default();
+}
+
+/// What a window manager on this thread was last told window `id`'s
+/// application says of its size.
+#[cfg(test)]
+pub(crate) fn told_limits(id: u64) -> solium_wm_protocol::space::Limits {
+    TOLD_LIMITS.with(|told| told.borrow().get(&id).cloned().unwrap_or_default())
+}
+
 impl Told {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -96,6 +112,22 @@ impl Told {
             changes.push(Change::Stacking(stacking.clone()));
         }
         self.stacking = stacking;
+        #[cfg(test)]
+        TOLD_LIMITS.with(|told| {
+            *told.borrow_mut() = self
+                .windows
+                .iter()
+                .map(|(id, window)| {
+                    (
+                        *id,
+                        solium_wm_protocol::space::Limits {
+                            min: window.min.clone(),
+                            max: window.max.clone(),
+                        },
+                    )
+                })
+                .collect();
+        });
 
         let monitors: Vec<wire::Monitor> = snapshot.monitors.iter().map(convert::monitor).collect();
         if monitors != self.monitors {

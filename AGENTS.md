@@ -31,8 +31,8 @@ file is out of date.
 | `crates/solium/effects/` | The shipped effects, each a folder of Lua and GLSL: `blur`, `glass`, `genie`, `shade` |
 | `crates/solium/tests/` | The command-line tests, and the scenarios the unit tests play |
 | `crates/animation/`, `crates/effects/`, `crates/paths/` | Crates with no compositor in them: curves and springs, the effect format, and where a program of Solium's finds its shipped files and the user's |
-| `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
-| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, their arithmetic (the dwindle tree, the scrolling strip, the overview grid) is `layouts/`, with its cases in `specs/`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
+| `crates/wm-protocol/` | The window manager protocol: its WIT (`wit/`), which is its one definition; the Rust types and their protobuf encoding generated from it, and the `.proto` file that says the same for every other language (`proto/`, checked in, with bytes from `protoc` the encoding is held to); the arithmetic of a tree of boxes (`src/space.rs`), which the compositor solves an `arrange` with and a window manager in Rust may call; a client library for a window manager written in Rust, and one in a single file (`examples/tiny_wm.rs`). Depends on nothing of Solium's |
+| `crates/solium-lua/` | The Lua window manager, a program of its own (`solium-lua`): the `sol` API and the runtime that runs a configuration, talking to the compositor only in the protocol's terms, and finding its own files. Its shipped configuration is `lua/`: `init.lua` loads it, `config.lua` has every setting, the modes are `floating.lua`, `tiling.lua`, `scrolling.lua` and `overview.lua`, their layouts (the dwindle tree, the scrolling strip, the overview grid) are `layouts/`, with their cases in `specs/`, and `meta/sol.lua` documents the Lua API. The compositor does not link it; its tests do, to run it on a thread |
 | `crates/solium-auth/` | The lock screen's password helper (#281): a small binary, the only code that links PAM, and the protocol and zeroised `Secret` it shares with `crates/solium/src/auth.rs` |
 | `crates/wl-probe/` | A Wayland client that checks protocol support from outside |
 | `sdk/csharp/` | The package a window manager in C# is built on: the protocol's types, generated from the `.proto` by protobuf's own generator, the connection, the desktop kept current, and a whole window manager on it (`Tiny/`). Built with `dotnet`, not by the gate |
@@ -128,9 +128,11 @@ Most review findings are one of these.
 - **A new mode needs no new Rust.** If it does, the transform layer is missing
   something: fix the layer, do not special-case the mode.
 - **Arrangements are configuration.** Tiling, scrolling, the overview grid and
-  any other layout's arithmetic are Lua in `crates/solium-lua/lua/layouts/`,
-  never Rust, in the compositor or in the window manager's runtime: not as a
-  helper, not as a fast path (a test refuses it).
+  any other layout are Lua in `crates/solium-lua/lua/layouts/`, never Rust, in
+  the compositor or in the window manager's runtime: not as a helper, not as a
+  fast path (a test refuses it). What the compositor gives a layout is generic
+  building blocks it runs every frame, such as a tree of boxes it solves and
+  whose seams it drags (`arrange`), which name no arrangement.
 - **Windows answer at once.** Opening, resizing and closing a window respond on
   the next frame, and the application catches up. Waiting for the application
   is an option a layout may set, never the default.

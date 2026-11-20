@@ -295,8 +295,29 @@
 
 ---Where `sol.place` puts a window.
 ---@class sol.PlaceOptions: sol.Rect
----@field tile? boolean|sol.Rect `true` (the default) makes the rect a tile the window is held inside; `false` places it without tiling it; a rect is the tile, for a window placed smaller than its tile.
----@field cramped? boolean The layout saying the tile is smaller than the window's own minimum. `sol.windows()` reports it back.
+---@field tile? boolean `true` (the default) makes the rect a tile the window is held inside; `false` places it without tiling it. A window placed smaller than its tile, and one cramped in it, are a tree's: `sol.arrange`.
+
+---One box of a tree `sol.arrange` hands over, in a list whose first entry is
+---the root. A box is a split (`split`), a box whose children are each where
+---their own `at` puts them (`free = true`), a window (`window`), or room that
+---holds nothing (none of the three).
+---@class sol.Box
+---@field parent? integer The place of the box it is in, in the same list, counted from 1; nil for the root.
+---@field id? integer Your own name for it, which the `"seam"` event says back.
+---@field split? { axis: "x"|"y", gap?: number, resizable?: boolean } Its children side by side along `axis` ("x" shares the width, "y" the height), `gap` pixels apart (0 by default); with `resizable` (the default), each gap is a seam a window's dragged edge moves.
+---@field free? boolean Its children each where their own `at` puts them.
+---@field window? integer A window, by id, filling the box.
+---@field share? number Its share of a split's room, against its siblings' (1 by default). Each keeps at least a twentieth.
+---@field at? sol.Rect Where it is inside a `free` box.
+---@field min? { w: number, h: number } The least room it takes, frame included, besides what a window's application asks for.
+---@field client_min? boolean For a window: its application's own least size counts, so a split gives it that room while its siblings have room to spare, and a window given less is `cramped`. Default `false`.
+---@field client_max? boolean For a window: its application's own largest size counts, so a window that will not grow to its box is drawn at that size in the box's middle. Default `false`.
+
+---Where `sol.solve` says a window of a tree comes out.
+---@class sol.Solved: sol.Rect
+---@field id integer The window.
+---@field cramped boolean Whether its box is smaller than its application's least size.
+---@field tile sol.Rect Its box: the rect itself, or larger when the window will not grow to it.
 
 ---What a selection holds, for `sol.group`. Every key is optional.
 ---@class sol.Selection
@@ -570,7 +591,8 @@
 ---| "maximize" # A window was maximised, or restored: `(id, entering)`. Told and answered as `"fullscreen"` is, and on its own, so the two can move differently.
 ---| "drag" # A window is being moved by the pointer, a finger, or its own client's move request: `(id, phase, x, y)`, `phase` being `"begin"`, `"move"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion can move the window, so a listener can hold it (`sol.drag_hold`); `"move"` once a frame at most, wherever the pointer got to; `"end"` before the `"drop"`, and also when a drag ends with no drop (the window went fullscreen, a finger was cancelled).
 ---| "drop" # A dragged window was let go: `(id, x, y)`.
----| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`.
+---| "resize" # An edge is being dragged: `(id, edge_x, edge_y, horizontal_side, vertical_side)`. Not told for a side of a window in a tree (`sol.arrange`) with a seam along it: the compositor moves that seam itself.
+---| "seam" # A seam of a tree was left somewhere, by a drag once it is let go, or by `sol.grow`: `(key, id, shares)`, the tree's key, the split's id and each of its children's share, as fractions of one. Arranging the tree again with these shares moves nothing.
 ---| "resizing" # A window is being resized by a border, the drag modifier, or a finger: `(id, phase, x, y)`, `phase` being `"begin"` or `"end"` and `x, y` the pointer. `"begin"` is told before the first motion is offered to the `"resize"` listeners, so a listener can hold the window (`sol.resize_hold`); `"end"` after the release and after the last motion is offered. Its motion is the `"resize"` event's.
 ---| "scroll" # The wheel turned with Super held: `(dx, dy)`.
 ---| "click" # A pointer or finger press while a script holds input: `(x, y)`.
@@ -1644,6 +1666,43 @@ function sol.move_direction(dir) end
 ---@return nil
 function sol.place(id, options) end
 
+---Hand the compositor a tree of boxes, under `key`, which replaces the tree
+---of that name whole; an empty list takes it away. The compositor solves it
+---into rectangles, with each window's application's own least and largest
+---size taken into account as its box says, places each window in its box by
+---the motion `sol.animate` set, and keeps it solved: a window whose
+---application says another size is given room without being asked about,
+---and a window's dragged edge moves the seam beside it on every frame of the
+---drag, with the `"seam"` event telling where it was left once it is let go.
+---A window is in one tree at a time; placed with `sol.place`, it leaves it.
+---A tree that is not one is an error, said where it was made.
+---@param key string
+---@param area sol.Rect The rectangle the root fills.
+---@param boxes sol.Box[]
+---@return nil
+function sol.arrange(key, area, boxes) end
+
+---Where each window of a tree comes out, as the compositor solves it, in the
+---tree's order: the same arithmetic, to decide by before handing it over.
+---`limits`, by window id, stands for what the applications say of their sizes;
+---without it, the desktop's own windows do.
+---@param area sol.Rect
+---@param boxes sol.Box[]
+---@param limits? table<integer, { min?: { w: number, h: number }, max?: { w: number, h: number } }>
+---@return sol.Solved[]
+function sol.solve(area, boxes, limits) end
+
+---Grow a window in its tree by moving one seam: the one after it on `axis`,
+---or the one before it the other way when there is none after. `by` is a
+---share of the split's room; less than nothing shrinks it. Held to each box's
+---least and each application's as a drag is, and moved by the motion
+---`sol.animate` set. The `"seam"` event tells where it was left.
+---@param id integer
+---@param axis "x"|"y"
+---@param by number
+---@return nil
+function sol.grow(id, axis, by) end
+
 ---Let a window go from its tile, when a layout stops arranging it.
 ---`modes.use` sends this for every window when the layout in charge changes.
 ---@param id integer
@@ -2012,6 +2071,7 @@ function sol.unknown(key, meant) end
 ---@overload fun(event: "drop", handler: fun(id: integer, x: number, y: number))
 ---@overload fun(event: "resize", handler: fun(id: integer, edge_x: number, edge_y: number, horizontal_side: "left"|"right"|nil, vertical_side: "top"|"bottom"|nil))
 ---@overload fun(event: "scroll", handler: fun(dx: number, dy: number))
+---@overload fun(event: "seam", handler: fun(key: string, id: integer, shares: number[]))
 ---@overload fun(event: "click", handler: fun(x: number, y: number))
 ---@overload fun(event: "touch", handler: fun(event: sol.TouchEvent))
 ---@overload fun(event: "surface", handler: fun(surface: string, action: string, data: any))

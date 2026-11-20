@@ -26,8 +26,7 @@ fn tiny() -> Scripts {
 
 /// Where each window of an answer was placed, in order.
 fn placed(outcome: &Outcome) -> Vec<(u64, f64, f64)> {
-    outcome
-        .commands
+    super::applied(&outcome.commands)
         .iter()
         .filter_map(|command| match command {
             Command::Place { id, rect, tile, .. } => {

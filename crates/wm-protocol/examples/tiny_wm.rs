@@ -1,7 +1,8 @@
 //! A window manager in one file, to read and to start from.
 //!
 //! It tiles in columns: every window gets an equal share of the screen's
-//! width, in the order the windows opened. `super+return` opens a terminal
+//! width, in the order the windows opened, and the edge between two can be
+//! dragged. `super+return` opens a terminal
 //! (`$TERMINAL`, or `foot`), `super+q` closes the window that has the
 //! keyboard, `super+j` and `super+k` move the keyboard to the next window
 //! and the one before, and `super+shift+e` ends the session.
@@ -21,8 +22,8 @@
 use solium_wm_protocol::client::{Client, ClientError, Heard};
 use solium_wm_protocol::mirror::Mirror;
 use solium_wm_protocol::{
-    Answer, Binding, Command, Declarations, Easing, Event, Focus, FocusCause, Motion, Place, Rect,
-    Reloaded,
+    Answer, Arrange, Axis, Binding, Command, Declarations, Easing, Event, Focus, FocusCause,
+    Motion, Reloaded, SpaceBox, SpaceKind, Split,
 };
 
 /// The keys it binds, and what each does, as `solium --check` lists them.
@@ -73,7 +74,12 @@ struct Tiny {
 
 impl Tiny {
     /// Every tiled window in a column of its own, side by side across the
-    /// part of the screen that bars and docks leave.
+    /// part of the screen that bars and docks leave: one split along `x`,
+    /// each window an equal share. The compositor solves it, keeps each
+    /// window's application's least size, and moves a seam itself when a
+    /// window's edge is dragged; a seam dragged is forgotten at the next
+    /// arrange here, where a window manager that kept it would hear
+    /// `seam-moved`.
     fn arrange(&self) -> Vec<Command> {
         let primary = self.mirror.monitors.iter().find(|monitor| monitor.primary);
         let Some(area) = self
@@ -84,32 +90,35 @@ impl Tiny {
         else {
             return Vec::new();
         };
-        let width = area.w / self.tiled.len().max(1) as f64;
-        self.tiled
-            .iter()
-            .enumerate()
-            .map(|(column, id)| {
-                Command::Place(Place {
-                    id: *id,
-                    rect: Rect {
-                        x: area.x + width * column as f64,
-                        y: area.y,
-                        w: width,
-                        h: area.h,
-                    },
-                    // The compositor moves it there: a window manager says
-                    // where and how, and never draws a frame of it.
-                    motion: Motion {
-                        duration_ms: 180.0,
-                        easing: Easing::OutCubic,
-                    },
-                    tile: true,
-                    inside: None,
-                    cramped: false,
-                    moved: false,
-                })
-            })
-            .collect()
+        let mut boxes = vec![SpaceBox {
+            kind: SpaceKind::Split(Split {
+                axis: Axis::X,
+                gap: 0.0,
+                resizable: true,
+            }),
+            share: 1.0,
+            ..SpaceBox::default()
+        }];
+        boxes.extend(self.tiled.iter().map(|id| SpaceBox {
+            parent: Some(0),
+            id: *id,
+            kind: SpaceKind::Window(*id),
+            share: 1.0,
+            client_min: true,
+            ..SpaceBox::default()
+        }));
+        vec![Command::Arrange(Arrange {
+            key: "columns".to_owned(),
+            area: area.clone(),
+            boxes,
+            // The compositor moves each window there: a window manager says
+            // where and how, and never draws a frame of it.
+            motion: Motion {
+                duration_ms: 180.0,
+                easing: Easing::OutCubic,
+            },
+            moved: None,
+        })]
     }
 
     /// The window `step` places along from the one with the keyboard.

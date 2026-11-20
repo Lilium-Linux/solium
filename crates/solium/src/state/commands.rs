@@ -566,30 +566,43 @@ impl Solium {
                     rect,
                     animation,
                     tile,
-                    inside,
-                    cramped,
                     moved,
                 } => {
-                    let standing = match (tile, inside) {
-                        (false, _) => Standing::Free,
-                        (true, Some(inside)) => Standing::Within(outer_of(inside)),
-                        (true, None) => Standing::Tile,
-                    };
+                    let standing = if tile { Standing::Tile } else { Standing::Free };
                     if moved {
                         self.carry_across(id, rect, standing);
                     }
+                    // Placed by the window manager itself, so in no tree of
+                    // boxes any more.
+                    self.out_of_trees(id);
                     self.place(id, rect, animation, now, standing);
-                    // The layout's word for this placement, said afresh each
-                    // time; a window placed out of a tile is in no tile to be
-                    // cramped in.
+                    // Cramped is a tree of boxes' word, and a window placed
+                    // on its own is in none.
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id)
                         && let Some(pane) = self.panes.get_mut(pane)
                     {
-                        cramped_changed |= pane.cramped() != (cramped && tile);
-                        pane.set_cramped(cramped && tile);
+                        cramped_changed |= pane.cramped();
+                        pane.set_cramped(false);
                     }
                 }
+                Command::Arrange {
+                    key,
+                    tree,
+                    animation,
+                    moved,
+                } => {
+                    cramped_changed |= self.arrange(key, tree, animation, moved, now);
+                }
+                Command::Grow {
+                    window,
+                    axis,
+                    by,
+                    animation,
+                } => {
+                    cramped_changed |= self.grow(window, axis, by, animation, now);
+                }
                 Command::Unplace { id } => {
+                    self.out_of_trees(id);
                     if let Some(pane) = self.panes.by_script_id(id).map(Pane::id) {
                         // Let go of altogether: a placement that was
                         // holding it at its tile until its client answered

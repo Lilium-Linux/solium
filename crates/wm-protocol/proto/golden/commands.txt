@@ -8,7 +8,6 @@ submit {
       rect { x: 1.5 y: -2 w: 800 h: 600 }
       motion { duration_ms: 180 easing { out_cubic {} } }
       tile: true
-      inside { w: 10 h: 10 }
     }
   }
   items {
@@ -88,6 +87,39 @@ submit {
       settings { number: 0.5 }
       settings { boolean: false }
       settings { text: "" }
+    }
+  }
+  items {
+    arrange {
+      key: "1@DP-1"
+      area { x: 12 y: 12 w: 1896 h: 1056 }
+      boxes { id: 3 kind { split { axis: AXIS_Y gap: 12 resizable: true } } share: 1 }
+      boxes {
+        parent: 0
+        id: 1
+        kind { window: 7 }
+        share: 0.25
+        min { w: 160 h: 96 }
+        client_min: true
+        client_max: true
+      }
+      boxes {
+        parent: 0
+        id: 2
+        kind { empty {} }
+        share: 0.75
+        at { w: 10 h: 10 }
+      }
+      motion { easing { linear {} } }
+      moved: 7
+    }
+  }
+  items {
+    grow {
+      window: 7
+      axis: AXIS_X
+      by: -0.05
+      motion { duration_ms: 120 easing { out_cubic {} } }
     }
   }
 }

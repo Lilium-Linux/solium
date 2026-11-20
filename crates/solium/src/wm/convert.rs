@@ -62,6 +62,28 @@ fn other_kind(kind: &str) -> &'static str {
 
 pub(crate) use solium_wm_protocol::lock::reaches_past_the_lock;
 
+#[cfg(test)]
+thread_local! {
+    /// Each tree a window manager on this thread last arranged, by key: what
+    /// a test drags a seam in, as the compositor would.
+    static ARRANGED: std::cell::RefCell<
+        std::collections::BTreeMap<String, Option<solium_wm_protocol::space::Tree>>,
+    > = std::cell::RefCell::default();
+}
+
+/// The tree a window manager on this thread last arranged `window` in, and
+/// its key.
+#[cfg(test)]
+pub(crate) fn arranged_holding(window: u64) -> Option<(String, solium_wm_protocol::space::Tree)> {
+    ARRANGED.with(|arranged| {
+        arranged.borrow().iter().find_map(|(key, tree)| {
+            tree.as_ref()
+                .filter(|tree| tree.contains(window))
+                .map(|tree| (key.clone(), tree.clone()))
+        })
+    })
+}
+
 /// A command off the wire as the compositor's own commands, which may be
 /// none, one or several: a settings section becomes the commands that apply
 /// it. One that cannot be applied is named in the log and left out.
@@ -190,10 +212,48 @@ fn runtime(command: wire::Command) -> Result<crate::script::Command, String> {
             rect: rect(place.rect),
             animation: animation(&place.motion)?,
             tile: place.tile,
-            inside: place.inside.map(rect),
-            cramped: place.cramped,
             moved: place.moved,
         },
+        W::Arrange(arrange) => {
+            let tree = if arrange.boxes.is_empty() {
+                None
+            } else {
+                Some(
+                    solium_wm_protocol::space::Tree::new(&arrange)
+                        .map_err(|why| format!("the tree `{}` is not one: {why}", arrange.key))?,
+                )
+            };
+            #[cfg(test)]
+            ARRANGED.with(|arranged| {
+                arranged
+                    .borrow_mut()
+                    .insert(arrange.key.clone(), tree.clone());
+            });
+            Command::Arrange {
+                tree,
+                animation: animation(&arrange.motion)?,
+                moved: arrange.moved,
+                key: arrange.key,
+            }
+        }
+        W::Grow(wire::Grow {
+            window,
+            axis,
+            by,
+            motion,
+        }) => {
+            if !by.is_finite() {
+                return Err(format!(
+                    "growing window {window} by {by}, which is not a share"
+                ));
+            }
+            Command::Grow {
+                window,
+                axis,
+                by,
+                animation: animation(&motion)?,
+            }
+        }
         W::Focus(wire::Focus {
             id,
             cause,

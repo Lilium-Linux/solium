@@ -38,6 +38,8 @@ pub fn reaches_past_the_lock(command: &Command) -> bool {
         | C::Press(_)
         | C::Place(_)
         | C::Unplace(_)
+        | C::Arrange(_)
+        | C::Grow(_)
         | C::Close(_)
         | C::Quit => true,
         // Declaring the workspaces moves windows between them.

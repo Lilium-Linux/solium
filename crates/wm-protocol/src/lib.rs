@@ -38,6 +38,7 @@ pub mod listen;
 pub mod lock;
 pub mod mirror;
 pub mod present;
+pub mod space;
 pub mod store;
 pub mod touch;
 mod wire;
@@ -216,8 +217,6 @@ mod tests {
                             }),
                         },
                         tile: true,
-                        inside: None,
-                        cramped: false,
                         moved: false,
                     }),
                     Command::Focus(Focus {

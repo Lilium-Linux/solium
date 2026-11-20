@@ -5,19 +5,127 @@
 //! `{ name, run }` written with `specs/expect.lua`. Each file is run in a
 //! bare Lua with no `sol` at all, which is also what holds the layouts to
 //! being arithmetic: one that reached for the window manager would fail here.
+//!
+//! What a layout leaves to the compositor -- solving its boxes, moving a seam
+//! for a dragged edge or a key -- is there too, as the global `space`, run by
+//! the compositor's own code (`solium_wm_protocol::space`): `space.solve` is
+//! `sol.solve`, and `space.drag` and `space.grow` do what the compositor does
+//! with a drag and a `sol.grow`, answering the split's id and shares the
+//! `seam` event would say.
 
 use std::path::{Path, PathBuf};
 
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
+use solium_wm_protocol::space::{Limits, Seam, Side, Tree};
 
 fn crate_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// A tree from Lua's area, boxes and limits, and the limits as the solver
+/// reads them.
+fn tree_of(
+    area: &Table,
+    boxes: &Table,
+    limits: Option<&Table>,
+) -> mlua::Result<(Tree, Vec<(u64, Limits)>)> {
+    let area = crate::api::area_of(area, "space")?;
+    let boxes = crate::api::boxes_from(boxes)?;
+    let tree = Tree::of(&area, &boxes).map_err(mlua::Error::runtime)?;
+    let limits = match limits {
+        Some(limits) => crate::api::limits_from(limits)?,
+        None => Vec::new(),
+    };
+    Ok((tree, limits))
+}
+
+fn lookup(limits: &[(u64, Limits)], id: u64) -> Limits {
+    limits
+        .iter()
+        .find(|(each, _)| *each == id)
+        .map(|(_, limits)| limits.clone())
+        .unwrap_or_default()
+}
+
+/// `{ id, shares }` for the split a seam is in, as the `seam` event says it.
+fn moved(lua: &Lua, tree: &Tree, seam: Seam) -> mlua::Result<Value> {
+    let Some((id, shares)) = tree.shares(seam.split) else {
+        return Ok(Value::Nil);
+    };
+    let out = lua.create_table()?;
+    out.set("id", id)?;
+    out.set("shares", lua.create_sequence_from(shares)?)?;
+    Ok(Value::Table(out))
+}
+
+/// The global `space`: the compositor's arithmetic, for a bare Lua.
+fn space(lua: &Lua) -> mlua::Result<Table> {
+    let space = lua.create_table()?;
+    space.set("solve", crate::solve_function(lua)?)?;
+    // `space.drag(area, boxes, window, side, x, y, limits)`: false for a
+    // side that is none of the four, nil when no seam lies along it.
+    space.set(
+        "drag",
+        lua.create_function(
+            |lua,
+             (area, boxes, window, side, x, y, limits): (
+                Table,
+                Table,
+                u64,
+                String,
+                f64,
+                f64,
+                Option<Table>,
+            )| {
+                let Some(side) = Side::named(&side) else {
+                    return Ok(Value::Boolean(false));
+                };
+                let (mut tree, limits) = tree_of(&area, &boxes, limits.as_ref())?;
+                let Some(seam) = tree.seam_beside(window, side) else {
+                    return Ok(Value::Nil);
+                };
+                let edge = match side {
+                    Side::Left | Side::Right => x,
+                    Side::Top | Side::Bottom => y,
+                };
+                tree.drag(seam, edge, |id| lookup(&limits, id));
+                moved(lua, &tree, seam)
+            },
+        )?,
+    )?;
+    // `space.grow(area, boxes, window, axis, by, limits)`: nil when no seam
+    // lies on that axis.
+    space.set(
+        "grow",
+        lua.create_function(
+            |lua,
+             (area, boxes, window, axis, by, limits): (
+                Table,
+                Table,
+                u64,
+                String,
+                f64,
+                Option<Table>,
+            )| {
+                let axis = crate::api::axis_named(&axis)?;
+                let (mut tree, limits) = tree_of(&area, &boxes, limits.as_ref())?;
+                match tree.grow(window, axis, by, |id| lookup(&limits, id)) {
+                    Some(seam) => moved(lua, &tree, seam),
+                    None => Ok(Value::Nil),
+                }
+            },
+        )?,
+    )?;
+    Ok(space)
 }
 
 /// Every case in `specs/<name>.lua` run, and each that failed with its
 /// message. Fails the test on any, naming them all.
 fn run(name: &str) {
     let lua = Lua::new();
+    lua.globals()
+        .set("space", space(&lua).expect("the space table"))
+        .expect("space set");
     let lua_dir: PathBuf = crate_dir().join("lua");
     let spec_dir: PathBuf = crate_dir().join("specs");
     let package: Table = lua.globals().get("package").expect("package");

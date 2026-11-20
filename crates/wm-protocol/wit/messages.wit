@@ -390,6 +390,18 @@ interface messages {
         /// changed since the last, and a `keep` for each kept document
         /// that did.
         save-stores,
+        /// A seam of a tree the window manager arranged was let go, or
+        /// moved by `grow`: where. Its next `arrange` of that tree carries
+        /// these shares, so nothing moves.
+        seam-moved(seam-moved),
+    }
+
+    /// Where a split's seam was left: the tree's key, the split's id, and
+    /// each of its children's share, in order, as shares of one.
+    record seam-moved {
+        key: string,
+        id: u64,
+        shares: list<f64>,
     }
 
     /// A window's edge moved by its own resize.

@@ -680,38 +680,27 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
     //
     // The rect is a *tile* unless it says `tile = false`: the client is held
     // inside it, cut to it where it commits more than it has (#133). A
-    // layout's arrangement wants that and gets it by default; a window a
-    // layout places without tiling it — a dialog centred on its parent — says
-    // so, and is drawn at whatever it commits.
-    //
-    // `tile` may instead be the tile itself, `{ x, y, w, h }`, when the window
-    // is placed smaller than the tile it has -- `tiling.lua` centring a window
-    // at its own maximum (#115). The window lives at the rect; the tile is
-    // what holds its client and what an edge drag moves a seam from. See
-    // `Command::Place::inside`.
-    //
-    // `cramped = true` is the layout saying this tile is smaller than the
-    // window's own minimum, which `sol.windows()` reports back. Said afresh on
-    // every placement, so a placement that does not say it is not cramped.
+    // window a layout places without tiling it -- a dialog centred on its
+    // parent -- says so, and is drawn at whatever it commits. A window placed
+    // here leaves any tree of boxes it was in (`sol.arrange`), where the
+    // compositor works out a tile, its application's own limits and
+    // `cramped` itself.
     sol.set(
         "place",
         lua.create_function(|lua, (id, options): (u64, Table)| {
             let Some(rect) = rect_from(&options)? else {
                 return Err(mlua::Error::runtime("sol.place needs a rect"));
             };
-            let (tile, inside) = match options.get::<Value>("tile")? {
-                Value::Table(within) => match rect_from(&within)? {
-                    Some(within) => (true, Some(within)),
-                    None => {
-                        return Err(mlua::Error::runtime(
-                            "sol.place's tile is true, false, or the tile's { x, y, w, h }",
-                        ));
-                    }
-                },
-                Value::Boolean(false) => (false, None),
-                _ => (true, None),
+            let tile = match options.get::<Value>("tile")? {
+                Value::Boolean(tile) => tile,
+                Value::Nil => true,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "sol.place's tile is true or false; a window smaller than its tile \
+                         is a box of sol.arrange with client_max",
+                    ));
+                }
             };
-            let cramped = options.get::<Option<bool>>("cramped")?.unwrap_or(false);
             with_pending(lua, |pending| {
                 let animation = pending.animation;
                 let moved = pending.moving == Some(id);
@@ -721,8 +710,6 @@ pub(crate) fn register(lua: &Lua, sol: &Table) -> mlua::Result<()> {
                         rect,
                         motion: to_wire::motion(animation),
                         tile,
-                        inside,
-                        cramped,
                         moved,
                     },
                 ));

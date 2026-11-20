@@ -2778,8 +2778,9 @@ A mode is a Lua module that reacts to events — a window opening, closing or
 taking focus, a drag ending, the monitors changing, and the rest
 [modes.md lists](modes.md#what-a-mode-is-told) — and asks for placements.
 `tiling.lua` is Hyprland's dwindle and `scrolling.lua` is niri's model; each
-decides where windows go and when, and leaves the arithmetic of the tree and
-the strip to `layouts/dwindle.lua` and `layouts/scroller.lua`. Copy any of them
+decides where windows go and when, and leaves the tree and the strip to
+`layouts/dwindle.lua` and `layouts/scroller.lua`; the compositor solves the
+tree's tiles and moves its seams. Copy any of them
 into your own directory, `layouts/` included, and the copy takes over.
 
 **[modes.md](modes.md)** is the guide, with a whole working mode in forty lines

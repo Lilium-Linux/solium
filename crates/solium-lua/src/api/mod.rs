@@ -10,8 +10,12 @@ mod present;
 mod process;
 mod services;
 mod settings;
+mod space;
 mod windows;
 
+pub use space::solve_function;
+#[cfg(test)]
+pub(crate) use space::{area_of, axis_named, boxes_from, limits_from};
 pub use windows::layer_named;
 
 /// Build the `sol` table.
@@ -68,6 +72,7 @@ pub fn build_api(lua: &Lua) -> mlua::Result<Table> {
     input::register(lua, &sol)?;
     bindings::register(lua, &sol)?;
     process::register(lua, &sol)?;
+    space::register(lua, &sol)?;
 
     Ok(sol)
 }

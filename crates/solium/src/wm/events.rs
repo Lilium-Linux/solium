@@ -199,6 +199,20 @@ impl Scripts {
         }
     }
 
+    /// A seam of a tree the window manager arranged was left here.
+    pub(crate) fn seam_moved(
+        &mut self,
+        key: String,
+        id: u64,
+        shares: Vec<f64>,
+        snapshot: Snapshot,
+    ) -> Outcome {
+        self.send(
+            snapshot,
+            wire::Event::SeamMoved(wire::SeamMoved { key, id, shares }),
+        )
+    }
+
     pub(crate) fn closed(&mut self, id: u64, snapshot: Snapshot) -> Outcome {
         self.send(snapshot, wire::Event::Closed(id))
     }

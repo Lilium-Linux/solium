@@ -132,6 +132,9 @@ impl Solium {
         // gesture by however long the client takes to answer the last
         // configure, and something has to be watching for that answer.
         let settled = self.settle_resize_hold(now) | self.settle_resize_bridge(now);
+        // The trees of boxes: solved again for a window whose limits
+        // changed, and the seams a drag moved told once it is over.
+        let solved = self.settle_trees();
         // A recorded release exists to be handed to a hold that had not been
         // born yet. If nothing survived this frame, nothing can be: the only
         // things that create one are `hold_resize` and `offers_size`, and the
@@ -140,7 +143,7 @@ impl Solium {
         if self.resize_hold.is_none() && self.resize_bridge.is_none() {
             self.resize_ended = None;
         }
-        settled || dragged
+        settled || dragged || solved
     }
 
     /// Tell `move_pane` that the layout sweep it is about to see belongs to a
@@ -967,6 +970,7 @@ impl Solium {
         // hold born a moment later waiting for it for ever. See
         // [`Self::resize_ended`].
         self.resize_ended = Some((window.clone(), now));
+        self.trees.released();
         self.release_bridge(window, now);
 
         let Some(held) = self.resize_hold.as_ref() else {
@@ -1408,6 +1412,12 @@ impl Solium {
     /// drag moves depends on which edge the hand is on; see
     /// [`crate::input::resize::sides`].
     pub(crate) fn trigger_resize(&mut self, request: &ResizeRequest) -> bool {
+        // A window in a tree of boxes with a seam along the dragged side is
+        // the compositor's to resize: the seam follows the edge on this
+        // frame, whatever the window manager is doing. See `super::trees`.
+        if let Some(claimed) = self.drag_seams(request) {
+            return claimed;
+        }
         let id = self.window_id(&request.window);
         let snapshot = self.snapshot();
         let Some(mut scripts) = self.scripts.take() else {

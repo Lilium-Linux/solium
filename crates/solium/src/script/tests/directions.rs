@@ -266,7 +266,7 @@ impl Desk {
     }
 
     fn apply(&mut self, commands: &[Command]) {
-        for command in commands {
+        for command in &super::applied(commands) {
             match command {
                 Command::Place { id, rect, .. } => {
                     let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
@@ -302,7 +302,13 @@ impl Desk {
             "{combo} is not bound, or its handler failed"
         );
         self.apply(&outcome.commands);
-        outcome.commands
+        let mut commands = super::applied(&outcome.commands);
+        let snapshot = self.snapshot();
+        for told in super::grown(&mut self.scripts, &outcome.commands, &snapshot) {
+            self.apply(&told.commands);
+            commands.extend(super::applied(&told.commands));
+        }
+        commands
     }
 
     /// Window `id` opens on `monitor` with the pointer at `cursor`, and has

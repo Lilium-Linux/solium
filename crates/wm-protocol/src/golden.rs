@@ -61,8 +61,6 @@ fn commands_of_every_shape_are_written_as_protoc_writes_them() {
             rect: rect(1.5, -2.0, 800.0, 600.0),
             motion: motion(180.0, Easing::OutCubic),
             tile: true,
-            inside: Some(rect(0.0, 0.0, 10.0, 10.0)),
-            cramped: false,
             moved: false,
         }),
         Command::Present(Present {
@@ -185,6 +183,49 @@ fn commands_of_every_shape_are_written_as_protoc_writes_them() {
                 DocNode::Boolean(false),
                 DocNode::Text(String::new()),
             ],
+        }),
+        Command::Arrange(Arrange {
+            key: "1@DP-1".to_owned(),
+            area: rect(12.0, 12.0, 1896.0, 1056.0),
+            boxes: vec![
+                SpaceBox {
+                    parent: None,
+                    id: 3,
+                    kind: SpaceKind::Split(Split {
+                        axis: Axis::Y,
+                        gap: 12.0,
+                        resizable: true,
+                    }),
+                    share: 1.0,
+                    ..SpaceBox::default()
+                },
+                SpaceBox {
+                    parent: Some(0),
+                    id: 1,
+                    kind: SpaceKind::Window(7),
+                    share: 0.25,
+                    min: Some(Size { w: 160, h: 96 }),
+                    client_min: true,
+                    client_max: true,
+                    ..SpaceBox::default()
+                },
+                SpaceBox {
+                    parent: Some(0),
+                    id: 2,
+                    kind: SpaceKind::Empty,
+                    share: 0.75,
+                    at: Some(rect(0.0, 0.0, 10.0, 10.0)),
+                    ..SpaceBox::default()
+                },
+            ],
+            motion: motion(0.0, Easing::Linear),
+            moved: Some(7),
+        }),
+        Command::Grow(Grow {
+            window: 7,
+            axis: Axis::X,
+            by: -0.05,
+            motion: motion(120.0, Easing::OutCubic),
         }),
     ]);
     golden(
@@ -401,8 +442,6 @@ fn what_is_not_sent_is_its_default() {
             rect: rect(0.0, 0.0, 640.0, 480.0),
             motion: motion(0.0, Easing::Linear),
             tile: false,
-            inside: None,
-            cramped: false,
             moved: false,
         })])
     );

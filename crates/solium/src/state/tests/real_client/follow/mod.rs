@@ -326,8 +326,6 @@ fn floated(id: u64, x: f64, y: f64, millis: u64) -> Command {
             easing: crate::present::Curve::Linear,
         },
         tile: false,
-        inside: None,
-        cramped: false,
         moved: false,
     }
 }

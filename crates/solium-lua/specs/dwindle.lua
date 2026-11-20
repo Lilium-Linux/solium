@@ -10,10 +10,12 @@ local spec, test = expect.spec()
 local AREA = { x = 0, y = 0, w = 1000, h = 600 }
 
 -- An options table for `area` (the 1000x600 when nil) with `gap` 0 and
--- `split` 0.5, and whatever `extra` adds or replaces.
+-- `split` 0.5, solved by the compositor's own arithmetic (`space`, from
+-- `src/specs.rs`), and whatever `extra` adds or replaces.
 local function options(extra, area)
     area = area or AREA
-    local out = { x = area.x, y = area.y, w = area.w, h = area.h, gap = 0, split = 0.5 }
+    local out = { x = area.x, y = area.y, w = area.w, h = area.h, gap = 0, split = 0.5,
+        solve = space.solve }
     for key, value in pairs(extra or {}) do
         out[key] = value
     end
@@ -46,6 +48,48 @@ end
 
 local function clone(tree)
     return dwindle.adopt(expect.copy(tree))
+end
+
+-- What stands for the windows' applications' least sizes, from `floors`, as
+-- the solver takes it.
+local function limits(opts)
+    local out = {}
+    for id, floor in pairs(opts.floors or {}) do
+        out[id] = { min = floor }
+    end
+    return out
+end
+
+-- What the compositor does with a window's edge dragged to `x`, `y`: the
+-- seam along that side follows it, and the tree keeps where it was left, as
+-- `tiling.lua` keeps it on the `seam` event. False for a side that is none of
+-- the four; true otherwise, whether or not a seam lay there.
+local function drag_seam(tree, id, side, x, y, opts)
+    local boxes, area = tree:boxes(opts)
+    if #boxes == 0 then
+        return side == "left" or side == "right" or side == "top" or side == "bottom"
+    end
+    local moved = space.drag(area, boxes, id, side, x, y, limits(opts))
+    if moved == false then
+        return false
+    end
+    if moved then
+        tree:seam_moved(moved.id, moved.shares)
+    end
+    return true
+end
+
+-- What the compositor does with `sol.grow`: `axis` is "width" or "height",
+-- as the keys in `tiling.lua` name it.
+local function resize(tree, id, axis, by, opts)
+    local boxes, area = tree:boxes(opts)
+    if #boxes == 0 then
+        return
+    end
+    local moved = space.grow(area, boxes, id, axis == "width" and "x" or "y", by, limits(opts))
+    if moved then
+        tree:seam_moved(moved.id, moved.shares)
+    end
 end
 
 -- Two columns of two: 1 top-left, 2 top-right, 3 bottom-left, 4
@@ -143,7 +187,7 @@ test("resizing moves one seam and leaves the rest", function()
     tree:insert(2, 1, nil, nil, FREE)
     tree:insert(3, 2, nil, nil, FREE)
     local untouched = rect_of(tree, 1)
-    tree:resize(2, "height", 0.2, FREE)
+    resize(tree, 2, "height", 0.2, FREE)
     expect.truthy(rect_of(tree, 2).h > 300, "the seam moved")
     expect.near(rect_of(tree, 1).w, untouched.w, 1, "the other branch is untouched")
 end)
@@ -174,7 +218,7 @@ test("swap trades two tiles and nothing else", function()
     tree:insert(1, nil, nil, nil, FREE)
     tree:insert(2, 1, 900, 300, FREE)
     tree:insert(3, 2, 900, 500, FREE)
-    tree:resize(1, "width", 0.1, FREE)
+    resize(tree, 1, "width", 0.1, FREE)
     local before = { rect_of(tree, 1), rect_of(tree, 2), rect_of(tree, 3) }
 
     expect.truthy(tree:swap(1, 3), "both windows are in the tree")
@@ -234,37 +278,37 @@ end)
 test("a two by two can have its width dragged", function()
     local tree = quad()
     expect.near(rect_of(tree, 1).w, 500, 1, "starts halved")
-    tree:drag_seam(1, "right", 700, 300, FREE)
+    drag_seam(tree, 1, "right", 700, 300, FREE)
     expect.near(rect_of(tree, 1).w, 700, 2, "the seam went where it was asked")
 end)
 
 test("dragging to the same place twice is the same layout", function()
     local tree = quad()
-    tree:drag_seam(1, "right", 650, 300, FREE)
+    drag_seam(tree, 1, "right", 650, 300, FREE)
     local once = rect_of(tree, 1).w
     for _ = 1, 20 do
-        tree:drag_seam(1, "right", 650, 300, FREE)
+        drag_seam(tree, 1, "right", 650, 300, FREE)
     end
     expect.same(rect_of(tree, 1).w, once)
 end)
 
 test("height drags find the horizontal seam", function()
     local tree = quad()
-    tree:drag_seam(1, "bottom", 250, 400, FREE)
+    drag_seam(tree, 1, "bottom", 250, 400, FREE)
     expect.near(rect_of(tree, 1).h, 400, 2, "went where it was asked")
 end)
 
 test("a lone window has no seam to drag", function()
     local tree = dwindle.new()
     tree:insert(1, nil, nil, nil, FREE)
-    tree:drag_seam(1, "right", 700, 300, FREE)
+    drag_seam(tree, 1, "right", 700, 300, FREE)
     expect.near(rect_of(tree, 1).w, 1000, 1, "unchanged")
 end)
 
 test("a side that is none of the four moves nothing and says so", function()
     local tree = quad()
     local before = every(tree)
-    expect.falsy(tree:drag_seam(1, "rigth", 700, 300, FREE))
+    expect.falsy(drag_seam(tree, 1, "rigth", 700, 300, FREE))
     expect.same(every(tree), before)
 end)
 
@@ -272,7 +316,7 @@ end)
 
 test("a right edge drag moves the seam on the right", function()
     local tree = quad()
-    tree:drag_seam(1, "right", 700, 150, FREE)
+    drag_seam(tree, 1, "right", 700, 150, FREE)
     local one = rect_of(tree, 1)
     expect.near(one.x, 0, 1, "the left edge stood still")
     expect.near(one.w, 700, 2, "the right edge followed")
@@ -282,7 +326,7 @@ end)
 
 test("a left edge drag moves the seam on the left", function()
     local tree = quad()
-    tree:drag_seam(2, "left", 700, 150, FREE)
+    drag_seam(tree, 2, "left", 700, 150, FREE)
     local two = rect_of(tree, 2)
     expect.near(two.x, 700, 2, "the left edge followed")
     expect.near(two.x + two.w, 1000, 2, "the right edge stood still")
@@ -290,7 +334,7 @@ end)
 
 test("a bottom edge drag moves the seam below", function()
     local tree = quad()
-    tree:drag_seam(1, "bottom", 250, 400, FREE)
+    drag_seam(tree, 1, "bottom", 250, 400, FREE)
     local one = rect_of(tree, 1)
     expect.near(one.y, 0, 1, "the top edge stood still")
     expect.near(one.h, 400, 2, "the bottom edge followed")
@@ -300,7 +344,7 @@ end)
 
 test("a top edge drag moves the seam above", function()
     local tree = quad()
-    tree:drag_seam(3, "top", 250, 200, FREE)
+    drag_seam(tree, 3, "top", 250, 200, FREE)
     local three = rect_of(tree, 3)
     expect.near(three.y, 200, 2, "the top edge followed")
     expect.near(three.y + three.h, 600, 2, "the bottom edge stood still")
@@ -318,7 +362,7 @@ test("a window against the container has no seam on that side", function()
     }) do
         local tree = quad()
         local before = every(tree)
-        tree:drag_seam(case[1], case[2], case[3], case[4], FREE)
+        drag_seam(tree, case[1], case[2], case[3], case[4], FREE)
         expect.same(every(tree), before,
             "dragging window " .. case[1] .. "'s " .. case[2] .. " edge moved something")
     end
@@ -336,7 +380,7 @@ end
 test("the seam beside an edge is not always the nearest ancestor", function()
     local tree = nested()
     expect.near(rect_of(tree, 4).w, 250, 1, "the corner was split again")
-    tree:drag_seam(4, "left", 700, 450, FREE)
+    drag_seam(tree, 4, "left", 700, 450, FREE)
     expect.near(rect_of(tree, 1).w, 700, 2, "the root seam moved")
     local five = rect_of(tree, 5)
     expect.near(five.x + five.w, 1000, 2, "the far side of the inner seam is still against the edge")
@@ -345,7 +389,7 @@ end)
 test("a nested window at the far edge still moves nothing", function()
     local tree = nested()
     local before = every(tree)
-    tree:drag_seam(5, "right", 900, 450, FREE)
+    drag_seam(tree, 5, "right", 900, 450, FREE)
     expect.same(every(tree), before, "the inner seam was dragged")
 end)
 
@@ -353,7 +397,7 @@ end)
 -- moved the parent could never make a window wider.
 test("the keyboard can reach the centre vertical seam", function()
     local tree = quad()
-    tree:resize(1, "width", 0.1, FREE)
+    resize(tree, 1, "width", 0.1, FREE)
     local one = rect_of(tree, 1)
     expect.near(one.w, 600, 2, "it got wider")
     expect.near(one.h, 300, 1, "and not taller")
@@ -361,7 +405,7 @@ end)
 
 test("a window against the container grows from the other side", function()
     local tree = quad()
-    tree:resize(2, "width", 0.1, FREE)
+    resize(tree, 2, "width", 0.1, FREE)
     local two = rect_of(tree, 2)
     expect.near(two.w, 600, 2, "it got wider")
     expect.near(two.x + two.w, 1000, 2, "from the left, because the right is the container's")
@@ -372,12 +416,12 @@ end)
 -- the box less the gap puts them half a gap off each way.
 test("a dragged vertical edge lands where it was asked across the gap", function()
     local trailing = quad(GAPPED)
-    trailing:drag_seam(1, "right", 700, 150, GAPPED)
+    drag_seam(trailing, 1, "right", 700, 150, GAPPED)
     local one = rect_of(trailing, 1, GAPPED)
     expect.near(one.x + one.w, 700, 0.5, "the grabbed right edge is where it was asked")
 
     local leading = quad(GAPPED)
-    leading:drag_seam(2, "left", 700, 150, GAPPED)
+    drag_seam(leading, 2, "left", 700, 150, GAPPED)
     local two = rect_of(leading, 2, GAPPED)
     expect.near(two.x, 700, 0.5, "the grabbed left edge is where it was asked")
     expect.near(one.x + one.w, two.x, 0.5, "the two sides of one seam disagree")
@@ -385,12 +429,12 @@ end)
 
 test("a dragged horizontal edge lands where it was asked across the gap", function()
     local trailing = quad(GAPPED)
-    trailing:drag_seam(1, "bottom", 250, 400, GAPPED)
+    drag_seam(trailing, 1, "bottom", 250, 400, GAPPED)
     local one = rect_of(trailing, 1, GAPPED)
     expect.near(one.y + one.h, 400, 0.5, "the grabbed bottom edge is where it was asked")
 
     local leading = quad(GAPPED)
-    leading:drag_seam(3, "top", 250, 400, GAPPED)
+    drag_seam(leading, 3, "top", 250, 400, GAPPED)
     local three = rect_of(leading, 3, GAPPED)
     expect.near(three.y, 400, 0.5, "the grabbed top edge is where it was asked")
     expect.near(one.y + one.h, three.y, 0.5, "the two sides of one seam disagree")
@@ -409,12 +453,12 @@ test("a window handed its own edge does not move", function()
         local id, edge = case[1], case[2]
         local tree = quad(GAPPED)
         local centred = rect_of(tree, id, GAPPED)
-        tree:drag_seam(id, edge, case[3], case[4], GAPPED)
+        drag_seam(tree, id, edge, case[3], case[4], GAPPED)
         local before = rect_of(tree, id, GAPPED)
         expect.truthy(math.abs(before.w - centred.w) > 50 or math.abs(before.h - centred.h) > 50,
             "the fixture is off-centre before it proves anything")
         local x, y = own_edge(before, edge)
-        tree:drag_seam(id, edge, x, y, GAPPED)
+        drag_seam(tree, id, edge, x, y, GAPPED)
         expect.close(rect_of(tree, id, GAPPED), before,
             "window " .. id .. " handed its own " .. edge .. " edge moved")
     end
@@ -422,9 +466,9 @@ end)
 
 test("dragging to the same place twice changes nothing at a real gap", function()
     local tree = quad(GAPPED)
-    tree:drag_seam(1, "right", 700, 150, GAPPED)
+    drag_seam(tree, 1, "right", 700, 150, GAPPED)
     local once = rect_of(tree, 1, GAPPED)
-    tree:drag_seam(1, "right", 700, 150, GAPPED)
+    drag_seam(tree, 1, "right", 700, 150, GAPPED)
     expect.near(rect_of(tree, 1, GAPPED).w, once.w, 0.001, "the second drag moved it")
 end)
 
@@ -507,8 +551,8 @@ test("largest splits the largest tile that has room", function()
     tree:insert(1, nil, nil, nil, free)
     tree:insert(2, 1, nil, nil, free)
     tree:insert(3, 2, nil, nil, free)
-    tree:drag_seam(1, "right", 599, 0, free)
-    tree:drag_seam(2, "bottom", 0, 401, free)
+    drag_seam(tree, 1, "right", 599, 0, free)
+    drag_seam(tree, 2, "bottom", 0, 401, free)
 
     local opts = floored(0, 300, 360, area)
     local one, three = rect_of(tree, 1, opts), rect_of(tree, 3, opts)
@@ -533,7 +577,7 @@ test("a seam cannot be dragged to make a tile smaller than the minimum", functio
         { 3, "top", 250, 580, 3, 150, "h" },
     }) do
         local tree = quad(GAPPED)
-        tree:drag_seam(case[1], case[2], case[3], case[4], opts)
+        drag_seam(tree, case[1], case[2], case[3], case[4], opts)
         expect.near(rect_of(tree, case[5], opts)[case[7]], case[6], 0.5,
             "dragging window " .. case[1] .. "'s " .. case[2] .. " edge went past the minimum")
     end
@@ -544,7 +588,7 @@ end)
 test("a seam leaves room for every tile beyond it", function()
     local tree = quad(GAPPED)
     tree:insert(5, 4, nil, nil, GAPPED)
-    tree:drag_seam(4, "left", 900, 450, SHIPPED)
+    drag_seam(tree, 4, "left", 900, 450, SHIPPED)
     local four, five = rect_of(tree, 4, SHIPPED), rect_of(tree, 5, SHIPPED)
     expect.truthy(math.abs(four.w - 160) < 0.5 and math.abs(five.w - 160) < 0.5,
         "the pair beyond the seam was squeezed under the minimum")
@@ -557,7 +601,7 @@ test("a drag on a seam already under the minimum does not jump", function()
     local opts = floored(12, 600, 96)
     local function lopsided()
         local tree = quad(GAPPED)
-        tree:drag_seam(1, "right", 340, 150, GAPPED)
+        drag_seam(tree, 1, "right", 340, 150, GAPPED)
         return tree
     end
     local before = every(lopsided(), opts)
@@ -565,14 +609,14 @@ test("a drag on a seam already under the minimum does not jump", function()
     expect.near(one.x + one.w, 340, 0.5, "the premise: window 1's right edge at 340")
     for _, case in ipairs({ { 340, "handed its own edge" }, { 300, "asked to shrink further" } }) do
         local tree = lopsided()
-        tree:drag_seam(1, "right", case[1], 150, opts)
+        drag_seam(tree, 1, "right", case[1], 150, opts)
         expect.same(every(tree, opts), before, case[2] .. ", the seam moved")
     end
     local tree = lopsided()
-    tree:drag_seam(1, "right", 350, 150, opts)
+    drag_seam(tree, 1, "right", 350, 150, opts)
     one = rect_of(tree, 1, opts)
     expect.near(one.x + one.w, 350, 0.5, "growing the small side was refused")
-    tree:drag_seam(1, "right", 900, 150, opts)
+    drag_seam(tree, 1, "right", 900, 150, opts)
     expect.near(rect_of(tree, 2, opts).w, 600, 0.5, "the far side went under its own minimum")
 end)
 
@@ -581,7 +625,7 @@ test("a seam with both sides under the minimum holds still", function()
     for _, to in ipairs({ 100, 494, 900 }) do
         local tree = quad(GAPPED)
         local before = every(tree, opts)
-        tree:drag_seam(1, "right", to, 150, opts)
+        drag_seam(tree, 1, "right", to, 150, opts)
         expect.same(every(tree, opts), before, "dragged to " .. to .. ", the seam moved")
     end
 end)
@@ -599,9 +643,9 @@ test("the shipped minimum leaves every existing drag where it was", function()
     }) do
         local function run(opts)
             local tree = quad(opts)
-            tree:drag_seam(case[1], case[2], case[3], case[4], opts)
+            drag_seam(tree, case[1], case[2], case[3], case[4], opts)
             local x, y = own_edge(rect_of(tree, case[1], opts), case[2])
-            tree:drag_seam(case[1], case[2], x, y, opts)
+            drag_seam(tree, case[1], case[2], x, y, opts)
             return every(tree, opts)
         end
         local without, with = run(GAPPED), run(SHIPPED)
@@ -617,17 +661,17 @@ test("the keyboard does not shrink a tile under the minimum", function()
     local opts = floored(12, 400, 96)
     local tree = quad(GAPPED)
     for _ = 1, 5 do
-        tree:resize(1, "width", -0.05, opts)
+        resize(tree, 1, "width", -0.05, opts)
     end
     expect.near(rect_of(tree, 1, opts).w, 400, 0.5, "shrunk past 400")
 
     opts = floored(12, 600, 96)
     tree = quad(GAPPED)
-    tree:drag_seam(1, "right", 340, 150, GAPPED)
+    drag_seam(tree, 1, "right", 340, 150, GAPPED)
     local before = every(tree, opts)
-    tree:resize(1, "width", -0.05, opts)
+    resize(tree, 1, "width", -0.05, opts)
     expect.same(every(tree, opts), before, "a press shrank a tile already under the minimum")
-    tree:resize(1, "width", 0.05, opts)
+    resize(tree, 1, "width", 0.05, opts)
     expect.near(rect_of(tree, 2, opts).w, 600, 0.5, "growing window 1 took window 2 under the minimum")
 end)
 
@@ -638,8 +682,8 @@ test("a nan split leaves every tile a size", function()
     local tree = dwindle.new()
     tree:insert(1, nil, nil, nil, broken)
     tree:insert(2, 1, nil, nil, broken)
-    tree:resize(1, "width", 0.05, broken)
-    tree:drag_seam(1, "right", 500, 300, broken)
+    resize(tree, 1, "width", 0.05, broken)
+    drag_seam(tree, 1, "right", 500, 300, broken)
     for _, box in ipairs(tree:layout(broken)) do
         expect.truthy(box.w == box.w and box.h == box.h and box.w < math.huge and box.h < math.huge,
             "window " .. box.id .. " was laid out at " .. expect.show(box))
@@ -688,7 +732,7 @@ test("a sibling gives no more than it holds", function()
     local small = dwindle.new()
     small:insert(1, nil, nil, nil, FREE)
     small:insert(2, 1, 900, 300, FREE)
-    small:drag_seam(1, "right", 900, 300, FREE)
+    drag_seam(small, 1, "right", 900, 300, FREE)
     local under = with_floors({ [1] = { w = 10, h = 0 } }, { minimum = { w = 400, h = 0 } })
     local narrow = rect_of(small, 2, under)
     expect.near(narrow.w, 100, 1e-6, "the premise: window 2 is under the minimum")
@@ -706,7 +750,7 @@ end)
 
 test("two windows that cannot both fit keep the users seam", function()
     local tree = pair()
-    tree:drag_seam(1, "right", 450, 300, FREE)
+    drag_seam(tree, 1, "right", 450, 300, FREE)
     local opts = with_floors({ [1] = { w = 700, h = 0 }, [2] = { w = 700, h = 0 } })
     local one, two = rect_of(tree, 1, opts), rect_of(tree, 2, opts)
     expect.near(one.w, 450, 1e-6)
@@ -762,21 +806,21 @@ end)
 -- is where the drag stopped it.
 test("a seam stops at a neighbours own floor", function()
     local tree = pair()
-    tree:drag_seam(1, "right", 900, 300, with_floors({ [2] = { w = 600, h = 0 } }))
+    drag_seam(tree, 1, "right", 900, 300, with_floors({ [2] = { w = 600, h = 0 } }))
     expect.near(rect_of(tree, 2, with_floors({ [2] = { w = 600, h = 0 } })).w, 600, 1e-6,
         "window 2 went under its floor")
     expect.near(rect_of(tree, 1).w, 400, 1e-6, "the seam went on past where it was drawn")
 
     tree = pair()
     local opts = with_floors({ [1] = { w = 600, h = 0 } })
-    tree:drag_seam(1, "right", 100, 300, opts)
+    drag_seam(tree, 1, "right", 100, 300, opts)
     expect.near(rect_of(tree, 1, opts).w, 600, 1e-6)
 end)
 
 test("a press stops at a windows own floor", function()
     local tree = pair()
     for _ = 1, 5 do
-        tree:resize(1, "width", -0.05, with_floors({ [1] = { w = 600, h = 0 } }))
+        resize(tree, 1, "width", -0.05, with_floors({ [1] = { w = 600, h = 0 } }))
     end
     expect.near(rect_of(tree, 1).w, 600, 1e-6)
 end)
@@ -786,7 +830,7 @@ end)
 test("a press beside a floor moves the seam from where it is drawn", function()
     local tree = pair()
     local opts = with_floors({ [1] = { w = 700, h = 0 } })
-    tree:resize(1, "width", 0.05, opts)
+    resize(tree, 1, "width", 0.05, opts)
     expect.near(rect_of(tree, 1, opts).w, 750, 1e-6)
 end)
 
@@ -796,7 +840,7 @@ test("a tree comes back from what was kept as the tree it was", function()
     local tree = quad(GAPPED)
     tree:insert(5, 4, nil, nil, GAPPED)
     tree:remove(2)
-    tree:drag_seam(1, "right", 340, 150, GAPPED)
+    drag_seam(tree, 1, "right", 340, 150, GAPPED)
     local back = dwindle.adopt(expect.copy(tree))
     expect.truthy(back, "a tree")
     expect.same(back:windows(), tree:windows())

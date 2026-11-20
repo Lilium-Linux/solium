@@ -544,6 +544,123 @@ pub(crate) fn logged_while(run: impl FnOnce()) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// The commands as the compositor applies them: each tree an `Arrange`
+/// hands over solved as the compositor solves it, with what the window
+/// manager on this thread was last told of each window's limits, and each
+/// of its windows
+/// a `Place` held to its tile, in the order the compositor places them.
+/// Every other command as it is. What a layout decides is where its windows
+/// go, and this is where they go.
+pub(super) fn applied(commands: &[Command]) -> Vec<Command> {
+    let mut out = Vec::new();
+    for command in commands {
+        match command {
+            Command::Arrange {
+                tree: Some(tree),
+                animation,
+                moved,
+                ..
+            } => {
+                for solved in tree.solve(crate::wm::diff::told_limits).windows {
+                    out.push(Command::Place {
+                        id: solved.window,
+                        rect: Rect {
+                            x: solved.rect.x,
+                            y: solved.rect.y,
+                            w: solved.rect.w,
+                            h: solved.rect.h,
+                        },
+                        animation: *animation,
+                        tile: true,
+                        moved: *moved == Some(solved.window),
+                    });
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// Each window the trees in `commands` place, as the compositor solves
+/// them: where it goes, its tile, and whether it is cramped in it, in the
+/// order the compositor places them.
+pub(super) fn solved(commands: &[Command]) -> Vec<solium_wm_protocol::space::Solved> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Arrange {
+                tree: Some(tree), ..
+            } => Some(tree.solve(crate::wm::diff::told_limits).windows),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// What the compositor does with window `window`'s `side` dragged to
+/// `edge`, in the tree a window manager on this thread last arranged it in:
+/// the seam along that side follows, and the window manager hears where it
+/// was left (`seam-moved`). Its answer; none when no seam lies there.
+pub(super) fn drag_seam(
+    scripts: &mut Scripts,
+    window: u64,
+    side: &str,
+    edge: (f64, f64),
+    snapshot: Snapshot,
+) -> Outcome {
+    use solium_wm_protocol::space::Side;
+    let Some((key, mut tree)) = crate::wm::convert::arranged_holding(window) else {
+        return Outcome::default();
+    };
+    let Some(side) = Side::named(side) else {
+        return Outcome::default();
+    };
+    let Some(seam) = tree.seam_beside(window, side) else {
+        return Outcome::default();
+    };
+    let along = match side {
+        Side::Left | Side::Right => edge.0,
+        Side::Top | Side::Bottom => edge.1,
+    };
+    tree.drag(seam, along, crate::wm::diff::told_limits);
+    let Some((id, shares)) = tree.shares(seam.split) else {
+        return Outcome::default();
+    };
+    scripts.seam_moved(key, id, shares, snapshot)
+}
+
+/// What the compositor does with a `Grow` among `commands`: the seam beside
+/// the window moves in the tree a window manager on this thread last
+/// arranged it in, and the window manager hears where it was left
+/// (`seam-moved`). Its answers, one for each seam moved.
+pub(super) fn grown(
+    scripts: &mut Scripts,
+    commands: &[Command],
+    snapshot: &Snapshot,
+) -> Vec<Outcome> {
+    let mut out = Vec::new();
+    for command in commands {
+        let Command::Grow {
+            window, axis, by, ..
+        } = command
+        else {
+            continue;
+        };
+        let Some((key, mut tree)) = crate::wm::convert::arranged_holding(*window) else {
+            continue;
+        };
+        let Some(seam) = tree.grow(*window, *axis, *by, crate::wm::diff::told_limits) else {
+            continue;
+        };
+        let Some((id, shares)) = tree.shares(seam.split) else {
+            continue;
+        };
+        out.push(scripts.seam_moved(key, id, shares, snapshot.clone()));
+    }
+    out
+}
+
 mod binding_options;
 mod bindings;
 mod dialogs;

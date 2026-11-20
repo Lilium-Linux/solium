@@ -116,6 +116,7 @@ mod press;
 mod resize_bridge;
 mod round;
 mod snapshot;
+mod trees;
 mod window_state;
 mod workspaces;
 mod x11;
@@ -1029,6 +1030,10 @@ pub(crate) struct Solium {
     /// floating window is resized directly.
     pub(crate) pending_resize: Option<ResizeRequest>,
 
+    /// The trees of boxes the window manager has arranged, kept solved.
+    /// See [`trees`].
+    trees: trees::Trees,
+
     /// The window whose pane's slot is currently telling the truth about its
     /// size, because an edge drag is still going on. See [`crate::resizing`].
     ///
@@ -1626,6 +1631,7 @@ impl Solium {
             next_drag: 0,
             drags_told: Vec::new(),
             pending_resize: None,
+            trees: trees::Trees::default(),
             retelling_cramped: false,
             telling_change: false,
             monitors_rearranged: false,

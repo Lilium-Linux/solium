@@ -242,7 +242,7 @@ fn snapshot(windows: Vec<WindowInfo>) -> Snapshot {
 /// what the compositor applies, so it is what this reports.
 fn placed(commands: &[Command]) -> std::collections::HashMap<u64, Rect> {
     let mut out = std::collections::HashMap::new();
-    for command in commands {
+    for command in &super::applied(commands) {
         if let Command::Place { id, rect, .. } = command {
             out.insert(*id, *rect);
         }
@@ -340,7 +340,7 @@ fn arrange(name: &str, windows: Vec<WindowInfo>) -> std::collections::HashMap<u6
 /// the order they were sent. See `Command::Place::tile`.
 fn tiles(commands: &[Command]) -> std::collections::HashMap<u64, Vec<bool>> {
     let mut out: std::collections::HashMap<u64, Vec<bool>> = std::collections::HashMap::new();
-    for command in commands {
+    for command in &super::applied(commands) {
         if let Command::Place { id, tile, .. } = command {
             out.entry(*id).or_default().push(*tile);
         }
@@ -408,13 +408,17 @@ fn a_layout_that_stops_lets_every_window_out_of_its_tile() {
         let on = scripts.key(key, windows());
         assert!(on.handled, "{name}: the layout key was not handled");
         for id in [1_u64, 2] {
-            let last = on.commands.iter().rev().find_map(|command| match command {
-                Command::Place {
-                    id: placed, tile, ..
-                } if *placed == id => Some(*tile),
-                Command::Unplace { id: unplaced } if *unplaced == id => Some(false),
-                _ => None,
-            });
+            let last =
+                super::applied(&on.commands)
+                    .iter()
+                    .rev()
+                    .find_map(|command| match command {
+                        Command::Place {
+                            id: placed, tile, ..
+                        } if *placed == id => Some(*tile),
+                        Command::Unplace { id: unplaced } if *unplaced == id => Some(false),
+                        _ => None,
+                    });
             assert_eq!(
                 last,
                 Some(true),
@@ -1264,7 +1268,8 @@ mod reflow_on_close {
              local keys = {{}}\n\
              for key in pairs(layout.{table}) do keys[#keys + 1] = key end\n\
              table.sort(keys)\n\
-             local area = {{ x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5 }}\n\
+             local area = {{ x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5,\n\
+                 solve = sol.solve }}\n\
              local out = {{}}\n\
              for _, key in ipairs(keys) do\n\
                  local each = layout.{table}[key]\n\
@@ -1622,7 +1627,7 @@ mod overflow {
 
     /// Every rect `commands` placed window `id` at, in order.
     fn places_of(commands: &[Command], id: u64) -> Vec<Rect> {
-        commands
+        super::super::applied(commands)
             .iter()
             .filter_map(|command| match command {
                 Command::Place {
@@ -2055,10 +2060,11 @@ mod overflow {
         let (mut scripts, _) = tiling_with(&minimum(700, 800));
         let switched = scripts.key("super+t", desk_at(&[1, 2, 3], (500.0, 500.0)));
         let first = placed(&switched.commands);
-        let dragged = scripts.resized(
+        let dragged = super::super::drag_seam(
+            &mut scripts,
             2,
+            "left",
             (1136.0, 700.0),
-            (Some("left"), None),
             desk(&first, &[1, 2, 3], &[]),
         );
         let mut now = first;
@@ -2141,14 +2147,14 @@ mod overflow {
         let switched = scripts.key("super+t", desk_at(&[1, 2], (500.0, 500.0)));
         let first = placed(&switched.commands);
         let dragged = placed(
-            &scripts
-                .resized(
-                    1,
-                    (50.0, 700.0),
-                    (Some("right"), None),
-                    desk(&first, &[1, 2], &[]),
-                )
-                .commands,
+            &super::super::drag_seam(
+                &mut scripts,
+                1,
+                "right",
+                (50.0, 700.0),
+                desk(&first, &[1, 2], &[]),
+            )
+            .commands,
         );
         assert!(
             dragged.get(&1).is_some_and(|rect| about(rect.w, 160.0)),
@@ -2163,7 +2169,12 @@ mod overflow {
             for window in &mut focused.windows {
                 window.focused = window.id == 1;
             }
-            now.extend(placed(&scripts.key("super+minus", focused).commands));
+            let pressed = scripts.key("super+minus", focused.clone());
+            now.extend(placed(&pressed.commands));
+            // The compositor moves the seam, and tells the layout so.
+            for told in super::super::grown(&mut scripts, &pressed.commands, &focused) {
+                now.extend(placed(&told.commands));
+            }
         }
         assert!(
             now.get(&1).is_some_and(|rect| about(rect.w, 160.0)),
@@ -2301,7 +2312,7 @@ mod overflow {
         let answer = scripts.evaluate(
             "local function try(minimum)\n\
                  local area = { x = 0, y = 0, w = 300, h = 200, gap = 0, split = 0.5,\n\
-                     minimum = minimum }\n\
+                     minimum = minimum, solve = sol.solve }\n\
                  local tree = require(\"layouts.dwindle\").new()\n\
                  tree:insert(1, nil, nil, nil, area)\n\
                  return tostring(tree:insert_fitting(2, nil, 150, 100, area))\n\
@@ -2420,7 +2431,7 @@ mod overflow {
         assert_eq!(
             scripts.evaluate(
                 "local area = { x = 0, y = 0, w = 2560, h = 1440, gap = 12, split = 0.5,\n\
-                     minimum = { w = 1000, h = 1000 } }\n\
+                     minimum = { w = 1000, h = 1000 }, solve = sol.solve }\n\
                  local tree = require(\"tiling\").trees[\"2@DP-1\"]\n\
                  return tostring(tree:insert_fitting(99, nil, nil, nil, area))"
             ),
@@ -2564,14 +2575,23 @@ mod client_sizes {
     /// it was placed inside when that is not the rect, and whether the
     /// layout said it is cramped.
     fn last_place(commands: &[Command], id: u64) -> Option<(Rect, Option<Rect>, bool)> {
+        let rect = |of: &solium_wm_protocol::Rect| Rect {
+            x: of.x,
+            y: of.y,
+            w: of.w,
+            h: of.h,
+        };
         commands.iter().rev().find_map(|command| match command {
             Command::Place {
-                id: placed,
-                rect,
-                inside,
-                cramped,
-                ..
-            } if *placed == id => Some((*rect, *inside, *cramped)),
+                id: placed, rect, ..
+            } if *placed == id => Some((*rect, None, false)),
+            Command::Arrange { .. } => super::super::solved(std::slice::from_ref(command))
+                .into_iter()
+                .find(|solved| solved.window == id)
+                .map(|solved| {
+                    let inside = (solved.rect != solved.tile).then(|| rect(&solved.tile));
+                    (rect(&solved.rect), inside, solved.cramped)
+                }),
             _ => None,
         })
     }
@@ -2747,7 +2767,7 @@ mod client_sizes {
         let lay_out = |floors: &str| {
             scripts.evaluate(&format!(
                 "local area = {{ x = 0, y = 0, w = 2000, h = 1000, gap = 0, split = 0.5,\n\
-                     floors = {floors} }}\n\
+                     floors = {floors}, solve = sol.solve }}\n\
                  local tree = require(\"layouts.dwindle\").new()\n\
                  tree:insert(1, nil, nil, nil, area)\n\
                  tree:insert(2, 1, nil, nil, area)\n\
@@ -2866,7 +2886,7 @@ mod client_sizes {
             told.commands
         );
 
-        let told = scripts.resized(1, (2000.0, 700.0), (Some("right"), None), desk_now());
+        let told = super::super::drag_seam(&mut scripts, 1, "right", (2000.0, 700.0), desk_now());
         assert!(
             about(width_of(&told, 1), 1024.0) && about(width_of(&told, 2), 1500.0),
             "the drag went past window 2's minimum: {:?}",
@@ -3224,7 +3244,7 @@ mod reload {
 
     /// Every place `commands` sent, in order.
     fn places(commands: &[Command]) -> Vec<(u64, Rect)> {
-        commands
+        super::super::applied(commands)
             .iter()
             .filter_map(|command| match command {
                 Command::Place { id, rect, .. } => Some((*id, *rect)),
@@ -3274,10 +3294,11 @@ mod reload {
         open(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
         open(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
         open(&mut scripts, &mut rects, 3, &[2, 1], (1900.0, 1100.0));
-        let dragged = scripts.resized(
+        let dragged = super::super::drag_seam(
+            &mut scripts,
             1,
+            "right",
             (900.0, 720.0),
-            (Some("right"), None),
             desk(&rects, &[1, 3, 2], (900.0, 720.0)),
         );
         rects.extend(placed(&dragged.commands));
@@ -3328,10 +3349,11 @@ mod reload {
         open(&mut scripts, &mut rects, 1, &[], (1280.0, 720.0));
         open(&mut scripts, &mut rects, 2, &[1], (1900.0, 720.0));
         open(&mut scripts, &mut rects, 3, &[2, 1], (1900.0, 1100.0));
-        let dragged = scripts.resized(
+        let dragged = super::super::drag_seam(
+            &mut scripts,
             1,
+            "right",
             (900.0, 720.0),
-            (Some("right"), None),
             desk(&rects, &[1, 3, 2], (900.0, 720.0)),
         );
         rects.extend(placed(&dragged.commands));

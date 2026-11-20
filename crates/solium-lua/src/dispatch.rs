@@ -448,6 +448,10 @@ fn run(
         }
         E::Dropped(wire::Dropped { id, x, y }) => call_listeners(lua, "drop", (id, x, y)),
         E::Scrolled(wire::Scrolled { dx, dy }) => call_listeners(lua, "scroll", (dx, dy)),
+        E::SeamMoved(wire::SeamMoved { key, id, shares }) => {
+            let shares = lua.create_sequence_from(shares)?;
+            call_listeners(lua, "seam", (key, id, shares))
+        }
         E::SaveStores => {
             // Read whole before what was sent is looked at: reading them
             // borrows the Lua state's app data too.

@@ -50,6 +50,20 @@ local function ignored(window)
     return false
 end
 
+-- Whether a tiling layout lets this window's application's own least size
+-- count: anything but "ignore" in `tiling.client_minimum` is "respect". What
+-- a box of `sol.arrange` says as `client_min`.
+function sizes.counts_min(window)
+    return config.tiling.client_minimum ~= "ignore" and not ignored(window)
+end
+
+-- And its largest, so a window that will not grow to its tile sits at that
+-- size in the tile's middle: anything but "ignore" in
+-- `tiling.client_maximum` is "center". A box's `client_max`.
+function sizes.counts_max(window)
+    return config.tiling.client_maximum ~= "ignore" and not ignored(window)
+end
+
 -- The smallest this window may be laid out, as its application says, or nil
 -- when it said nothing or is not listened to. Anything but "ignore" is
 -- "respect".
@@ -78,27 +92,6 @@ function sizes.floors(windows)
         end
     end
     return out
-end
-
--- Where a window goes in `tile`: the whole of it, or -- where the window's
--- maximum is smaller than the tile -- a pane of that size in its middle, on
--- each side the maximum limits. Nil when it is the whole tile.
-function sizes.centred(window, tile)
-    local max = window and sizes.maximum(window)
-    if not max then
-        return nil
-    end
-    local w = (max.w > 0 and tile.w > max.w) and max.w or tile.w
-    local h = (max.h > 0 and tile.h > max.h) and max.h or tile.h
-    if w == tile.w and h == tile.h then
-        return nil
-    end
-    return {
-        x = tile.x + (tile.w - w) / 2,
-        y = tile.y + (tile.h - h) / 2,
-        w = w,
-        h = h,
-    }
 end
 
 return sizes

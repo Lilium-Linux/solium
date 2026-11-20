@@ -92,8 +92,6 @@ fn window_manager(path: &str) {
                                 easing: Easing::OutCubic,
                             },
                             tile: true,
-                            inside: None,
-                            cramped: false,
                             moved: false,
                         })
                     })

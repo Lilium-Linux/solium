@@ -1771,8 +1771,6 @@ fn a_mode_switched_during_a_fade_does_not_squash_the_window_leaving() {
                     rect: to_rect(tile),
                     animation: AnimationSpec::default(),
                     tile: false,
-                    inside: None,
-                    cramped: false,
                     moved: false,
                 }],
                 ..Outcome::default()

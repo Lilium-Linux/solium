@@ -264,18 +264,10 @@ pub(crate) enum Command {
         animation: AnimationSpec,
         /// Whether `rect` is a tile the client is held inside (#133) — true
         /// unless the script said `tile = false`, which `dialogs.lua` does for
-        /// a modal it centres over its parent. See `state::Standing`.
+        /// a modal it centres over its parent. See `state::Standing`. A
+        /// window smaller than its tile, and one cramped in it, are a tree of
+        /// boxes' (`Arrange`).
         tile: bool,
-        /// The tile `rect` sits inside, when the window is placed smaller than
-        /// the tile it has: `tile = { x, y, w, h }`, which `tiling.lua` says
-        /// for a window centred at its own maximum size (#115). The client is
-        /// held inside this, and an edge drag moves the seam from its edges,
-        /// since the tile and not the window is what a seam bounds. `None` is
-        /// `rect` itself. See `state::Standing::Within`.
-        inside: Option<Rect>,
-        /// Whether the layout says this tile is smaller than the window's own
-        /// minimum. See `WindowInfo::cramped`.
-        cramped: bool,
         /// Whether this is the window a directional move is moving: the
         /// focused one, placed while the window manager answers the key. A
         /// fullscreen or maximised window is placed nowhere by a layout, and
@@ -290,6 +282,23 @@ pub(crate) enum Command {
     /// in charge changes, since only the script knows that it has.
     Unplace {
         id: u64,
+    },
+    /// Solve a tree of boxes, place its windows in their boxes, and keep it
+    /// solved under `key`; `None` takes the tree away. See `crate::space`.
+    Arrange {
+        key: String,
+        tree: Option<solium_wm_protocol::space::Tree>,
+        animation: AnimationSpec,
+        /// The window a key is moving, as `Place::moved`.
+        moved: Option<u64>,
+    },
+    /// Grow a window in its tree by moving the seam after it on `axis`, or
+    /// the one before it.
+    Grow {
+        window: u64,
+        axis: solium_wm_protocol::Axis,
+        by: f64,
+        animation: AnimationSpec,
     },
     /// Ask a window to close. A request, not a kill: the client decides.
     Close {

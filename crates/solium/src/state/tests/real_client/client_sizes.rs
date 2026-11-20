@@ -8,9 +8,9 @@
 use super::*;
 
 /// One monitor, one client, and whatever scripts a test installs.
-struct Desk {
+pub(super) struct Desk {
     display: Display<Solium>,
-    state: Solium,
+    pub(super) state: Solium,
     conn: Connection,
     queue: wayland_client::EventQueue<Client>,
     qh: QueueHandle<Client>,
@@ -18,7 +18,7 @@ struct Desk {
 }
 
 impl Desk {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut display = Display::<Solium>::new().expect("creating a test wayland display");
         let mut state = Solium::new(display.handle());
         state
@@ -39,7 +39,7 @@ impl Desk {
 
     /// `body` as the compositor's scripts, against the shipped ones,
     /// for the reason `reflow_on_close::Desk::install` gives.
-    fn install(&mut self, body: &str) {
+    pub(super) fn install(&mut self, body: &str) {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
@@ -59,7 +59,7 @@ impl Desk {
         self.state.scripts = Some(Scripts::load(&entry).expect("loading the test scripts"));
     }
 
-    fn evaluate(&self, lua: &str) -> String {
+    pub(super) fn evaluate(&self, lua: &str) -> String {
         self.state
             .scripts
             .as_ref()
@@ -67,7 +67,7 @@ impl Desk {
             .unwrap_or_default()
     }
 
-    fn pump(&mut self) {
+    pub(super) fn pump(&mut self) {
         pump(
             &mut self.display,
             &mut self.state,
@@ -78,7 +78,7 @@ impl Desk {
         );
     }
 
-    fn open(&mut self) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
+    pub(super) fn open(&mut self) -> (Window, xdg_toplevel::XdgToplevel, wl_surface::WlSurface) {
         let (window, toplevel, surface) = open_surface(
             &mut self.display,
             &mut self.state,
@@ -92,7 +92,7 @@ impl Desk {
     }
 
     /// This window's row in the window list a script is handed now.
-    fn row(&self, window: &Window) -> WindowInfo {
+    pub(super) fn row(&self, window: &Window) -> WindowInfo {
         let id = self.state.window_id(window);
         self.state
             .snapshot()
@@ -102,7 +102,7 @@ impl Desk {
             .expect("the window is listed")
     }
 
-    fn place(&mut self, command: Command) {
+    pub(super) fn place(&mut self, command: Command) {
         self.state.apply(Outcome {
             commands: vec![command],
             ..Outcome::default()
@@ -119,6 +119,40 @@ fn instant() -> AnimationSpec {
         duration: Duration::ZERO,
         ..AnimationSpec::default()
     }
+}
+
+/// Window `id` alone in a tree of boxes over `area`, its application's own
+/// least and largest size counting: what a layout's `sol.arrange` sends.
+fn alone(id: u64, x: f64, y: f64, w: f64, h: f64) -> Command {
+    let tree = solium_wm_protocol::space::Tree::of(
+        &solium_wm_protocol::Rect { x, y, w, h },
+        &[solium_wm_protocol::SpaceBox {
+            kind: solium_wm_protocol::SpaceKind::Window(id),
+            client_min: true,
+            client_max: true,
+            ..solium_wm_protocol::SpaceBox::default()
+        }],
+    )
+    .expect("a tree");
+    Command::Arrange {
+        key: "test".to_owned(),
+        tree: Some(tree),
+        animation: instant(),
+        moved: None,
+    }
+}
+
+/// The client says it cannot be under `w` by `h`, and commits it.
+fn least(
+    desk: &mut Desk,
+    toplevel: &xdg_toplevel::XdgToplevel,
+    surface: &wl_surface::WlSurface,
+    w: i32,
+    h: i32,
+) {
+    toplevel.set_min_size(w, h);
+    surface.commit();
+    desk.pump();
 }
 
 /// **An xdg window says how small and how large it can be, and it is
@@ -343,40 +377,25 @@ fn a_launched_window_whose_minimum_does_not_fit_goes_where_overflow_says() {
     }
 }
 
-/// **A window centred in its tile is dragged from its tile.** A layout
-/// places it at 800x600 inside a 1600x1000 tile, with the tile as
-/// `tile`: the client is told 800x600, the tile is what it is held in,
-/// and the edge a drag starts from is the tile's -- the seam -- and not
-/// the window's, 400 pixels inside it.
+/// **A window centred in its tile is dragged from its tile.** Its
+/// application will be no larger than 800x600, and its box is 1600x1000:
+/// it is placed in the box's middle, the client is told 800x600, the box
+/// is what it is held in, and the edge a drag starts from is the box's --
+/// the seam -- and not the window's, 400 pixels inside it.
 #[test]
 fn a_centred_window_is_dragged_from_its_tile() {
     let mut desk = Desk::new();
-    let (window, toplevel, _surface) = desk.open();
+    let (window, toplevel, surface) = desk.open();
     let pane = desk
         .state
         .panes
         .id_of(&window)
         .expect("a client in the space has a pane");
     let id = desk.state.window_id(&window);
-    desk.place(Command::Place {
-        id,
-        rect: Rect {
-            x: 400.0,
-            y: 200.0,
-            w: 800.0,
-            h: 600.0,
-        },
-        animation: instant(),
-        tile: true,
-        inside: Some(Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 1600.0,
-            h: 1000.0,
-        }),
-        cramped: false,
-        moved: false,
-    });
+    toplevel.set_max_size(800, 600);
+    surface.commit();
+    desk.pump();
+    desk.place(alone(id, 0.0, 0.0, 1600.0, 1000.0));
     desk.pump();
     let tile = at(0, 0, 1600, 1000);
     assert_eq!(
@@ -409,49 +428,46 @@ fn a_centred_window_is_dragged_from_its_tile() {
     );
 }
 
-/// **The layout says a window is cramped, and the window list says so
-/// back** -- as long as the layout goes on saying it. A placement that
-/// does not say it, a placement out of a tile and a layout letting go
-/// each leave the window not cramped.
+/// **A window in a box smaller than its application's least size is
+/// cramped, and the window list says so** -- for as long as its box is. A
+/// box with room, a layout letting go and a placement out of any tree each
+/// leave the window not cramped.
 #[test]
-fn a_layout_says_a_window_is_cramped_and_the_window_list_says_so_back() {
+fn a_window_in_a_box_under_its_least_size_is_cramped_and_the_list_says_so() {
     let mut desk = Desk::new();
-    let (window, _toplevel, _surface) = desk.open();
+    let (window, toplevel, surface) = desk.open();
     let id = desk.state.window_id(&window);
-    let rect = Rect {
-        x: 0.0,
-        y: 0.0,
-        w: 600.0,
-        h: 400.0,
-    };
-    let place = |tile: bool, cramped: bool| Command::Place {
-        id,
-        rect,
-        animation: instant(),
-        tile,
-        inside: None,
-        cramped,
-        moved: false,
-    };
-    desk.place(place(true, true));
+    least(&mut desk, &toplevel, &surface, 800, 600);
+    let small = || alone(id, 0.0, 0.0, 600.0, 400.0);
+    desk.place(small());
     assert!(
         desk.row(&window).cramped,
-        "the layout's word did not come back"
+        "a 600x400 box for an 800x600 least"
     );
-    desk.place(place(true, false));
-    assert!(
-        !desk.row(&window).cramped,
-        "a placement that did not say it"
-    );
-    desk.place(place(true, true));
+    desk.place(alone(id, 0.0, 0.0, 1000.0, 800.0));
+    assert!(!desk.row(&window).cramped, "a box with room");
+    desk.place(small());
     desk.place(Command::Unplace { id });
     assert!(!desk.row(&window).cramped, "let go by its layout");
-    desk.place(place(false, true));
-    assert!(!desk.row(&window).cramped, "placed out of a tile");
+    desk.place(small());
+    desk.place(Command::Place {
+        id,
+        rect: Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        },
+        animation: instant(),
+        tile: false,
+        moved: false,
+    });
+    assert!(!desk.row(&window).cramped, "placed out of any tree");
 }
 
 /// **A window that becomes cramped is told again, so a bar can see
-/// it.** A layout says `cramped` on a `layout` pass, and a bar reading
+/// it.** A layout arranges a window in a box too small for it on a
+/// `layout` pass, and a bar reading
 /// `sol.windows()` in the same pass cannot see it -- the list is the
 /// snapshot from before -- so the compositor runs the pass once more,
 /// and the bar sees it there. A pass that changes nothing is not told
@@ -460,12 +476,13 @@ fn a_layout_says_a_window_is_cramped_and_the_window_list_says_so_back() {
 #[test]
 fn a_window_that_becomes_cramped_is_told_again_so_a_bar_can_see_it() {
     let mut desk = Desk::new();
-    let (window, _toplevel, _surface) = desk.open();
+    let (window, toplevel, surface) = desk.open();
     let id = desk.state.window_id(&window);
+    least(&mut desk, &toplevel, &surface, 800, 600);
     desk.install(&format!(
         "seen = {{}}\n\
          sol.on(\"layout\", function()\n\
-             sol.place({id}, {{ x = 0, y = 0, w = 600, h = 400, cramped = true }})\n\
+             sol.arrange(\"t\", {{ x = 0, y = 0, w = 600, h = 400 }}, {{ {{ window = {id}, client_min = true }} }})\n\
          end)\n\
          sol.on(\"layout\", function()\n\
              for _, window in ipairs(sol.windows()) do\n\
@@ -492,7 +509,9 @@ fn a_window_that_becomes_cramped_is_told_again_so_a_bar_can_see_it() {
          sol.on(\"layout\", function()\n\
              passes = passes + 1\n\
              flip = not flip\n\
-             sol.place({id}, {{ x = 0, y = 0, w = 600, h = 400, cramped = flip }})\n\
+             local w, h = 600, 400\n\
+             if not flip then w, h = 1000, 800 end\n\
+             sol.arrange(\"t\", {{ x = 0, y = 0, w = w, h = h }}, {{ {{ window = {id}, client_min = true }} }})\n\
          end)"
     ));
     desk.state.trigger_relayout();

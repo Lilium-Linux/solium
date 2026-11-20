@@ -30,6 +30,7 @@ Use this guide by task:
 | Solium | The window manager |
 |---|---|
 | Wayland and X11 clients, their surfaces and buffers | Where each window lives (`place`), and where it is drawn (`present`) |
+| Solving a tree of boxes into rectangles, with each application's own least and largest size, and moving its seams while an edge is dragged | How the room is shared: the tree (`arrange`), and where a seam was left (`seam-moved`) |
 | Rendering, frame timing, every frame of every animation | How a motion moves: its duration and easing, or a spring |
 | Keyboard, pointer and touch devices; which window has the keyboard | Which keys are its own (`declare`), and what each does |
 | QML scenes: it loads and draws them | Which scenes are on the desktop (`surface`), and their properties |
@@ -216,7 +217,39 @@ run on, and every batch's `at` is a reading of it: a timer the compositor
 was late for is told once, however many times it fell due, and `at` says how
 late.
 
-### 6. Questions
+### 6. Trees of boxes
+
+A window manager that divides room -- tiling, a row of columns, anything that
+shares a space out -- can hand the compositor a tree of boxes (`arrange`)
+rather than placing each window. The compositor solves it into rectangles,
+places each window in its box, and keeps it solved:
+
+- a **split** shares its room among its children by their shares, with a gap
+  between each two, each child at least a twentieth of it;
+- a box may hold **least** room (`min`), and a window may let its
+  application's own least and largest size count (`client-min`,
+  `client-max`): a split gives a window its least while its siblings have room
+  to spare, a window given less anyway is `cramped` in its row, and one that
+  will not grow to its box sits at its own largest size in the box's middle;
+- a **free** box puts each child where its `at` says;
+- when an application says another size, the tree is solved again with no
+  question to the window manager;
+- when a window's edge is dragged and a resizable split's seam lies along that
+  side, the compositor moves the seam on every frame of the drag and sends
+  nothing until the button comes up: then `seam-moved` says where it was left,
+  as each child's share. The window manager keeps those shares, so its next
+  `arrange` of that tree moves nothing. `grow` moves a seam from a key the
+  same way. An edge with no seam along it is asked about (`resized`) as
+  before.
+
+The tree is a flat list, root first, each box naming the box it is in by its
+place in the list, because WIT has no recursive types. `crates/wm-protocol`'s
+`space` module is the arithmetic, for a window manager in Rust that wants the
+answer before it lands; one in another language needs nothing of it, since the
+rectangles come back in the window rows. `layouts/dwindle.lua` is a dwindle
+layout told this way, and `tiny_wm.rs` a row of columns in one `arrange`.
+
+### 7. Questions
 
 In the middle of a batch, a window manager can ask the compositor something it
 cannot know from its own copy of the desktop, with `query`, and gets a `reply`
@@ -230,7 +263,7 @@ The compositor may already have sent the next batch when it reads the
 question, so other messages can arrive before the reply. Keep them, and handle
 them after the batch you are in.
 
-### 7. Reload
+### 8. Reload
 
 `reload` asks the window manager to load its configuration again, from
 wherever it found it: the user pressed the reload key, or a file changed under
@@ -245,7 +278,7 @@ wherever it found it: the user pressed the reload key, or a file changed under
 A window manager with no configuration of its own to read answers `loaded`
 with what it said at the start.
 
-### 8. Goodbye
+### 9. Goodbye
 
 Either side may say `goodbye`, with why. The compositor says it as the session
 ends, waits a second for the window manager to exit, and then stops it.

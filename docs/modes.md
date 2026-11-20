@@ -52,24 +52,31 @@ sol.unplace(id)                                                   -- no longer t
 centres a modal over its parent that way, because a dialog that grows after it
 is centred must not be cut to the size it was centred at.
 
-Two more things a placement can say, both for a window whose application has
-an opinion about its size (#115):
+**A layout that divides room hands the compositor a tree.** Tiling, a row of
+columns, any arrangement that shares a space out, is a tree of boxes, and the
+compositor solves it, places each window in its box, and keeps it solved:
 
 ```lua
-sol.place(id, { x = 880, y = 420, w = 800, h = 600,            -- the window, smaller
-                tile = { x = 12, y = 12, w = 2536, h = 1416 } }) -- than the tile it has
-sol.place(id, { x = 12, y = 12, w = 1262, h = 1416, cramped = true })
+sol.arrange("1@DP-1", { x = 12, y = 12, w = 2536, h = 1416 }, {
+    { id = 3, split = { axis = "x", gap = 12 } },          -- the root: two side by side
+    { parent = 1, window = 7, share = 0.6, client_min = true, client_max = true },
+    { parent = 1, window = 9, share = 0.4, client_min = true, client_max = true },
+})
 ```
 
-`tile` as a rect is the tile a window sits inside when it is placed smaller
-than it -- `tiling.lua` does this for a window centred at its own maximum size.
-The window lives at the rect you place; the tile is what its client is held
-inside, and what a drag on the window's edge moves the seam from, because a
-seam is the tile's edge and not the window's. `cramped = true` says the tile is
-smaller than the window's own minimum, and comes back in `sol.windows()`; see
-[An application's own size](#an-applications-own-size). Each placement says it
-afresh, so one that does not say it is not cramped, and neither is a window
-placed with `tile = false` or let go with `sol.unplace`. `sol.unplace` is for
+`client_min` lets a window's application's own least size count: a split gives
+it that room while its siblings have room to spare, and a window the room is
+not there for is `cramped`, which comes back in `sol.windows()`; see
+[An application's own size](#an-applications-own-size). `client_max` draws a
+window that will not grow to its box at its own largest size in the box's
+middle, held inside the box. A dragged edge of a window in a tree moves the
+seam beside it on every frame of the drag, in the compositor, and the `seam`
+event says where it was left, so the next `sol.arrange` carries it and nothing
+moves; `sol.grow(id, "x", 0.05)` moves a seam from a key the same way.
+`sol.solve(area, boxes)` gives the same answer, to decide by before handing a
+tree over. A window is in one tree at a time, and a window placed with
+`sol.place` or let go with `sol.unplace` leaves its tree, its box holding
+nothing. `sol.unplace` is for
 a layout letting go, and `modes.use` sends it for every window whenever the
 layout in charge changes — so a mode registered through `modes` gets it for
 free, and one that is not must send it itself. Maximising and fullscreen take a
@@ -627,8 +634,9 @@ does not move. A corner drag fills both, because a corner drag moves one seam
 per axis. They were booleans until #120, and a boolean cannot choose a seam: a
 window sitting on the right of a vertical split has that split's seam on its
 *left*, so "the horizontal axis is in play" was true whichever edge the hand
-was on, and dragging the right edge moved the left one instead. Hand the side
-straight to `tree:drag_seam`.
+was on, and dragging the right edge moved the left one instead. A side of a
+window in a tree (`sol.arrange`) with a seam along it never comes here: the
+compositor moves that seam itself.
 
 **`click` only arrives while you hold input.** `sol.grab_input(true)` takes keys
 and clicks away from clients, which is what a mode needs while it owns the
@@ -744,9 +752,9 @@ it can be, `{ w = ..., h = ... }` -- in the same terms as `w` and `h`, frame
 included, so they compare with a tile directly -- and absent when it limited
 neither side. 0 on one side is no limit on that side. They are what the client
 has *committed*, never a size it has asked for and not yet drawn to, and a
-change to either re-runs `layout` once per change. `cramped` is the layout's own
-word coming back: `true` while the layout in charge last placed the window with
-`cramped = true`. `app_id` is the application's name for itself -- a Wayland
+change to either re-runs `layout` once per change, and solves again any tree
+the window is in. `cramped` is `true` while a tree (`sol.arrange`) has the
+window in a box smaller than its application's least size. `app_id` is the application's name for itself -- a Wayland
 application's `app_id`, an X11 one's `WM_CLASS` class -- and empty until the
 application has arrived. `shown` is whether the application has been shown
 yet: `false` for a window launched with `sol.spawn` from its `open` until its
@@ -1273,6 +1281,12 @@ tables: `sol.keep` carries one across a reload as it is, and `dwindle.adopt`
 or `scroller.adopt` makes what comes back a tree or a strip again, or answers
 `nil` for something that is not one.
 
+A dwindle tree is the decisions -- which tile a window split, which way, at
+what ratio -- and nothing else. Where its tiles come out is the compositor's
+arithmetic: `tree:boxes(options)` hands it over as boxes for `sol.arrange`,
+each split a two-way split named by its node's number, and `tree:layout`
+asks `options.solve` (`sol.solve`) for the same answer.
+
 ```lua
 tree:insert(id, target, x, y, options)
 tree:insert_fitting(id, target, x, y, options)  -- the same, if it keeps options.minimum
@@ -1280,61 +1294,44 @@ tree:insert_largest(id, options)                -- the largest tile with room
 tree:remove(id)
 tree:contains(id)
 tree:windows()
-tree:layout(options)      -- the slots, to hand to sol.place; cramped = true on a
-                          -- slot smaller than its window's own floor
-tree:resize(id, "width", share, options)               -- keyboard: an axis
-tree:drag_seam(id, "right", edge_x, edge_y, options)   -- pointer: a side
+tree:boxes(options)       -- the tree as boxes for sol.arrange, and their area
+tree:layout(options)      -- where each window comes out, by the compositor's
+                          -- arithmetic: { id, x, y, w, h, cramped, tile } each
+tree:tiles(options)       -- each window's tile, the same way
+tree:seam_moved(id, shares)  -- where the compositor left a seam (the seam event)
 tree:swap(a, b)           -- two windows trade tiles; every split keeps its ratio
 ```
 
 `insert` splits whatever it is pointed at, however small that leaves the
 halves. `insert_fitting` and `insert_largest` refuse a split that would leave a
-tile under `options.minimum` -- `{ w = ..., h = ... }`, frame included -- and
-answer `false` with the tree untouched, so a layout can try one, then the
-other, then fall back to `insert`. That is what `tiling.lua` does; see below.
+tile under `options.minimum` -- `{ w = ..., h = ... }`, frame included -- or
+either window under its application's own least size, by splitting a copy and
+solving it, and answer `false` with the tree untouched, so a layout can try
+one, then the other, then fall back to `insert`. That is what `tiling.lua`
+does; see below.
 
-The two resize calls take different things on purpose. A drag names a side —
-the hand is on one specific edge, and which seam moves follows from that. A
-keypress names only an axis: `super+equal` means "wider" and says nothing about
-which neighbour gives up the room, so `resize` prefers the seam on the right or
-below and falls back to the other, with positive `share` always growing the
-window. Either way, a window flush against its container on that side has no
-seam there and nothing happens — the screen edge is not a seam.
+The seams are the compositor's. A drag names a side: the hand is on one edge,
+and the seam along it follows the edge from where it was grabbed (#120, #124).
+A key names an axis: `sol.grow` moves the seam after the window on that axis,
+or the one before it when there is none after, positive always growing the
+window. Either way a seam is held to `0.05..0.95` of its split and to the room
+that keeps every tile on both sides at its box's `min` and every window at its
+application's least size; a tile already short is not thrown up to it on the
+first frame, so a seam with a short tile on both sides does not move. A window
+flush against the tree's edge on that side has no seam there and nothing
+happens.
 
-`drag_seam` puts the named side of that window at `edge_x` (for `"left"` and
-`"right"`) or `edge_y` (for `"top"` and `"bottom"`), reading only the one its
-side names — which is what lets a corner drag call it twice with one pair and
-have each axis take its own. Hand it the `edge_x`, `edge_y` a `resize` gave you
-and the gesture is relative; hand it the pointer and you have rebuilt #124.
-The ratio it computes is separately clamped to `0.05..0.95`, so a window shoved
-hard against a seam stops there rather than vanishing, and to whatever keeps
-every tile on either side of the seam at `options.minimum`. Those clamps are
-the only bounds on a tiled drag: the compositor sends an unfloored edge,
-deliberately, because a floor measured in a window's pixels cannot bound a
-seam's position — see `drag_seam` in `layouts/dwindle.lua`. A tile already under the minimum
-is not snapped up to it when grabbed, which would move it on the first frame:
-it cannot be shrunk further, and can be grown only while the tiles across the
-seam have room to give. A seam with a tile under the minimum on both sides
-therefore does not move at all, and that is what `"allow"` below usually
-leaves, since it halves a tile too small to split. `resize` is bounded the
-same way when it is given `options`; without them, as a script written before
-#134 calls it, only `0.05..0.95` applies.
+Each split is laid out at the ratio it holds, then moved just far enough for a
+window under its application's least size to reach it, taking the room from
+the other side down to *its* least sizes and `minimum`, and no further; the
+ratio held is left alone, so a window whose least size goes away hands the
+room back. A window the room is not there for is laid out short, and is
+`cramped`. The scroller reads `options.floors`, each window's least size by
+id, and never lays a column out narrower than the widest in it.
 
-`options.floors` is each window's own floor, `{ [id] = { w = ..., h = ... } }`,
-frame included: the smallest its application says it can be, or nothing for a
-window with no entry. Every call that takes `options` reads it. The tree lays
-each split out at the ratio it holds, then moves it just far enough for a
-window under its floor to reach it, taking the room from the other side down to
-*its* floors and `options.minimum`, and no further; the ratio it holds is left
-alone, so a window whose floor goes away hands the room back. `insert_fitting`
-and `insert_largest` refuse a split that would leave either window under its
-floor, and a seam stops at the floors beside it. A window the room is not there
-for is laid out short, and its slot says `cramped = true`. The scroller reads
-`options.floors` too, and never lays a column out narrower than the widest
-floor in it.
-
-`options` is a monitor's work area with `gap`, `split`, `minimum` and `floors`
-added, and for the grid `padding` around each thumbnail.
+`options` is a monitor's work area with `gap`, `split`, `minimum`, `solve`,
+and `client_min` and `client_max` (whether each window's application's own
+sizes count, by id) added, and for the grid `padding` around each thumbnail.
 Passing the monitor in rather than the tree asking for it is what lets one tree
 per workspace *per monitor* exist without any of them knowing about either.
 Copy the rect before adding keys — the one from `sol.monitors()` belongs to the
@@ -1491,10 +1488,10 @@ picture is cut to the tile (#133), so it still does not cover its neighbours.
 tiling: window 1 needs at least 2500 wide, frame included, and its tile is 2364x1416; it is cramped, and its application's picture is cut to the tile
 ```
 
-and places the window with `cramped = true`, which `sol.windows()` then says
-until the window has room again. A layout that says it is also run once more
-by the compositor, so a handler reading `sol.windows()` in that same `layout`
-pass sees it. A bar that wants to show it reads it there:
+and the compositor marks the window `cramped`, which `sol.windows()` then says
+until the window has room again. A layout whose tree makes a window cramped is
+also run once more by the compositor, so a handler reading `sol.windows()` in
+that same `layout` pass sees it. A bar that wants to show it reads it there:
 
 ```lua
 -- A strip across the top that names the windows short of room.

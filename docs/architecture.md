@@ -108,7 +108,12 @@ Presentation commands work on stable window IDs and selections. Arrangements
 are configuration too: the dwindle tree, the scrolling strip and the overview
 grid are Lua in `lua/layouts/`, and the modes decide when to apply them. No
 arrangement is written in Rust, in the compositor or in the window manager's
-runtime. Configuration reload
+runtime. What the compositor gives an arrangement is generic and runs every
+frame without asking the window manager: a tree of boxes it solves into
+rectangles with each application's own least and largest size, and whose
+seams it moves while an edge is dragged (`arrange`, solved by
+`crates/wm-protocol/src/space.rs`). A dwindle tree is told to it as nested
+two-way splits. Configuration reload
 keeps existing layout state where supported, and a failed load keeps the
 previous configuration. `solium --check` validates loading and declared QML
 scenes without starting a session.

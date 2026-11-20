@@ -7341,8 +7341,6 @@ fn a_dialog_a_layout_centres_is_not_held_in_its_rect() {
             rect,
             animation: instant,
             tile: false,
-            inside: None,
-            cramped: false,
             moved: false,
         }],
         ..Outcome::default()
@@ -7371,8 +7369,6 @@ fn a_dialog_a_layout_centres_is_not_held_in_its_rect() {
             rect,
             animation: instant,
             tile: true,
-            inside: None,
-            cramped: false,
             moved: false,
         }],
         ..Outcome::default()
@@ -15446,6 +15442,8 @@ fn a_pane_whose_window_left_the_space_is_still_bridged() {
 mod lock_focus;
 
 mod client_sizes;
+
+mod trees;
 
 mod launch_splash;
 

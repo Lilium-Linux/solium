@@ -5,7 +5,7 @@
 /// compositor draws every frame of it. Nothing here is drawn, timed or
 /// animated by the window manager itself.
 interface commands {
-    use types.{rect, point, insets, touch-event, doc, kept};
+    use types.{rect, point, size, insets, touch-event, doc, kept};
 
     /// A cubic bezier's two control points, as CSS has them.
     record bezier {
@@ -274,15 +274,108 @@ interface commands {
         /// Whether `rect` is a tile: an application that will not shrink
         /// to it is cut to it rather than drawn over its neighbours.
         tile: bool,
-        /// The tile `rect` sits inside, when the window is placed smaller
-        /// than the tile it has; none is `rect` itself.
-        inside: option<rect>,
-        /// Whether the tile is smaller than the window's own minimum.
-        cramped: bool,
         /// Whether this is the focused window being moved by a key: a
         /// fullscreen or maximised window is placed nowhere by a layout,
         /// but for this one, which is moved to another monitor as it is.
         moved: bool,
+    }
+
+    /// Which way a split shares out its room: `x` puts its children side by
+    /// side and shares the width, `y` stacks them and shares the height.
+    enum axis { x, y }
+
+    /// A split: its children side by side along `axis`, each taking its
+    /// `share` of the room against its siblings', with `gap` between each
+    /// two.
+    record split {
+        axis: axis,
+        /// Logical pixels between each two children.
+        gap: f64,
+        /// Whether each gap is a seam: dragging the edge of a window that
+        /// lies along one moves it, the compositor solving the tree again
+        /// on every frame of the drag, and `seam-moved` tells where it was
+        /// left.
+        resizable: bool,
+    }
+
+    /// What a box of a tree is.
+    variant space-kind {
+        /// Its children side by side, sharing its room.
+        split(split),
+        /// Its children each where their own `at` puts them, inside it.
+        free,
+        /// A window, by its id, filling the box. An application that will
+        /// not shrink to the box is cut to it, and one that will not grow
+        /// to it is drawn at its own largest size in the box's middle when
+        /// `client-max` is set.
+        window(u64),
+        /// Room that holds nothing.
+        empty,
+    }
+
+    /// One box of a tree the compositor solves.
+    record space-box {
+        /// The box it is in, by its place in the tree's list; none for the
+        /// root, which comes first. A box comes after the box it is in.
+        parent: option<u32>,
+        /// The window manager's own name for the box, which `seam-moved`
+        /// says back.
+        id: u64,
+        kind: space-kind,
+        /// Its share of a split's room, against its siblings' shares. Each
+        /// child of a split keeps at least a twentieth of the room.
+        share: f64,
+        /// Where it is inside a `free` box, in the same space as the tree's
+        /// area.
+        at: option<rect>,
+        /// The least room it takes, frame included, besides what a window's
+        /// application asks for.
+        min: option<size>,
+        /// For a window: whether its application's own least size counts.
+        /// A split never gives a window less than that while its siblings
+        /// have room to spare, and a window given less anyway is
+        /// `cramped`.
+        client-min: bool,
+        /// For a window: whether its application's own largest size counts,
+        /// so a window that will not grow to its box is drawn at that size
+        /// in the box's middle.
+        client-max: bool,
+    }
+
+    /// A tree of boxes the compositor solves into rectangles and keeps
+    /// solved: each window in it is placed where its box comes out, as
+    /// `place` with `tile` places one, solved again when an application's
+    /// least or largest size changes, and its seams are dragged by the
+    /// compositor, frame by frame, with no question to the window manager
+    /// until one is let go.
+    record arrange {
+        /// The tree's name, the window manager's own. An arrange replaces
+        /// the tree of its name whole; one with no boxes takes it away. A
+        /// window is in one tree at a time: arranged in another, or placed
+        /// with `place`, it leaves this one, and its box holds nothing.
+        key: string,
+        /// The rectangle the root fills.
+        area: rect,
+        /// The boxes, the root first.
+        boxes: list<space-box>,
+        /// How each window gets to where its box comes out.
+        motion: motion,
+        /// The focused window, when a key is moving it, as `place`'s
+        /// `moved` says: fullscreen or maximised, it goes to the monitor
+        /// its box is on, and stays so there.
+        moved: option<u64>,
+    }
+
+    /// Grow a window in its tree by moving one seam: the one after it on
+    /// `axis`, or the one before it, the other way, when there is none
+    /// after. `by` is a share of the split's room; less than nothing
+    /// shrinks it. `seam-moved` tells where the seam was left.
+    record grow {
+        window: u64,
+        axis: axis,
+        by: f64,
+        /// How the windows the seam moves get to their new places.
+        motion: motion,
     }
 
     /// A key binding, so a key is answered without a question: the compositor
@@ -731,5 +824,10 @@ interface commands {
         reload,
         /// End the session.
         quit,
+
+        /// Solve a tree of boxes and place its windows, and keep it solved.
+        arrange(arrange),
+        /// Grow a window in its tree by moving a seam.
+        grow(grow),
     }
 }

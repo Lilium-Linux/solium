@@ -208,6 +208,15 @@ local function tree_for(monitor)
     return tiling.trees[key]
 end
 
+-- The windows `sol.windows()` lists, by id.
+local function by_id(windows)
+    local out = {}
+    for _, window in ipairs(windows or sol.windows()) do
+        out[window.id] = window
+    end
+    return out
+end
+
 -- The area a tree divides, which is one monitor's work area.
 local function options(monitor)
     local area = monitor and monitors.named(monitor) or sol.monitor()
@@ -215,22 +224,30 @@ local function options(monitor)
     local out = { x = area.x, y = area.y, w = area.w, h = area.h }
     out.gap = config.gap
     out.split = config.tiling.split
-    -- In every options table, so the seams are held to it as well as the
-    -- splits: `tree:drag_seam` and `tree:resize` read it from here.
+    -- On every tile the compositor solves, so the seams are held to it as
+    -- well as the splits.
     out.minimum = minimum()
-    -- Each window's own minimum (#115), under `tiling.client_minimum` and
-    -- `tiling.client_size_ignore`: what the tree lays each window out around,
-    -- splits and seams included. See `sizes.lua`.
-    out.floors = sizes.floors()
+    -- Whether a window's application's own least and largest size count
+    -- (#115), under `tiling.client_minimum`, `tiling.client_maximum` and
+    -- `tiling.client_size_ignore`: the compositor lays each window out
+    -- around them, splits and seams included. See `sizes.lua`.
+    local rows = by_id()
+    out.client_min = function(id)
+        return rows[id] == nil or sizes.counts_min(rows[id])
+    end
+    out.client_max = function(id)
+        return rows[id] ~= nil and sizes.counts_max(rows[id])
+    end
+    -- Where the tiles come out, by the compositor's own arithmetic.
+    out.solve = sol.solve
     return out
 end
 
 -- Say once that a window is cramped, with the numbers, and forget it once it
 -- is not.
 --
--- Once and not on every pass: `apply` runs once a frame for the length of a
--- seam drag, and a window that stays cramped through one has been named
--- already. A window that stops being cramped and then is again is named again,
+-- Once and not on every pass: a window that stays cramped through several
+-- has been named already. A window that stops being cramped and then is again is named again,
 -- because that is news. See
 -- `a_window_that_cannot_have_its_minimum_is_cramped_and_said_once` in
 -- `script.rs`.
@@ -262,33 +279,22 @@ local function say_cramped(slot, window)
     ))
 end
 
--- Place one window the tree laid out, and hand back the rectangle it is at.
---
--- The tile itself, unless the window's own maximum is smaller than it and
--- `tiling.client_maximum` is "center": then a pane of that size in the middle
--- of the tile, with the tile handed over as `tile` so the compositor holds the
--- client inside the tile and a dragged edge moves the tile's seam (#115). And
--- `cramped`, which the tree put on the slot, goes with it either way.
-local function place(slot, window)
-    say_cramped(slot, window)
-    local pane = sizes.centred(window, slot)
-    if not pane then
-        sol.place(slot.id, slot)
-        return slot
+-- Hand the tree under `key` to the compositor, which places its windows in
+-- their tiles (a window smaller than its tile at its own largest size in the
+-- middle, under `tiling.client_maximum`), moves a seam whose edge is dragged
+-- and says where it left it (`seam`, below). Where each window comes out, by
+-- id, with any window cramped named once.
+local function arrange(key, tree, monitor, windows)
+    local opts = options(monitor)
+    local boxes, area = tree:boxes(opts)
+    sol.arrange(key, area, boxes)
+    local placed = {}
+    for _, slot in ipairs(tree:layout(opts)) do
+        local tile = slot.tile
+        say_cramped({ id = slot.id, cramped = slot.cramped, w = tile.w, h = tile.h }, windows[slot.id])
+        placed[slot.id] = slot
     end
-    pane.tile = { x = slot.x, y = slot.y, w = slot.w, h = slot.h }
-    pane.cramped = slot.cramped
-    sol.place(slot.id, pane)
-    return pane
-end
-
--- The windows `sol.windows()` lists, by id.
-local function by_id(windows)
-    local out = {}
-    for _, window in ipairs(windows or sol.windows()) do
-        out[window.id] = window
-    end
-    return out
+    return placed
 end
 
 -- A window that is already open, going back into `tree`.
@@ -378,9 +384,10 @@ function tiling.apply(animation)
     local placed = {}
     local windows = by_id()
     for _, each in ipairs(screens) do
-        local tree = tree_for(each.monitor.name)
-        for _, slot in ipairs(tree:layout(options(each.monitor.name))) do
-            placed[slot.id] = place(slot, windows[slot.id])
+        local name = each.monitor.name
+        local key = monitors.key(workspaces.on(name), name)
+        for id, slot in pairs(arrange(key, tree_for(name), name, windows)) do
+            placed[id] = slot
         end
     end
     -- A second pass rather than the tail of the first: a dialog on DP-1 may
@@ -572,10 +579,7 @@ local function arrange_hidden(key)
     if not tree or not monitor or key == monitors.key(workspaces.on(monitor), monitor) then
         return
     end
-    local windows = by_id()
-    for _, slot in ipairs(tree:layout(options(monitor))) do
-        place(slot, windows[slot.id])
-    end
+    arrange(key, tree, monitor, by_id())
 end
 
 -- Open window `id` where `open_in` says, and see to what goes with it: the
@@ -658,7 +662,7 @@ end)
 -- Whether window `id`'s slot in `tree`, laid out on `monitor`, is smaller
 -- than the window's own floor. See `Tiling::cramped`.
 local function cramped_in(tree, id, monitor)
-    for _, slot in ipairs(tree:layout(options(monitor))) do
+    for _, slot in ipairs(tree:tiles(options(monitor))) do
         if slot.id == id then
             return slot.cramped == true
         end
@@ -973,57 +977,16 @@ sol.on("drop", function(id, x, y)
 end)
 
 -- Dragging an edge moves the seam this window shares with its neighbour,
--- rather than giving the window a size of its own. In a tiled arrangement a
--- window does not have one: the space is divided, and dragging an edge moves
--- where the division falls. Returning a command tells the compositor we took
--- it, so it does not also resize the window directly.
---
--- `edge_x` and `edge_y` are where the dragged edge should come to rest, one
--- per axis, in the same coordinates `tree:layout` hands back and `sol.place`
--- takes. Not where the pointer is, which is what this used to be handed: a
--- seam set from the cursor lands under the cursor, so a drag begun anywhere
--- but exactly on the edge threw that edge across to the cursor on its first
--- frame. `super` plus the right button begins a resize from the *middle* of a
--- window, so there the throw was most of a window wide. That is #124, and the
--- fix is entirely on the compositor's side of this call -- the arithmetic here
--- and in `drag_seam` is unchanged, and is simply given a relative target now.
---
--- `horizontal_side` and `vertical_side` are the *sides* the pointer has hold
--- of -- "left" or "right", "top" or "bottom", and nil for an axis that is not
--- being dragged. Named for the side and not the axis because the value is a
--- side: `horizontal` holding "left" invites the reader to test it as a
--- boolean, which is the very mistake below.
--- They were plain booleans until #120, and a boolean is not enough to
--- choose a seam with: a window that is the right-hand child of a vertical
--- split has that split's seam on its *left*, so "the horizontal axis is in
--- play" moved that seam for a drag on the window's right edge. The far side
--- jumped 209 pixels and the side under the pointer did not move at all.
--- Passed straight through, because the side is exactly what `drag_seam` wants
--- and the compositor knew it all along.
-sol.on("resize", function(id, edge_x, edge_y, horizontal_side, vertical_side)
-    if not tiling.active then
-        return
+-- rather than giving the window a size of its own: the compositor does it,
+-- frame by frame, in the tree `sol.arrange` handed it, and says where it
+-- left the seam once the drag is over, as it does for `sol.grow`. The tree
+-- keeps that ratio, so its next arrangement moves nothing.
+sol.on("seam", function(key, node, shares)
+    local tree = tiling.trees[key]
+    if tree and tree:seam_moved(node, shares) and tiling.active then
+        -- Dialogs centred on a window the seam moved go with it.
+        tiling.apply(config.tiling.snap)
     end
-    local monitor = monitors.of(id)
-    local tree = tree_for(monitor)
-    -- The seam goes where the dragged edge goes. Still a position and not a
-    -- delta: a delta would be measured against a layout this very drag just
-    -- changed, and the windows would shake for as long as the button was held.
-    -- The position is relative to the grab all the same, because the
-    -- compositor derives it from the rectangle the drag has produced.
-    --
-    -- Both arms can run: a corner drag is two drags, one seam per axis. Each
-    -- gets its own edge -- `edge_x` for the vertical seam, `edge_y` for the
-    -- horizontal one -- and `drag_seam` reads only the one its side names, so
-    -- neither axis can borrow the other's.
-    for _, side in ipairs({ horizontal_side or false, vertical_side or false }) do
-        if side and not tree:drag_seam(id, side, edge_x, edge_y, options(monitor)) then
-            once("resize: " .. tostring(side) .. " is not a side a window has (left, right, top or bottom)")
-        end
-    end
-    -- Placed immediately. An animation would be chasing the pointer, and the
-    -- pointer wins.
-    tiling.apply({ duration = 0 })
 end)
 
 sol.bind("super+t", tiling.toggle)
@@ -1032,7 +995,7 @@ sol.bind("super+t", tiling.toggle)
 -- which is the property a tree has and a recomputed arrangement does not.
 --
 -- The axis is named, where a drag names a side: a keypress says "wider", not
--- which neighbour gives up the room, so `tree:resize` prefers the seam on the
+-- which neighbour gives up the room, so `sol.grow` prefers the seam on the
 -- right or below and falls back to the other one. Before #120 it moved the
 -- window's immediate parent, and in an ordinary four-window dwindle every
 -- leaf's parent is a horizontal split -- so "wider" reached the centre
@@ -1048,11 +1011,11 @@ local function nudge(axis, by)
     return function()
         local focused = focused_window()
         if focused then
-            -- With the monitor's options, which carry `tiling.minimum`: a
-            -- press no more takes a tile under it than a drag does.
-            local monitor = monitors.of(focused)
-            tree_for(monitor):resize(focused, axis, by, options(monitor))
-            tiling.apply(config.tiling.snap)
+            -- Held to `tiling.minimum` and the applications' own least
+            -- sizes as a drag is: the compositor moves the seam, and `seam`
+            -- above keeps where it went.
+            sol.animate(config.tiling.snap)
+            sol.grow(focused, axis == "width" and "x" or "y", by)
         end
     end
 end
@@ -1103,7 +1066,7 @@ local function focused_tile()
         return nil
     end
     local monitor = monitors.of(id)
-    for _, slot in ipairs(tree_for(monitor):layout(options(monitor))) do
+    for _, slot in ipairs(tree_for(monitor):tiles(options(monitor))) do
         if slot.id == id then
             slot.monitor = monitor
             return slot
@@ -1116,7 +1079,7 @@ end
 -- `at_a_monitors_edge_tiling_crosses_to_the_desk_the_next_monitor_shows`.
 local function tiles_on(name, except)
     local out = {}
-    for _, slot in ipairs(tree_for(name):layout(options(name))) do
+    for _, slot in ipairs(tree_for(name):tiles(options(name))) do
         if slot.id ~= except then
             slot.monitor = name
             out[#out + 1] = slot
